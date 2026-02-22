@@ -2,7 +2,9 @@ use std::io::Write;
 
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize, SlavePty};
-use winit::event_loop::EventLoopProxy;
+use winit::{event::MouseButton, event_loop::EventLoopProxy};
+
+use crate::terminal::SessionId;
 
 pub struct Pty {
     _child: Box<dyn Child>,
@@ -11,12 +13,12 @@ pub struct Pty {
 }
 
 pub enum Event {
-    Closed,
-    Data(Vec<u8>),
+    Closed(SessionId),
+    Data(SessionId, Vec<u8>),
 }
 
 impl Pty {
-    pub fn new(rows: u16, cols: u16, mut tx: EventLoopProxy<Event>) -> Result<Self> {
+    pub fn new(rows: u16, cols: u16, tx: EventLoopProxy<Event>, id: SessionId) -> Result<Self> {
         let system = native_pty_system();
         let pair = system
             .openpty(PtySize {
@@ -29,6 +31,9 @@ impl Pty {
 
         let mut cmd = CommandBuilder::new("cmd.exe");
         cmd.env("TERM", "xterm-256color");
+        std::env::vars_os().for_each(|var| {
+            cmd.env(var.0, var.1);
+        });
 
         let child = pair
             .slave
@@ -50,14 +55,14 @@ impl Pty {
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
-                        _ = tx.send_event(Event::Closed);
+                        _ = tx.send_event(Event::Closed(id));
                         break;
                     }
                     Ok(n) => {
-                        _ = tx.send_event(Event::Data(buf[..n].to_vec()));
+                        _ = tx.send_event(Event::Data(id, buf[..n].to_vec()));
                     }
                     Err(_) => {
-                        _ = tx.send_event(Event::Closed);
+                        _ = tx.send_event(Event::Closed(id));
                         break;
                     }
                 }
@@ -92,7 +97,7 @@ impl Pty {
     }
 
     pub fn add_cursor_key(&mut self, csi_param: Option<u8>, byte: u8, app_cursor: bool) {
-        if app_cursor {
+        if app_cursor && csi_param.is_none() {
             self.add_bytes([0x1b, b'O', byte]);
         } else {
             self.add_csi_key(csi_param, byte);

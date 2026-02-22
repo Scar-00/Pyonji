@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 use bumpalo::{collections::Vec as ArenaVec, Bump as Arena};
 use glyphon::{
     cosmic_text::{FeatureTag, FontFeatures, LineEnding},
-    Attrs, AttrsList, Buffer, Cache, Family, FontSystem, Metrics, Resolution, Shaping, Style,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
+    Attrs, AttrsList, Buffer, Cache, CustomGlyph, Family, FontSystem, Metrics, Resolution, Shaping,
+    Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
 };
 use vt100::Screen;
 use wgpu::{
@@ -87,7 +87,7 @@ pub struct Renderer {
     text_renderer: TextRenderer,
     background_renderer: BackgroundRenderer,
     arena: Arena,
-    buffer: Buffer,
+    line_buffers: Vec<Buffer>,
     font_size: f32,
     line_heigt: f32,
 }
@@ -142,9 +142,10 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let mut font_system = FontSystem::new();
+        /*font_system.db_mut().family_name
         font_system
             .db_mut()
-            .load_font_file("../../../../../Windows/Fonts/Iosevka-Regular.ttc")?;
+            .load_font_file("../../../../../Windows/Fonts/Iosevka-Regular.ttc")?;*/
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let mut viewport = Viewport::new(&device, &cache);
@@ -184,7 +185,7 @@ impl Renderer {
             text_renderer,
             background_renderer,
             arena: Arena::new(),
-            buffer,
+            line_buffers: Vec::new(),
             font_size,
             line_heigt,
         })
@@ -212,11 +213,13 @@ impl Renderer {
                 desired_maximum_frame_latency: 2,
             },
         );
-        self.buffer.set_size(
-            &mut self.font_system,
-            Some(size.width as f32),
-            Some(size.height as f32),
-        );
+        for buf in &mut self.line_buffers {
+            buf.set_size(
+                &mut self.font_system,
+                Some(size.width as f32),
+                Some(self.line_heigt * 2.0),
+            );
+        }
         self.viewport.update(
             &self.queue,
             Resolution {
@@ -258,13 +261,13 @@ impl Renderer {
             .enable(FeatureTag::DISCRETIONARY_LIGATURES);
         let attrs = Attrs::new()
             .family(Family::Name("Iosevka"))
-            .color(glyphon::Color::rgba(0xFF, 0xFF, 0xFF, 0xFF))
-            .font_features(font_features);
+            .color(glyphon::Color::rgba(0xc6, 0xd0, 0xf5, 0xFF));
+        //.font_features(font_features);
         let (rows, cols) = screen.size();
         {
-            let mut cells = ArenaVec::new_in(&self.arena);
-            //skip empty rows
+            let mut rows_vec = ArenaVec::new_in(&self.arena);
             for row in 0..rows {
+                let mut cells = ArenaVec::new_in(&self.arena);
                 for col in 0..cols {
                     let Some(cell) = screen.cell(row, col) else {
                         continue;
@@ -273,7 +276,7 @@ impl Renderer {
                     let fg_color = match cell.fgcolor() {
                         vt100::Color::Rgb(r, g, b) => glyphon::Color::rgb(r, g, b),
                         vt100::Color::Idx(idx) => ansi_index_to_rgb(idx),
-                        _ => glyphon::Color::rgb(0xFF, 0xFF, 0xFF),
+                        _ => glyphon::Color::rgb(0xc6, 0xd0, 0xf5),
                     };
                     let bg_color = match cell.bgcolor() {
                         vt100::Color::Rgb(r, g, b) => glyphon::Color::rgb(r, g, b),
@@ -310,10 +313,38 @@ impl Renderer {
                         cells.push((cell.contents(), attrs));
                     }
                 }
-                cells.push(("\n".to_string(), attrs.clone()))
+                cells.push(("\n".to_string(), attrs.clone()));
+                rows_vec.push(cells);
             }
 
-            let start = Instant::now();
+            if self.line_buffers.len() <= rows as usize {
+                let mut buffer = Buffer::new(
+                    &mut self.font_system,
+                    Metrics::new(self.font_size, self.line_heigt),
+                );
+                buffer.set_size(
+                    &mut self.font_system,
+                    Some(size.width as f32),
+                    Some(size.height as f32),
+                );
+                self.line_buffers.resize(rows as usize, buffer);
+            }
+
+            //let start = Instant::now();
+            for (i, row) in rows_vec.iter().enumerate() {
+                self.line_buffers[i].set_rich_text(
+                    &mut self.font_system,
+                    row.iter().map(|(str, attr)| (str.as_str(), attr.clone())),
+                    &attrs,
+                    Shaping::Advanced,
+                    None,
+                );
+            }
+            //println!("setting text = {:?}", Instant::now() - start);
+
+            /**/
+
+            /*let start = Instant::now();
             self.buffer.set_rich_text(
                 &mut self.font_system,
                 cells.iter().map(|(str, attr)| (str.as_str(), attr.clone())),
@@ -321,24 +352,29 @@ impl Renderer {
                 Shaping::Advanced,
                 None,
             );
-            println!("setting text = {:?}", Instant::now() - start);
+            println!("setting text = {:?}", Instant::now() - start);*/
         }
-        self.buffer.shape_until_scroll(&mut self.font_system, true);
+        //self.buffer.shape_until_scroll(&mut self.font_system, true);
 
-        let text_area = TextArea {
-            buffer: &self.buffer,
-            left: 0.0,
-            top: 0.0,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: 0,
-                right: size.width as i32,
-                bottom: size.height as i32,
-            },
-            default_color: glyphon::Color::rgba(0xFF, 0xFF, 0xFF, 0xFF),
-            custom_glyphs: &[],
-        };
+        let text_areas = self
+            .line_buffers
+            .iter()
+            .enumerate()
+            .map(|(i, buffer)| TextArea {
+                buffer: &buffer,
+                left: 0.0,
+                top: i as f32 * self.line_heigt,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: size.width as i32,
+                    bottom: size.height as i32,
+                },
+                default_color: glyphon::Color::rgba(0xc6, 0xd0, 0xf5, 0xFF),
+                custom_glyphs: &[],
+            })
+            .collect::<Vec<_>>();
 
         self.text_renderer
             .prepare(
@@ -347,7 +383,7 @@ impl Renderer {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [text_area],
+                text_areas,
                 &mut self.swash_cache,
             )
             .context("failed to prepare text")?;
