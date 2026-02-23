@@ -94,4 +94,8 @@ impl SessionManager {
     pub fn active_session_id(&self) -> Option<SessionId> {
         self.active_session
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty()
+    }
 }

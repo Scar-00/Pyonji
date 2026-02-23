@@ -2,18 +2,17 @@ pub mod manager;
 use crate::{puty::Pty, CursorState};
 pub use manager::*;
 use winit::{
-    event::{ElementState, KeyEvent},
+    event::{ElementState, KeyEvent, MouseButton},
     keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey},
 };
 
-pub enum SplitDirection {
+/*pub enum SplitDirection {
     Horizontal,
     Vertical,
 }
 
 pub struct Pane {
     session: SessionId,
-    relative_size: [f32; 2],
     split: Option<(SplitDirection, Box<Self>)>,
 }
 
@@ -21,13 +20,11 @@ impl Pane {
     pub fn new(session: SessionId) -> Self {
         Self {
             session,
-            relative_size: [1.0, 1.0],
             split: None,
         }
     }
 
     pub fn split(&mut self, session: SessionId) {
-        self.relative_size = [0.5, 1.0];
         self.split = Some((SplitDirection::Horizontal, Box::new(Self::new(session))));
     }
 
@@ -43,15 +40,13 @@ impl Pane {
             pane.sessions_internal(sessions);
         }
     }
-}
+}*/
 
 pub struct TerminalSession {
     pub _id: SessionId,
     pub pty: Pty,
     pub vt: vt100::Parser,
     pub cursor_style: CursorState,
-    //pub rows: u16,
-    //pub cols: u16,
 }
 
 impl TerminalSession {
@@ -267,6 +262,14 @@ impl TerminalSession {
                 }
             }
         }
+    }
+
+    pub fn handle_mouse_button(
+        &mut self,
+        _button: MouseButton,
+        _mods: ModifiersState,
+        _dragging: bool,
+    ) {
     }
 
     /*pub fn handle_mouse_button(

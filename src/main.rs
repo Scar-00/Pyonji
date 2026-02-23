@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, feature = "install"), windows_subsystem = "windows")]
+
 mod puty;
 mod renderer;
 mod terminal;
@@ -37,6 +39,7 @@ struct App {
     tabs: [Option<SessionId>; 9],
     action_mode: bool,
     current_tab: usize,
+    dragging_cursor: bool,
 }
 
 fn main() -> Result<()> {
@@ -69,7 +72,7 @@ impl ApplicationHandler<PtyEvent> for App {
         let Ok(window) = event_loop.create_window(
             Window::default_attributes()
                 .with_inner_size(PhysicalSize::new(1280, 720))
-                .with_title("Pty"),
+                .with_title("Pyonji"),
         ) else {
             event_loop.exit();
             return;
@@ -89,10 +92,13 @@ impl ApplicationHandler<PtyEvent> for App {
         window.request_redraw();
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: PtyEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: PtyEvent) {
         match event {
             PtyEvent::Closed(id) => {
                 self.session_manager.remove_session(id);
+                if self.session_manager.is_empty() {
+                    event_loop.exit();
+                }
             }
             PtyEvent::Data(id, data) => {
                 self.session_manager.update_session(id, &data);
@@ -139,8 +145,27 @@ impl ApplicationHandler<PtyEvent> for App {
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
             }
-            WindowEvent::MouseInput { .. } => {
-                //ElementState::
+            WindowEvent::MouseInput { state, button, .. } => {
+                if let Some(session) = self.session_manager.active_session_mut() {
+                    match state {
+                        ElementState::Pressed => {
+                            session.handle_mouse_button(
+                                button,
+                                self.modifiers,
+                                self.dragging_cursor,
+                            );
+                            self.dragging_cursor = true;
+                        }
+                        ElementState::Released => {
+                            session.handle_mouse_button(
+                                button,
+                                self.modifiers,
+                                self.dragging_cursor,
+                            );
+                            self.dragging_cursor = false;
+                        }
+                    }
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {

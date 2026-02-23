@@ -17,3 +17,6 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 vt100 = "0.15"
 wgpu = { version = "28.0.0", default-features = false, features = ["wgsl", "vulkan"] }
 winit = "0.30"
+
+[features]
+install = []

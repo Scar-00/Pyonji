@@ -1,8 +1,8 @@
 use std::io::Write;
 
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize, SlavePty};
-use winit::{event::MouseButton, event_loop::EventLoopProxy};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use winit::event_loop::EventLoopProxy;
 
 use crate::terminal::SessionId;
 
