@@ -59,6 +59,7 @@ fn main() -> Result<()> {
         tabs: [None; 9],
         action_mode: false,
         current_tab: 0,
+        dragging_cursor: false,
     };
 
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -176,6 +177,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         self.action_mode = true;
                         return;
                     } else if self.action_mode {
+                        self.action_mode = false;
                         match code {
                             KeyCode::Digit1 => {
                                 self.switch_tab(0);
@@ -211,7 +213,6 @@ impl ApplicationHandler<PtyEvent> for App {
                             }
                             _ => {}
                         }
-                        self.action_mode = false;
                     }
                 }
                 let is_csi = self.is_csi();

@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::{ffi::OsString, io::Write};
 
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -31,7 +31,12 @@ impl Pty {
 
         let mut cmd = CommandBuilder::new("cmd.exe");
         cmd.env("TERM", "xterm-256color");
-        std::env::vars_os().for_each(|var| {
+        std::env::vars_os().for_each(|mut var| {
+            if var.0 == "PATH" {
+                var.1.push(OsString::from(";C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.39.33519\\lib\\x64"));
+                var.1.push(OsString::from(";C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\Llvm\\x64\\bin"));
+                println!("{:?}", var.1);
+            }
             cmd.env(var.0, var.1);
         });
 
