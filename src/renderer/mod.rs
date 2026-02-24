@@ -1,15 +1,12 @@
 mod background;
+mod glyph;
 use background::BackgroundRenderer;
 
 use std::{sync::Arc, time::Instant};
 
 use anyhow::{Context, Result};
 use bumpalo::{collections::Vec as ArenaVec, Bump as Arena};
-use glyphon::{
-    cosmic_text::{FeatureTag, FontFeatures, LineEnding},
-    Attrs, AttrsList, Buffer, Cache, CustomGlyph, Family, FontSystem, Metrics, Resolution, Shaping,
-    Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
-};
+use unicode_segmentation::UnicodeSegmentation;
 use vt100::Screen;
 use wgpu::{
     Adapter, Backends, CommandEncoderDescriptor, CompositeAlphaMode, Device, DeviceDescriptor,
@@ -20,12 +17,16 @@ use wgpu::{
 };
 use winit::{dpi::PhysicalSize, window::Window};
 
-use crate::CursorState;
+use crate::{renderer::glyph::TerminalRenderer, CursorState};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Color([u8; 4]);
 
 impl Color {
+    pub fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self([r, g, b, 0xFF])
+    }
+
     pub fn to_linear(&self) -> [f32; 4] {
         fn srgb_to_linear(c: u8) -> f32 {
             let c = c as f32 / 255.0;
@@ -55,12 +56,6 @@ impl Color {
     }
 }
 
-impl From<glyphon::Color> for Color {
-    fn from(value: glyphon::Color) -> Self {
-        Self(value.as_rgba())
-    }
-}
-
 impl From<vt100::Color> for Color {
     fn from(value: vt100::Color) -> Self {
         match value {
@@ -79,15 +74,9 @@ pub struct Renderer {
     device: Device,
     queue: Queue,
     format: TextureFormat,
-    font_system: FontSystem,
-    swash_cache: SwashCache,
-    cache: Cache,
-    viewport: Viewport,
-    atlas: TextAtlas,
-    text_renderer: TextRenderer,
     background_renderer: BackgroundRenderer,
+    terminal_renderer: TerminalRenderer,
     arena: Arena,
-    line_buffers: Vec<Buffer>,
     font_size: f32,
     line_heigt: f32,
 }
@@ -141,33 +130,8 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
-        let mut font_system = FontSystem::new();
-        /*font_system.db_mut().family_name
-        font_system
-            .db_mut()
-            .load_font_file("../../../../../Windows/Fonts/Iosevka-Regular.ttc")?;*/
-        let swash_cache = SwashCache::new();
-        let cache = Cache::new(&device);
-        let mut viewport = Viewport::new(&device, &cache);
-        viewport.update(
-            &queue,
-            Resolution {
-                width: size.width as u32,
-                height: size.height as u32,
-            },
-        );
-        let mut atlas = TextAtlas::new(&device, &queue, &cache, config.format);
-        let text_renderer =
-            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
-
-        let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_heigt));
-        buffer.set_size(
-            &mut font_system,
-            Some(size.width as f32),
-            Some(size.height as f32),
-        );
-
         let background_renderer = BackgroundRenderer::new(&device, format);
+        let terminal_renderer = TerminalRenderer::new(&device, &queue, format);
 
         Ok(Renderer {
             window,
@@ -177,15 +141,9 @@ impl Renderer {
             device,
             queue,
             format,
-            font_system,
-            swash_cache,
-            cache,
-            viewport,
-            atlas,
-            text_renderer,
             background_renderer,
+            terminal_renderer,
             arena: Arena::new(),
-            line_buffers: Vec::new(),
             font_size,
             line_heigt,
         })
@@ -211,20 +169,6 @@ impl Renderer {
                 alpha_mode: CompositeAlphaMode::Opaque,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
-            },
-        );
-        for buf in &mut self.line_buffers {
-            buf.set_size(
-                &mut self.font_system,
-                Some(size.width as f32),
-                Some(self.line_heigt * 2.0),
-            );
-        }
-        self.viewport.update(
-            &self.queue,
-            Resolution {
-                width: size.width as u32,
-                height: size.height as u32,
             },
         );
     }
@@ -254,16 +198,7 @@ impl Renderer {
             Err(SurfaceError::Other) => return Ok(()),
         };
 
-        let mut font_features = FontFeatures::new();
-        font_features
-            .enable(FeatureTag::CONTEXTUAL_LIGATURES)
-            .enable(FeatureTag::STANDARD_LIGATURES)
-            .enable(FeatureTag::DISCRETIONARY_LIGATURES);
-        let attrs = Attrs::new()
-            .family(Family::Name("Iosevka"))
-            .color(glyphon::Color::rgba(0xc6, 0xd0, 0xf5, 0xFF));
-        //.font_features(font_features);
-        let (rows, cols) = screen.size();
+        /*let (rows, cols) = screen.size();
         {
             let mut rows_vec = ArenaVec::new_in(&self.arena);
             for row in 0..rows {
@@ -353,46 +288,83 @@ impl Renderer {
                 None,
             );
             println!("setting text = {:?}", Instant::now() - start);*/
-        }
+        }*/
         //self.buffer.shape_until_scroll(&mut self.font_system, true);
 
-        let text_areas = self
-            .line_buffers
-            .iter()
-            .enumerate()
-            .map(|(i, buffer)| TextArea {
-                buffer: &buffer,
-                left: 0.0,
-                top: i as f32 * self.line_heigt,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: size.width as i32,
-                    bottom: size.height as i32,
-                },
-                default_color: glyphon::Color::rgba(0xc6, 0xd0, 0xf5, 0xFF),
-                custom_glyphs: &[],
-            })
-            .collect::<Vec<_>>();
+        let start = Instant::now();
+        let (rows, cols) = screen.size();
+        for row in 0..rows {
+            for col in 0..cols {
+                let Some(cell) = screen.cell(row, col) else {
+                    continue;
+                };
+                let fg_color = match cell.fgcolor() {
+                    vt100::Color::Rgb(r, g, b) => Color::rgb(r, g, b),
+                    vt100::Color::Idx(idx) => ansi_index_to_rgb(idx),
+                    _ => Color::rgb(0xc6, 0xd0, 0xf5),
+                };
+                let bg_color = match cell.bgcolor() {
+                    vt100::Color::Rgb(r, g, b) => Color::rgb(r, g, b),
+                    vt100::Color::Idx(idx) => ansi_index_to_rgb(idx),
+                    _ => Color::rgb(0x18, 0x18, 0x18),
+                };
+                let x = self.font_size / 2.0 * col as f32;
+                let y = self.line_heigt * (row + 1) as f32;
+                {
+                    let [x, y] = self.ndc([x, y]);
+                    let [w, h] = [
+                        self.font_size / size.width as f32,
+                        (self.line_heigt * 2.0) / size.height as f32,
+                    ];
+                    let bg_color = if cell.inverse() { fg_color } else { bg_color };
+                    self.background_renderer
+                        .add_rect(x, y, w, h, bg_color.to_linear());
+                }
+                let fg_color = if cell.inverse() { bg_color } else { fg_color };
+                let contents = cell.contents();
+                for cluster in contents.graphemes(true) {
+                    /*self.terminal_renderer.add_cluster(
+                        &self.queue,
+                        [x, y],
+                        [size.width as f32, size.height as f32],
+                        cluster,
+                        fg_color,
+                    );*/
+                    if cluster.len() != 1 {
+                        self.terminal_renderer.add_cluster(
+                            &self.queue,
+                            [x, y],
+                            [size.width as f32, size.height as f32],
+                            cluster,
+                            fg_color,
+                        );
+                    } else {
+                        for ch in cluster.chars() {
+                            self.terminal_renderer.add_glyph(
+                                &self.queue,
+                                [x, y],
+                                [size.width as f32, size.height as f32],
+                                ch,
+                                fg_color,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        println!("layout cells = {:?}", Instant::now() - start);
 
-        self.text_renderer
-            .prepare(
-                &self.device,
+        //=              ╮  │
+        /*for cluster in "│ │".graphemes(true) {
+            self.terminal_renderer.add_cluster(
                 &self.queue,
-                &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                text_areas,
-                &mut self.swash_cache,
-            )
-            .context("failed to prepare text")?;
+                [0.0, 28.0],
+                [size.width as f32, size.height as f32],
+                cluster,
+                Color::rgb(0xFF, 0xFF, 0xFF),
+            );
+        }*/
 
-        /*self.background_renderer
-        .add_rect(0.0, 0.0, 1.0, 1.0, [1.0, 0.0, 1.0, 1.0]);*/
-
-        //let rows = (size.height as f32 / self.line_height) as u16;
-        //let cols = (size.width as f32 / (self.font_size / 2.0)) as u16;
         if !screen.hide_cursor() {
             let (row, col) = screen.cursor_position();
             let x = self.font_size / 2.0 * col as f32;
@@ -442,10 +414,9 @@ impl Renderer {
             self.background_renderer
                 .render(&self.device, &self.queue, &mut pass)
                 .context("failed to render background")?;
-
-            self.text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)
-                .context("failed to render text")?;
+            self.terminal_renderer
+                .render(&self.device, &self.queue, &mut pass)
+                .context("failed to render terminal")?;
         }
         self.queue.submit(Some(encoder.finish()));
         surface.present();
@@ -454,7 +425,7 @@ impl Renderer {
     }
 }
 
-fn ansi_index_to_rgb(idx: u8) -> glyphon::Color {
+fn ansi_index_to_rgb(idx: u8) -> Color {
     const BASE16: [(u8, u8, u8); 16] = [
         (0x36, 0x38, 0x4a),
         (0xd4, 0x6c, 0x8a),
@@ -476,7 +447,7 @@ fn ansi_index_to_rgb(idx: u8) -> glyphon::Color {
 
     if idx < 16 {
         let rgb = BASE16[idx as usize];
-        return glyphon::Color::rgb(rgb.0, rgb.1, rgb.2);
+        return Color::rgb(rgb.0, rgb.1, rgb.2);
     }
 
     if (16..=231).contains(&idx) {
@@ -485,9 +456,9 @@ fn ansi_index_to_rgb(idx: u8) -> glyphon::Color {
         let g = (n % 36) / 6;
         let b = n % 6;
         let step = [0, 95, 135, 175, 215, 255];
-        return glyphon::Color::rgb(step[r as usize], step[g as usize], step[b as usize]);
+        return Color::rgb(step[r as usize], step[g as usize], step[b as usize]);
     }
 
     let gray = 8u8.saturating_add((idx - 232).saturating_mul(10));
-    glyphon::Color::rgb(gray, gray, gray)
+    Color::rgb(gray, gray, gray)
 }

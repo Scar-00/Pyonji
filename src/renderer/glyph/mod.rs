@@ -1,0 +1,656 @@
+use std::{borrow::Cow, mem};
+
+use ahash::{HashMap, HashMapExt};
+use bytemuck::{Pod, Zeroable};
+use etagere::BucketedAtlasAllocator;
+use swash::{
+    scale::{
+        image::{Content, Image},
+        Render, ScaleContext, Source, StrikeWith,
+    },
+    shape::{Direction, ShapeContext},
+    text::{cluster::CharCluster, Script},
+    zeno::{Format, Placement, Vector},
+    Attributes, CacheKey, Charmap, FontRef,
+};
+use wgpu::{
+    AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
+    BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer, BufferAddress,
+    BufferUsages, ColorTargetState, ColorWrites, Device, Extent3d, FilterMode, FragmentState,
+    MipmapFilterMode, MultisampleState, Origin3d, PipelineCompilationOptions,
+    PipelineLayoutDescriptor, PrimitiveState, Queue, RenderPass, RenderPipeline,
+    RenderPipelineDescriptor, SamplerBindingType, SamplerDescriptor, ShaderModule,
+    ShaderModuleDescriptor, ShaderSource, ShaderStages, TexelCopyBufferLayout,
+    TexelCopyTextureInfo, Texture, TextureAspect, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureSampleType, TextureUsages, TextureViewDimension, VertexAttribute,
+    VertexBufferLayout, VertexState, VertexStepMode,
+};
+
+use crate::renderer::Color;
+
+//  TODO(K): add 2nd. atlas for images with proper filters etc.
+
+pub trait VertexData: Sized {
+    const VERTEX_ATTRIBUTES: &[VertexAttribute];
+
+    fn descriptor() -> VertexBufferLayout<'static> {
+        VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as BufferAddress,
+            step_mode: VertexStepMode::Vertex,
+            attributes: &Self::VERTEX_ATTRIBUTES,
+        }
+    }
+}
+
+const SHADER_SRC: &str = r#"
+struct VertexInput {
+    @location(0) pos: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) variant: u32,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) variant: u32,
+};
+
+@group(0) @binding(0)
+var t_diffuse: texture_2d<f32>;
+@group(0) @binding(1)
+var s_diffuse: sampler;
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = vec4<f32>(in.pos, 0.0, 1.0);
+    out.uv = in.uv;
+    out.color = in.color;
+    out.variant = in.variant;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let tex = textureSample(t_diffuse, s_diffuse, vec2<f32>(in.uv));
+    return vec4<f32>(in.color.xyz, tex.r);
+}
+"#;
+
+const GLYPH_VARIANT_GLYPH: u32 = 0;
+const GLYPH_VARIANT_IMAGE: u32 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Vertex {
+    pos: [f32; 2],
+    uv: [f32; 2],
+    color: [f32; 4],
+    variant: u32,
+}
+
+impl VertexData for Vertex {
+    const VERTEX_ATTRIBUTES: &[VertexAttribute] =
+        &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Uint32];
+}
+
+pub struct Font {
+    data: Vec<u8>,
+    offset: u32,
+    key: CacheKey,
+}
+
+impl Font {
+    pub fn from_file(path: &str, index: usize) -> Option<Self> {
+        let data = std::fs::read(path).ok()?;
+        let font = FontRef::from_index(&data, index)?;
+        let (offset, key) = (font.offset, font.key);
+        Some(Self { data, offset, key })
+    }
+
+    /*pub fn attributes(&self) -> Attributes {
+        self.as_ref().attributes()
+    }*/
+
+    pub fn charmap(&self) -> Charmap<'_> {
+        self.as_ref().charmap()
+    }
+
+    pub fn as_ref(&self) -> FontRef<'_> {
+        FontRef {
+            data: &self.data,
+            offset: self.offset,
+            key: self.key,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Glyph {
+    uv_min: [f32; 2],
+    uv_max: [f32; 2],
+    placement: Placement,
+    content: Content,
+}
+
+pub struct TerminalRenderer {
+    _shader: ShaderModule,
+    pipeline: RenderPipeline,
+    vertex_buffer: Buffer,
+    vertecies: Vec<Vertex>,
+    atlas_texture: Texture,
+
+    uniform_bind_group: BindGroup,
+
+    font: Font,
+    scale_context: ScaleContext,
+    shape_context: ShapeContext,
+    //glyph_map: HashMap<u16, Glyph>,
+    glyph_map: Vec<Option<Glyph>>,
+    atlas: BucketedAtlasAllocator,
+    atlas_size: [f32; 2],
+}
+
+impl TerminalRenderer {
+    const DEFAULT_BUFFER_SIZE: u64 = (1024 * 16) * 32;
+    /*pub const QUAD_POS: [[f32; 3]; 4] = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ];
+
+    pub const QUAD_UV_COORDS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];*/
+
+    fn load_glyph(&mut self, id: u16) -> Option<Image> {
+        let mut scaler = self
+            .scale_context
+            .builder(self.font.as_ref())
+            .size(24.0)
+            .hint(true)
+            .build();
+
+        let offset = Vector::new(0.0, 0.0);
+        Render::new(&[
+            Source::ColorOutline(0),
+            Source::ColorBitmap(StrikeWith::BestFit),
+            Source::Outline,
+        ])
+        .format(Format::Alpha)
+        .offset(offset)
+        .transform(None)
+        .render(&mut scaler, id)
+    }
+
+    fn get_or_create_glyph(&mut self, queue: &Queue, glyph: impl Into<u32>) -> Option<Glyph> {
+        let glyph_id = self.font.charmap().map(glyph);
+
+        /*if let Some(glyph) = self.glyph_map.get(&glyph_id) {
+            return Some(*glyph);
+        }*/
+        if let Some(Some(glyph)) = self.glyph_map.get(glyph_id as usize) {
+            return Some(*glyph);
+        }
+
+        let image = self.load_glyph(glyph_id)?;
+        let alloc = self.atlas.allocate(etagere::size2(
+            image.placement.width as i32,
+            image.placement.height as i32,
+        ))?;
+
+        queue.write_texture(
+            TexelCopyTextureInfo {
+                texture: &self.atlas_texture,
+                mip_level: 0,
+                origin: Origin3d {
+                    x: alloc.rectangle.min.x as u32,
+                    y: alloc.rectangle.min.y as u32,
+                    z: 0,
+                },
+                aspect: TextureAspect::All,
+            },
+            &image.data,
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(image.placement.width),
+                rows_per_image: Some(image.placement.height),
+            },
+            Extent3d {
+                width: image.placement.width,
+                height: image.placement.height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let rect = alloc.rectangle;
+
+        let uv_min_x = (rect.min.x as f32) / self.atlas_size[0];
+        let uv_min_y = (rect.min.y as f32) / self.atlas_size[1];
+        let uv_max_x = (rect.min.x as f32 + image.placement.width as f32) / self.atlas_size[0];
+        let uv_max_y = (rect.min.y as f32 + image.placement.height as f32) / self.atlas_size[1];
+        let glyph = Glyph {
+            uv_min: [uv_min_x, uv_min_y],
+            uv_max: [uv_max_x, uv_max_y],
+            placement: image.placement,
+            content: image.content,
+        };
+        if glyph_id as usize >= self.glyph_map.len() {
+            self.glyph_map.resize(glyph_id as usize + 1, None);
+        }
+        self.glyph_map[glyph_id as usize] = Some(glyph);
+        //self.glyph_map.insert(glyph_id, glyph);
+        Some(glyph)
+    }
+
+    fn get_or_create_glyph_id(&mut self, queue: &Queue, glyph_id: u16) -> Option<Glyph> {
+        if let Some(Some(glyph)) = self.glyph_map.get(glyph_id as usize) {
+            return Some(*glyph);
+        }
+
+        let image = self.load_glyph(glyph_id)?;
+        let alloc = self.atlas.allocate(etagere::size2(
+            image.placement.width as i32,
+            image.placement.height as i32,
+        ))?;
+
+        queue.write_texture(
+            TexelCopyTextureInfo {
+                texture: &self.atlas_texture,
+                mip_level: 0,
+                origin: Origin3d {
+                    x: alloc.rectangle.min.x as u32,
+                    y: alloc.rectangle.min.y as u32,
+                    z: 0,
+                },
+                aspect: TextureAspect::All,
+            },
+            &image.data,
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(image.placement.width),
+                rows_per_image: Some(image.placement.height),
+            },
+            Extent3d {
+                width: image.placement.width,
+                height: image.placement.height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let rect = alloc.rectangle;
+
+        let uv_min_x = (rect.min.x as f32) / self.atlas_size[0];
+        let uv_min_y = (rect.min.y as f32) / self.atlas_size[1];
+        let uv_max_x = (rect.min.x as f32 + image.placement.width as f32) / self.atlas_size[0];
+        let uv_max_y = (rect.min.y as f32 + image.placement.height as f32) / self.atlas_size[1];
+        let glyph = Glyph {
+            uv_min: [uv_min_x, uv_min_y],
+            uv_max: [uv_max_x, uv_max_y],
+            placement: image.placement,
+            content: image.content,
+        };
+        if glyph_id as usize >= self.glyph_map.len() {
+            self.glyph_map.resize(glyph_id as usize + 1, None);
+        }
+        self.glyph_map[glyph_id as usize] = Some(glyph);
+        Some(glyph)
+    }
+
+    pub fn new(device: &Device, _queue: &Queue, format: TextureFormat) -> Self {
+        let tex_limits = device.limits().max_texture_dimension_2d;
+
+        let atlas_allocator =
+            BucketedAtlasAllocator::new(etagere::size2(tex_limits as i32, tex_limits as i32));
+
+        let shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("selection shader"),
+            source: ShaderSource::Wgsl(Cow::Borrowed(SHADER_SRC)),
+        });
+
+        let texture = device.create_texture(&TextureDescriptor {
+            label: Some("font-atlas-texture"),
+            size: Extent3d {
+                width: tex_limits,
+                height: tex_limits,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::R8Unorm,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let view = texture.create_view(&Default::default());
+
+        let sampler = device.create_sampler(&SamplerDescriptor {
+            label: Some("font-atlas-texture-sampler"),
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            address_mode_w: AddressMode::ClampToEdge,
+            mag_filter: FilterMode::Nearest,
+            min_filter: FilterMode::Nearest,
+            mipmap_filter: MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let uniform_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("uniform-bind-group-layout"),
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Texture {
+                            sample_type: TextureSampleType::Float { filterable: true },
+                            view_dimension: TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let uniform_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("uniform-bind-group"),
+            layout: &uniform_bind_group_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::TextureView(&view),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("selection pipeline layout"),
+            bind_group_layouts: &[&uniform_bind_group_layout],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("selection pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: PipelineCompilationOptions::default(),
+                buffers: &[Vertex::descriptor()],
+            },
+            primitive: PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            fragment: Some(FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: PipelineCompilationOptions::default(),
+                targets: &[Some(ColorTargetState {
+                    format: format,
+                    blend: Some(BlendState::ALPHA_BLENDING),
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("background vertices"),
+            size: Self::DEFAULT_BUFFER_SIZE,
+            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        //let font = Font::from_file("C:/Windows/Fonts/Iosevka-Regular.ttc", 0).unwrap();
+        let font = Font::from_file("C:/Windows/Fonts/seguiemj.ttf", 0).unwrap();
+
+        Self {
+            _shader: shader,
+            pipeline,
+            vertex_buffer,
+            vertecies: Vec::new(),
+            uniform_bind_group,
+            atlas_texture: texture,
+
+            //glyph_map: HashMap::new(),
+            glyph_map: Vec::new(),
+            scale_context: ScaleContext::new(),
+            shape_context: ShapeContext::new(),
+            font,
+            atlas: atlas_allocator,
+            atlas_size: [tex_limits as f32, tex_limits as f32],
+        }
+    }
+
+    fn finalize(&mut self, device: &Device, queue: &Queue) {
+        self.maybe_grow_buffer(device);
+        queue.write_buffer(
+            &self.vertex_buffer,
+            0,
+            bytemuck::cast_slice(&self.vertecies),
+        );
+        queue.submit([]);
+    }
+
+    fn maybe_grow_buffer(&mut self, device: &Device) {
+        if self.vertecies.len() * mem::size_of::<Vertex>() >= self.vertex_buffer.size() as usize {
+            self.vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("background vertices"),
+                size: (self.vertecies.len() * mem::size_of::<Vertex>()) as u64,
+                usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+    }
+
+    pub fn render(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        pass: &mut RenderPass,
+    ) -> anyhow::Result<()> {
+        self.finalize(device, queue);
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        pass.draw(0..(self.vertecies.len() as u32), 0..1);
+        self.vertecies.clear();
+        Ok(())
+    }
+
+    pub fn add_glyph(
+        &mut self,
+        queue: &Queue,
+        pos: [f32; 2],
+        screen_size: [f32; 2],
+        glyph: char,
+        color: Color,
+    ) {
+        let color = color.to_linear();
+
+        let Some(glyph) = self.get_or_create_glyph(queue, glyph) else {
+            return;
+        };
+
+        //😞
+
+        let variant = match glyph.content {
+            Content::Mask => GLYPH_VARIANT_GLYPH,
+            Content::Color => GLYPH_VARIANT_IMAGE,
+            _ => GLYPH_VARIANT_GLYPH,
+        };
+
+        let ydt = 24.0 / 4.0;
+
+        let x0 = pos[0] + glyph.placement.left as f32;
+        let y0 = (pos[1] - ydt) - glyph.placement.top as f32; // top-left corner, Y down in pixel space
+        let x1 = x0 + glyph.placement.width as f32;
+        let y1 = y0 + glyph.placement.height as f32;
+
+        let to_ndc = |x: f32, y: f32| -> [f32; 2] {
+            [
+                (x / screen_size[0]) * 2.0 - 1.0,
+                1.0 - (y / screen_size[1]) * 2.0, // flip Y
+            ]
+        };
+
+        let tl = to_ndc(x0, y0);
+        let tr = to_ndc(x1, y0);
+        let bl = to_ndc(x0, y1);
+        let br = to_ndc(x1, y1);
+
+        self.vertecies.push(Vertex {
+            pos: tl,
+            uv: [glyph.uv_min[0], glyph.uv_min[1]],
+            color,
+            variant,
+        });
+        self.vertecies.push(Vertex {
+            pos: tr,
+            uv: [glyph.uv_max[0], glyph.uv_min[1]],
+            color,
+            variant,
+        });
+        self.vertecies.push(Vertex {
+            pos: bl,
+            uv: [glyph.uv_min[0], glyph.uv_max[1]],
+            color,
+            variant,
+        });
+        self.vertecies.push(Vertex {
+            pos: tr,
+            uv: [glyph.uv_max[0], glyph.uv_min[1]],
+            color,
+            variant,
+        });
+        self.vertecies.push(Vertex {
+            pos: bl,
+            uv: [glyph.uv_min[0], glyph.uv_max[1]],
+            color,
+            variant,
+        });
+        self.vertecies.push(Vertex {
+            pos: br,
+            uv: [glyph.uv_max[0], glyph.uv_max[1]],
+            color,
+            variant,
+        });
+    }
+
+    pub fn add_glyph_id(
+        &mut self,
+        queue: &Queue,
+        pos: [f32; 2],
+        screen_size: [f32; 2],
+        glyph: u16,
+        color: Color,
+    ) {
+        let color = color.to_linear();
+
+        let Some(glyph) = self.get_or_create_glyph_id(queue, glyph) else {
+            return;
+        };
+
+        let variant = match glyph.content {
+            Content::Mask => GLYPH_VARIANT_GLYPH,
+            Content::Color => GLYPH_VARIANT_IMAGE,
+            _ => GLYPH_VARIANT_GLYPH,
+        };
+
+        let ydt = 24.0 / 4.0;
+
+        let x0 = pos[0] + glyph.placement.left as f32;
+        let y0 = (pos[1] - ydt) - glyph.placement.top as f32; // top-left corner, Y down in pixel space
+        let x1 = x0 + glyph.placement.width as f32;
+        let y1 = y0 + glyph.placement.height as f32;
+
+        let to_ndc = |x: f32, y: f32| -> [f32; 2] {
+            [
+                (x / screen_size[0]) * 2.0 - 1.0,
+                1.0 - (y / screen_size[1]) * 2.0, // flip Y
+            ]
+        };
+
+        let tl = to_ndc(x0, y0);
+        let tr = to_ndc(x1, y0);
+        let bl = to_ndc(x0, y1);
+        let br = to_ndc(x1, y1);
+
+        self.vertecies.push(Vertex {
+            pos: tl,
+            uv: [glyph.uv_min[0], glyph.uv_min[1]],
+            color,
+            variant,
+        });
+        self.vertecies.push(Vertex {
+            pos: tr,
+            uv: [glyph.uv_max[0], glyph.uv_min[1]],
+            color,
+            variant,
+        });
+        self.vertecies.push(Vertex {
+            pos: bl,
+            uv: [glyph.uv_min[0], glyph.uv_max[1]],
+            color,
+            variant,
+        });
+        self.vertecies.push(Vertex {
+            pos: tr,
+            uv: [glyph.uv_max[0], glyph.uv_min[1]],
+            color,
+            variant,
+        });
+        self.vertecies.push(Vertex {
+            pos: bl,
+            uv: [glyph.uv_min[0], glyph.uv_max[1]],
+            color,
+            variant,
+        });
+        self.vertecies.push(Vertex {
+            pos: br,
+            uv: [glyph.uv_max[0], glyph.uv_max[1]],
+            color,
+            variant,
+        });
+    }
+
+    pub fn add_cluster(
+        &mut self,
+        queue: &Queue,
+        pos: [f32; 2],
+        screen_size: [f32; 2],
+        cluster: &str,
+        color: Color,
+    ) {
+        let mut shaper = self
+            .shape_context
+            .builder(self.font.as_ref())
+            .direction(Direction::RightToLeft)
+            .size(24.0)
+            .build();
+
+        shaper.add_str(cluster);
+
+        let mut glyphs = Vec::new();
+        shaper.shape_with(|cluster| {
+            for glyph in cluster.glyphs {
+                glyphs.push((glyph.id, glyph.x, glyph.y));
+            }
+        });
+        for (id, x, y) in glyphs {
+            self.add_glyph_id(queue, [pos[0] + x, pos[1] + y], screen_size, id, color);
+        }
+    }
+}

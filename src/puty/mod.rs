@@ -35,7 +35,6 @@ impl Pty {
             if var.0 == "PATH" {
                 var.1.push(OsString::from(";C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.39.33519\\lib\\x64"));
                 var.1.push(OsString::from(";C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\Llvm\\x64\\bin"));
-                println!("{:?}", var.1);
             }
             cmd.env(var.0, var.1);
         });

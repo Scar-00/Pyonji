@@ -3,8 +3,8 @@ use std::{borrow::Cow, mem};
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::{
-    wgc::device, BlendState, Buffer, BufferAddress, BufferUsages, ColorTargetState, ColorWrites,
-    Device, FragmentState, MultisampleState, PipelineCompilationOptions, PipelineLayoutDescriptor,
+    BlendState, Buffer, BufferAddress, BufferUsages, ColorTargetState, ColorWrites, Device,
+    FragmentState, MultisampleState, PipelineCompilationOptions, PipelineLayoutDescriptor,
     PrimitiveState, Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor, ShaderModule,
     ShaderModuleDescriptor, ShaderSource, TextureFormat, VertexAttribute, VertexBufferLayout,
     VertexFormat, VertexState, VertexStepMode,
