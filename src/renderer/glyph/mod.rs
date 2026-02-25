@@ -2,7 +2,7 @@ use std::{borrow::Cow, mem};
 
 use ahash::{HashMap, HashMapExt};
 use bytemuck::{Pod, Zeroable};
-use etagere::BucketedAtlasAllocator;
+use etagere::{AtlasAllocator, BucketedAtlasAllocator};
 use swash::{
     scale::{
         image::{Content, Image},
@@ -27,8 +27,6 @@ use wgpu::{
 };
 
 use crate::renderer::Color;
-
-//  TODO(K): add 2nd. atlas for images with proper filters etc.
 
 pub trait VertexData: Sized {
     const VERTEX_ATTRIBUTES: &[VertexAttribute];
@@ -58,9 +56,13 @@ struct VertexOutput {
 };
 
 @group(0) @binding(0)
-var t_diffuse: texture_2d<f32>;
+var glyph_tex: texture_2d<f32>;
 @group(0) @binding(1)
-var s_diffuse: sampler;
+var glyph_samp: sampler;
+@group(0) @binding(2)
+var image_tex: texture_2d<f32>;
+@group(0) @binding(3)
+var image_samp: sampler;
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
@@ -74,8 +76,19 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let tex = textureSample(t_diffuse, s_diffuse, vec2<f32>(in.uv));
-    return vec4<f32>(in.color.xyz, tex.r);
+    switch in.variant {
+        case 0u: {
+            let tex = textureSample(glyph_tex, glyph_samp, vec2<f32>(in.uv));
+            return vec4<f32>(in.color.xyz, tex.r);
+        }
+        case 1u: {
+            return textureSample(image_tex, image_samp, vec2<f32>(in.uv));
+        }
+        default: {
+            return vec4<f32>(1.0);
+        }
+    }
+
 }
 "#;
 
@@ -140,16 +153,17 @@ pub struct TerminalRenderer {
     pipeline: RenderPipeline,
     vertex_buffer: Buffer,
     vertecies: Vec<Vertex>,
-    atlas_texture: Texture,
+    glyph_atlas_texture: Texture,
+    image_atlas_texture: Texture,
 
     uniform_bind_group: BindGroup,
 
     font: Font,
     scale_context: ScaleContext,
     shape_context: ShapeContext,
-    //glyph_map: HashMap<u16, Glyph>,
     glyph_map: Vec<Option<Glyph>>,
-    atlas: BucketedAtlasAllocator,
+    glyph_atlas: BucketedAtlasAllocator,
+    image_atlas: AtlasAllocator,
     atlas_size: [f32; 2],
 }
 
@@ -187,42 +201,72 @@ impl TerminalRenderer {
     fn get_or_create_glyph(&mut self, queue: &Queue, glyph: impl Into<u32>) -> Option<Glyph> {
         let glyph_id = self.font.charmap().map(glyph);
 
-        /*if let Some(glyph) = self.glyph_map.get(&glyph_id) {
-            return Some(*glyph);
-        }*/
         if let Some(Some(glyph)) = self.glyph_map.get(glyph_id as usize) {
             return Some(*glyph);
         }
 
         let image = self.load_glyph(glyph_id)?;
-        let alloc = self.atlas.allocate(etagere::size2(
-            image.placement.width as i32,
-            image.placement.height as i32,
-        ))?;
+        let alloc = if image.content == Content::Mask {
+            let alloc = self.glyph_atlas.allocate(etagere::size2(
+                image.placement.width as i32,
+                image.placement.height as i32,
+            ))?;
 
-        queue.write_texture(
-            TexelCopyTextureInfo {
-                texture: &self.atlas_texture,
-                mip_level: 0,
-                origin: Origin3d {
-                    x: alloc.rectangle.min.x as u32,
-                    y: alloc.rectangle.min.y as u32,
-                    z: 0,
+            queue.write_texture(
+                TexelCopyTextureInfo {
+                    texture: &self.glyph_atlas_texture,
+                    mip_level: 0,
+                    origin: Origin3d {
+                        x: alloc.rectangle.min.x as u32,
+                        y: alloc.rectangle.min.y as u32,
+                        z: 0,
+                    },
+                    aspect: TextureAspect::All,
                 },
-                aspect: TextureAspect::All,
-            },
-            &image.data,
-            TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(image.placement.width),
-                rows_per_image: Some(image.placement.height),
-            },
-            Extent3d {
-                width: image.placement.width,
-                height: image.placement.height,
-                depth_or_array_layers: 1,
-            },
-        );
+                &image.data,
+                TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(image.placement.width),
+                    rows_per_image: Some(image.placement.height),
+                },
+                Extent3d {
+                    width: image.placement.width,
+                    height: image.placement.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            alloc
+        } else {
+            let alloc = self.image_atlas.allocate(etagere::size2(
+                image.placement.width as i32,
+                image.placement.height as i32,
+            ))?;
+
+            queue.write_texture(
+                TexelCopyTextureInfo {
+                    texture: &self.image_atlas_texture,
+                    mip_level: 0,
+                    origin: Origin3d {
+                        x: alloc.rectangle.min.x as u32,
+                        y: alloc.rectangle.min.y as u32,
+                        z: 0,
+                    },
+                    aspect: TextureAspect::All,
+                },
+                &image.data,
+                TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * image.placement.width),
+                    rows_per_image: Some(image.placement.height),
+                },
+                Extent3d {
+                    width: image.placement.width,
+                    height: image.placement.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            alloc
+        };
 
         let rect = alloc.rectangle;
 
@@ -240,7 +284,6 @@ impl TerminalRenderer {
             self.glyph_map.resize(glyph_id as usize + 1, None);
         }
         self.glyph_map[glyph_id as usize] = Some(glyph);
-        //self.glyph_map.insert(glyph_id, glyph);
         Some(glyph)
     }
 
@@ -250,34 +293,67 @@ impl TerminalRenderer {
         }
 
         let image = self.load_glyph(glyph_id)?;
-        let alloc = self.atlas.allocate(etagere::size2(
-            image.placement.width as i32,
-            image.placement.height as i32,
-        ))?;
+        let alloc = if image.content == Content::Mask {
+            let alloc = self.glyph_atlas.allocate(etagere::size2(
+                image.placement.width as i32,
+                image.placement.height as i32,
+            ))?;
 
-        queue.write_texture(
-            TexelCopyTextureInfo {
-                texture: &self.atlas_texture,
-                mip_level: 0,
-                origin: Origin3d {
-                    x: alloc.rectangle.min.x as u32,
-                    y: alloc.rectangle.min.y as u32,
-                    z: 0,
+            queue.write_texture(
+                TexelCopyTextureInfo {
+                    texture: &self.glyph_atlas_texture,
+                    mip_level: 0,
+                    origin: Origin3d {
+                        x: alloc.rectangle.min.x as u32,
+                        y: alloc.rectangle.min.y as u32,
+                        z: 0,
+                    },
+                    aspect: TextureAspect::All,
                 },
-                aspect: TextureAspect::All,
-            },
-            &image.data,
-            TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(image.placement.width),
-                rows_per_image: Some(image.placement.height),
-            },
-            Extent3d {
-                width: image.placement.width,
-                height: image.placement.height,
-                depth_or_array_layers: 1,
-            },
-        );
+                &image.data,
+                TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(image.placement.width),
+                    rows_per_image: Some(image.placement.height),
+                },
+                Extent3d {
+                    width: image.placement.width,
+                    height: image.placement.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            alloc
+        } else {
+            let alloc = self.image_atlas.allocate(etagere::size2(
+                image.placement.width as i32,
+                image.placement.height as i32,
+            ))?;
+
+            queue.write_texture(
+                TexelCopyTextureInfo {
+                    texture: &self.image_atlas_texture,
+                    mip_level: 0,
+                    origin: Origin3d {
+                        x: alloc.rectangle.min.x as u32,
+                        y: alloc.rectangle.min.y as u32,
+                        z: 0,
+                    },
+                    aspect: TextureAspect::All,
+                },
+                &image.data,
+                TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * image.placement.width),
+                    rows_per_image: Some(image.placement.height),
+                },
+                Extent3d {
+                    width: image.placement.width,
+                    height: image.placement.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            alloc
+        };
 
         let rect = alloc.rectangle;
 
@@ -301,15 +377,18 @@ impl TerminalRenderer {
     pub fn new(device: &Device, _queue: &Queue, format: TextureFormat) -> Self {
         let tex_limits = device.limits().max_texture_dimension_2d;
 
-        let atlas_allocator =
+        let glyph_atlas_allocator =
             BucketedAtlasAllocator::new(etagere::size2(tex_limits as i32, tex_limits as i32));
+
+        let image_atlas_allocator =
+            AtlasAllocator::new(etagere::size2(tex_limits as i32, tex_limits as i32));
 
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("selection shader"),
             source: ShaderSource::Wgsl(Cow::Borrowed(SHADER_SRC)),
         });
 
-        let texture = device.create_texture(&TextureDescriptor {
+        let glyph_texture = device.create_texture(&TextureDescriptor {
             label: Some("font-atlas-texture"),
             size: Extent3d {
                 width: tex_limits,
@@ -324,15 +403,43 @@ impl TerminalRenderer {
             view_formats: &[],
         });
 
-        let view = texture.create_view(&Default::default());
+        let glyph_view = glyph_texture.create_view(&Default::default());
 
-        let sampler = device.create_sampler(&SamplerDescriptor {
+        let glyph_sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("font-atlas-texture-sampler"),
             address_mode_u: AddressMode::ClampToEdge,
             address_mode_v: AddressMode::ClampToEdge,
             address_mode_w: AddressMode::ClampToEdge,
             mag_filter: FilterMode::Nearest,
             min_filter: FilterMode::Nearest,
+            mipmap_filter: MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let image_texture = device.create_texture(&TextureDescriptor {
+            label: Some("font-atlas-texture"),
+            size: Extent3d {
+                width: tex_limits,
+                height: tex_limits,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8UnormSrgb,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let image_view = glyph_texture.create_view(&Default::default());
+
+        let image_sampler = device.create_sampler(&SamplerDescriptor {
+            label: Some("font-atlas-texture-sampler"),
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            address_mode_w: AddressMode::ClampToEdge,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
             mipmap_filter: MipmapFilterMode::Nearest,
             ..Default::default()
         });
@@ -357,6 +464,22 @@ impl TerminalRenderer {
                         ty: BindingType::Sampler(SamplerBindingType::Filtering),
                         count: None,
                     },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Texture {
+                            sample_type: TextureSampleType::Float { filterable: true },
+                            view_dimension: TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
             });
 
@@ -366,11 +489,19 @@ impl TerminalRenderer {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: BindingResource::TextureView(&view),
+                    resource: BindingResource::TextureView(&glyph_view),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: BindingResource::Sampler(&sampler),
+                    resource: BindingResource::Sampler(&glyph_sampler),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: BindingResource::TextureView(&image_view),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: BindingResource::Sampler(&image_sampler),
                 },
             ],
         });
@@ -413,8 +544,8 @@ impl TerminalRenderer {
             mapped_at_creation: false,
         });
 
-        //let font = Font::from_file("C:/Windows/Fonts/Iosevka-Regular.ttc", 0).unwrap();
-        let font = Font::from_file("C:/Windows/Fonts/seguiemj.ttf", 0).unwrap();
+        let font = Font::from_file("C:/Windows/Fonts/Iosevka-Regular.ttc", 0).unwrap();
+        //let font = Font::from_file("C:/Windows/Fonts/seguiemj.ttf", 0).unwrap();
 
         Self {
             _shader: shader,
@@ -422,14 +553,15 @@ impl TerminalRenderer {
             vertex_buffer,
             vertecies: Vec::new(),
             uniform_bind_group,
-            atlas_texture: texture,
+            glyph_atlas_texture: glyph_texture,
+            image_atlas_texture: image_texture,
 
-            //glyph_map: HashMap::new(),
             glyph_map: Vec::new(),
             scale_context: ScaleContext::new(),
             shape_context: ShapeContext::new(),
             font,
-            atlas: atlas_allocator,
+            glyph_atlas: glyph_atlas_allocator,
+            image_atlas: image_atlas_allocator,
             atlas_size: [tex_limits as f32, tex_limits as f32],
         }
     }
@@ -484,8 +616,6 @@ impl TerminalRenderer {
             return;
         };
 
-        //😞
-
         let variant = match glyph.content {
             Content::Mask => GLYPH_VARIANT_GLYPH,
             Content::Color => GLYPH_VARIANT_IMAGE,
@@ -495,14 +625,14 @@ impl TerminalRenderer {
         let ydt = 24.0 / 4.0;
 
         let x0 = pos[0] + glyph.placement.left as f32;
-        let y0 = (pos[1] - ydt) - glyph.placement.top as f32; // top-left corner, Y down in pixel space
+        let y0 = (pos[1] - ydt) - glyph.placement.top as f32;
         let x1 = x0 + glyph.placement.width as f32;
         let y1 = y0 + glyph.placement.height as f32;
 
         let to_ndc = |x: f32, y: f32| -> [f32; 2] {
             [
                 (x / screen_size[0]) * 2.0 - 1.0,
-                1.0 - (y / screen_size[1]) * 2.0, // flip Y
+                1.0 - (y / screen_size[1]) * 2.0,
             ]
         };
 
@@ -572,14 +702,14 @@ impl TerminalRenderer {
         let ydt = 24.0 / 4.0;
 
         let x0 = pos[0] + glyph.placement.left as f32;
-        let y0 = (pos[1] - ydt) - glyph.placement.top as f32; // top-left corner, Y down in pixel space
+        let y0 = (pos[1] - ydt) - glyph.placement.top as f32;
         let x1 = x0 + glyph.placement.width as f32;
         let y1 = y0 + glyph.placement.height as f32;
 
         let to_ndc = |x: f32, y: f32| -> [f32; 2] {
             [
                 (x / screen_size[0]) * 2.0 - 1.0,
-                1.0 - (y / screen_size[1]) * 2.0, // flip Y
+                1.0 - (y / screen_size[1]) * 2.0,
             ]
         };
 
