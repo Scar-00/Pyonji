@@ -7,14 +7,14 @@ mod terminal;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use puty::{Event as PtyEvent, Pty};
+use puty::Event as PtyEvent;
 use renderer::Renderer;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
-    event::{ElementState, KeyEvent, WindowEvent},
+    event::{ElementState, Ime, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey},
+    keyboard::{KeyCode, ModifiersState, PhysicalKey},
     window::{Window, WindowId},
 };
 
@@ -39,7 +39,7 @@ struct App {
     tabs: [Option<SessionId>; 9],
     action_mode: bool,
     current_tab: usize,
-    dragging_cursor: bool,
+    cursor_pos: Option<(f64, f64)>,
 }
 
 fn main() -> Result<()> {
@@ -59,7 +59,7 @@ fn main() -> Result<()> {
         tabs: [None; 9],
         action_mode: false,
         current_tab: 0,
-        dragging_cursor: false,
+        cursor_pos: None,
     };
 
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -78,6 +78,7 @@ impl ApplicationHandler<PtyEvent> for App {
             event_loop.exit();
             return;
         };
+        window.set_ime_allowed(true);
         let size = window.inner_size();
         let rows = (size.height as f32 / self.line_height) as u16;
         let cols = (size.width as f32 / (self.font_size / 2.0)) as u16;
@@ -146,26 +147,44 @@ impl ApplicationHandler<PtyEvent> for App {
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_pos = Some((position.x, position.y));
+                if let Some((col, row)) = self.cursor_to_cell(position.x, position.y) {
+                    if let Some(session) = self.session_manager.active_session_mut() {
+                        session.handle_mouse_move(self.modifiers, col, row);
+                    }
+                }
+            }
             WindowEvent::MouseInput { state, button, .. } => {
+                let Some((x, y)) = self.cursor_pos else {
+                    return;
+                };
+                let Some((col, row)) = self.cursor_to_cell(x, y) else {
+                    return;
+                };
                 if let Some(session) = self.session_manager.active_session_mut() {
-                    match state {
-                        ElementState::Pressed => {
-                            session.handle_mouse_button(
-                                button,
-                                self.modifiers,
-                                self.dragging_cursor,
-                            );
-                            self.dragging_cursor = true;
-                        }
-                        ElementState::Released => {
-                            session.handle_mouse_button(
-                                button,
-                                self.modifiers,
-                                self.dragging_cursor,
-                            );
-                            self.dragging_cursor = false;
+                    session.handle_mouse_button(button, state, self.modifiers, col, row);
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let Some((x, y)) = self.cursor_pos else {
+                    return;
+                };
+                let Some((col, row)) = self.cursor_to_cell(x, y) else {
+                    return;
+                };
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(pos) => {
+                        if self.line_height > 0.0 {
+                            (pos.y as f32) / self.line_height
+                        } else {
+                            0.0
                         }
                     }
+                };
+                if let Some(session) = self.session_manager.active_session_mut() {
+                    session.handle_mouse_wheel(lines, self.modifiers, col, row);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -224,12 +243,28 @@ impl ApplicationHandler<PtyEvent> for App {
                 event_loop.exit();
                 return;
             }
+            WindowEvent::Ime(ime) => {
+                //Ime::Preedit
+            }
             _ => {}
         }
     }
 }
 
 impl App {
+    fn cursor_to_cell(&self, x: f64, y: f64) -> Option<(u16, u16)> {
+        if self.cols == 0 || self.rows == 0 || self.font_size <= 0.0 || self.line_height <= 0.0 {
+            return None;
+        }
+
+        let cell_width = self.font_size / 2.0;
+        let col = ((x.max(0.0) as f32) / cell_width).floor() as i32 + 1;
+        let row = ((y.max(0.0) as f32) / self.line_height).floor() as i32 + 1;
+        let col = col.clamp(1, self.cols as i32) as u16;
+        let row = row.clamp(1, self.rows as i32) as u16;
+        Some((col, row))
+    }
+
     fn is_csi(&self) -> Option<u8> {
         let mut value = 1u8;
         if self.modifiers.shift_key() {

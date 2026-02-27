@@ -38,6 +38,8 @@ impl SessionManager {
                 pty: Pty::new(rows, cols, self.proxy.clone(), id)?,
                 vt: vt100::Parser::new(rows, cols, 2000),
                 cursor_style: CursorState::Bar,
+                mouse_pressed_button: None,
+                last_mouse_cell: None,
             },
         );
         Ok(id)

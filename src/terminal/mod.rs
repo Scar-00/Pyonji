@@ -47,6 +47,15 @@ pub struct TerminalSession {
     pub pty: Pty,
     pub vt: vt100::Parser,
     pub cursor_style: CursorState,
+    pub mouse_pressed_button: Option<MouseButton>,
+    pub last_mouse_cell: Option<(u16, u16)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MouseAction {
+    Press,
+    Release,
+    Motion,
 }
 
 impl TerminalSession {
@@ -266,10 +275,164 @@ impl TerminalSession {
 
     pub fn handle_mouse_button(
         &mut self,
-        _button: MouseButton,
-        _mods: ModifiersState,
-        _dragging: bool,
+        button: MouseButton,
+        state: ElementState,
+        mods: ModifiersState,
+        col: u16,
+        row: u16,
     ) {
+        let mode = self.vt.screen().mouse_protocol_mode();
+        if mode == vt100::MouseProtocolMode::None {
+            self.mouse_pressed_button = None;
+            return;
+        }
+
+        match state {
+            ElementState::Pressed => {
+                self.mouse_pressed_button = Some(button);
+                self.send_mouse_event(MouseAction::Press, Some(button), mods, col, row);
+                self.last_mouse_cell = Some((col, row));
+            }
+            ElementState::Released => {
+                self.send_mouse_event(MouseAction::Release, Some(button), mods, col, row);
+                self.mouse_pressed_button = None;
+                self.last_mouse_cell = Some((col, row));
+            }
+        }
+    }
+
+    pub fn handle_mouse_move(&mut self, mods: ModifiersState, col: u16, row: u16) {
+        let mode = self.vt.screen().mouse_protocol_mode();
+        if mode == vt100::MouseProtocolMode::None {
+            return;
+        }
+
+        if self.last_mouse_cell == Some((col, row)) {
+            return;
+        }
+
+        let button = match mode {
+            vt100::MouseProtocolMode::ButtonMotion => {
+                let Some(button) = self.mouse_pressed_button else {
+                    return;
+                };
+                button
+            }
+            vt100::MouseProtocolMode::AnyMotion => {
+                self.mouse_pressed_button.unwrap_or(MouseButton::Other(0))
+            }
+            _ => return,
+        };
+
+        self.send_mouse_event(MouseAction::Motion, Some(button), mods, col, row);
+        self.last_mouse_cell = Some((col, row));
+    }
+
+    pub fn handle_mouse_wheel(&mut self, lines: f32, mods: ModifiersState, col: u16, row: u16) {
+        let mode = self.vt.screen().mouse_protocol_mode();
+        if mode == vt100::MouseProtocolMode::None || lines == 0.0 {
+            return;
+        }
+
+        let mut button_code = if lines > 0.0 { 64u8 } else { 65u8 };
+        if mods.shift_key() {
+            button_code += 4;
+        }
+        if mods.alt_key() {
+            button_code += 8;
+        }
+        if mods.control_key() {
+            button_code += 16;
+        }
+        self.send_mouse_sequence(button_code, false, col, row);
+        self.last_mouse_cell = Some((col, row));
+    }
+
+    fn send_mouse_event(
+        &mut self,
+        action: MouseAction,
+        button: Option<MouseButton>,
+        mods: ModifiersState,
+        col: u16,
+        row: u16,
+    ) {
+        let mode = self.vt.screen().mouse_protocol_mode();
+        match action {
+            MouseAction::Press if mode == vt100::MouseProtocolMode::None => return,
+            MouseAction::Release
+                if !matches!(
+                    mode,
+                    vt100::MouseProtocolMode::PressRelease
+                        | vt100::MouseProtocolMode::ButtonMotion
+                        | vt100::MouseProtocolMode::AnyMotion
+                ) =>
+            {
+                return;
+            }
+            MouseAction::Motion
+                if !matches!(
+                    mode,
+                    vt100::MouseProtocolMode::ButtonMotion | vt100::MouseProtocolMode::AnyMotion
+                ) =>
+            {
+                return;
+            }
+            _ => {}
+        }
+
+        let mut code = match action {
+            MouseAction::Release => 3u8,
+            MouseAction::Motion => {
+                let base = match button {
+                    Some(MouseButton::Left) => 0u8,
+                    Some(MouseButton::Middle) => 1u8,
+                    Some(MouseButton::Right) => 2u8,
+                    _ => 3u8,
+                };
+                base + 32
+            }
+            MouseAction::Press => match button {
+                Some(MouseButton::Left) => 0u8,
+                Some(MouseButton::Middle) => 1u8,
+                Some(MouseButton::Right) => 2u8,
+                _ => return,
+            },
+        };
+
+        if mods.shift_key() {
+            code += 4;
+        }
+        if mods.alt_key() {
+            code += 8;
+        }
+        if mods.control_key() {
+            code += 16;
+        }
+
+        self.send_mouse_sequence(code, action == MouseAction::Release, col, row);
+    }
+
+    fn send_mouse_sequence(&mut self, code: u8, release: bool, col: u16, row: u16) {
+        let encoding = self.vt.screen().mouse_protocol_encoding();
+        match encoding {
+            vt100::MouseProtocolEncoding::Sgr => {
+                let terminator = if release { 'm' } else { 'M' };
+                let seq = format!("\x1b[<{};{};{}{}", code, col, row, terminator);
+                self.pty.add_bytes(seq.as_bytes());
+            }
+            vt100::MouseProtocolEncoding::Default | vt100::MouseProtocolEncoding::Utf8 => {
+                let Some(cb) = code.checked_add(32) else {
+                    return;
+                };
+                let Some(cx) = u8::try_from(col).ok().and_then(|v| v.checked_add(32)) else {
+                    return;
+                };
+                let Some(cy) = u8::try_from(row).ok().and_then(|v| v.checked_add(32)) else {
+                    return;
+                };
+                self.pty.add_bytes([0x1b, b'[', b'M', cb, cx, cy]);
+            }
+        }
     }
 
     /*pub fn handle_mouse_button(
