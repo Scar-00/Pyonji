@@ -2,22 +2,22 @@ mod background;
 mod glyph;
 use background::BackgroundRenderer;
 
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use bumpalo::{collections::Vec as ArenaVec, Bump as Arena};
+use bumpalo::Bump as Arena;
 use unicode_segmentation::UnicodeSegmentation;
 use vt100::Screen;
 use wgpu::{
     Adapter, Backends, CommandEncoderDescriptor, CompositeAlphaMode, Device, DeviceDescriptor,
     ExperimentalFeatures, Features, Instance, InstanceDescriptor, Limits, LoadOp, MemoryHints,
-    MultisampleState, Operations, PowerPreference, PresentMode, Queue, RenderPassColorAttachment,
+    Operations, PowerPreference, PresentMode, Queue, RenderPassColorAttachment,
     RenderPassDescriptor, RequestAdapterOptions, StoreOp, Surface, SurfaceConfiguration,
     SurfaceError, TextureFormat, TextureUsages, Trace,
 };
 use winit::{dpi::PhysicalSize, window::Window};
 
-use crate::{renderer::glyph::TerminalRenderer, CursorState};
+use crate::{renderer::glyph::TerminalRenderer, terminal::CursorState};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Color([u8; 4]);
@@ -68,9 +68,9 @@ impl From<vt100::Color> for Color {
 
 pub struct Renderer {
     window: Arc<Window>,
-    instance: Instance,
+    _instance: Instance,
     surface: Surface<'static>,
-    adapter: Adapter,
+    _adapter: Adapter,
     device: Device,
     queue: Queue,
     format: TextureFormat,
@@ -135,9 +135,9 @@ impl Renderer {
 
         Ok(Renderer {
             window,
-            instance,
+            _instance: instance,
             surface,
-            adapter,
+            _adapter: adapter,
             device,
             queue,
             format,
@@ -165,7 +165,7 @@ impl Renderer {
                 format: self.format.clone(),
                 width: size.width,
                 height: size.height,
-                present_mode: PresentMode::Fifo,
+                present_mode: PresentMode::AutoVsync,
                 alpha_mode: CompositeAlphaMode::Opaque,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
@@ -185,7 +185,7 @@ impl Renderer {
                         format: self.format.clone(),
                         width: size.width,
                         height: size.height,
-                        present_mode: PresentMode::Fifo,
+                        present_mode: PresentMode::AutoVsync,
                         alpha_mode: CompositeAlphaMode::Opaque,
                         view_formats: vec![],
                         desired_maximum_frame_latency: 2,
@@ -198,124 +198,26 @@ impl Renderer {
             Err(SurfaceError::Other) => return Ok(()),
         };
 
-        /*let (rows, cols) = screen.size();
-        {
-            let mut rows_vec = ArenaVec::new_in(&self.arena);
-            for row in 0..rows {
-                let mut cells = ArenaVec::new_in(&self.arena);
-                for col in 0..cols {
-                    let Some(cell) = screen.cell(row, col) else {
-                        continue;
-                    };
-                    let mut attrs = attrs.clone();
-                    let fg_color = match cell.fgcolor() {
-                        vt100::Color::Rgb(r, g, b) => glyphon::Color::rgb(r, g, b),
-                        vt100::Color::Idx(idx) => ansi_index_to_rgb(idx),
-                        _ => glyphon::Color::rgb(0xc6, 0xd0, 0xf5),
-                    };
-                    let bg_color = match cell.bgcolor() {
-                        vt100::Color::Rgb(r, g, b) => glyphon::Color::rgb(r, g, b),
-                        vt100::Color::Idx(idx) => ansi_index_to_rgb(idx),
-                        _ => glyphon::Color::rgb(0x18, 0x18, 0x18),
-                    };
-                    attrs = attrs.color(if cell.inverse() { bg_color } else { fg_color });
-                    {
-                        let x = self.font_size / 2.0 * col as f32;
-                        let y = self.line_heigt * (row + 1) as f32;
-                        let [x, y] = self.ndc([x, y]);
-                        let [w, h] = [
-                            self.font_size / size.width as f32,
-                            (self.line_heigt * 2.0) / size.height as f32,
-                        ];
-                        let bg_color = if cell.inverse() { fg_color } else { bg_color };
-                        self.background_renderer.add_rect(
-                            x,
-                            y,
-                            w,
-                            h,
-                            Color::from(bg_color).to_linear(),
-                        );
-                    }
-                    if cell.bold() {
-                        attrs = attrs.weight(Weight::BOLD);
-                    }
-                    if cell.italic() {
-                        attrs = attrs.style(Style::Italic);
-                    }
-                    if !cell.has_contents() {
-                        cells.push((" ".to_string(), attrs.clone()));
-                    } else {
-                        cells.push((cell.contents(), attrs));
-                    }
-                }
-                cells.push(("\n".to_string(), attrs.clone()));
-                rows_vec.push(cells);
-            }
-
-            if self.line_buffers.len() <= rows as usize {
-                let mut buffer = Buffer::new(
-                    &mut self.font_system,
-                    Metrics::new(self.font_size, self.line_heigt),
-                );
-                buffer.set_size(
-                    &mut self.font_system,
-                    Some(size.width as f32),
-                    Some(size.height as f32),
-                );
-                self.line_buffers.resize(rows as usize, buffer);
-            }
-
-            //let start = Instant::now();
-            for (i, row) in rows_vec.iter().enumerate() {
-                self.line_buffers[i].set_rich_text(
-                    &mut self.font_system,
-                    row.iter().map(|(str, attr)| (str.as_str(), attr.clone())),
-                    &attrs,
-                    Shaping::Advanced,
-                    None,
-                );
-            }
-            //println!("setting text = {:?}", Instant::now() - start);
-
-            /**/
-
-            /*let start = Instant::now();
-            self.buffer.set_rich_text(
-                &mut self.font_system,
-                cells.iter().map(|(str, attr)| (str.as_str(), attr.clone())),
-                &attrs,
-                Shaping::Advanced,
-                None,
-            );
-            println!("setting text = {:?}", Instant::now() - start);*/
-        }*/
-        //self.buffer.shape_until_scroll(&mut self.font_system, true);
-
-        let start = Instant::now();
+        //let start = Instant::now();
         let (rows, cols) = screen.size();
+        let [w, h] = [
+            self.font_size / size.width as f32,
+            (self.line_heigt * 2.0) / size.height as f32,
+        ];
         for row in 0..rows {
             for col in 0..cols {
                 let Some(cell) = screen.cell(row, col) else {
                     continue;
                 };
                 let fg_color = match cell.fgcolor() {
-                    vt100::Color::Rgb(r, g, b) => Color::rgb(r, g, b),
-                    vt100::Color::Idx(idx) => ansi_index_to_rgb(idx),
-                    _ => Color::rgb(0xc6, 0xd0, 0xf5),
+                    vt100::Color::Default => Color::rgb(0xc6, 0xd0, 0xf5),
+                    x => Color::from(x),
                 };
-                let bg_color = match cell.bgcolor() {
-                    vt100::Color::Rgb(r, g, b) => Color::rgb(r, g, b),
-                    vt100::Color::Idx(idx) => ansi_index_to_rgb(idx),
-                    _ => Color::rgb(0x18, 0x18, 0x18),
-                };
+                let bg_color = Color::from(cell.bgcolor());
                 let x = self.font_size / 2.0 * col as f32;
                 let y = self.line_heigt * (row + 1) as f32;
                 {
                     let [x, y] = self.ndc([x, y]);
-                    let [w, h] = [
-                        self.font_size / size.width as f32,
-                        (self.line_heigt * 2.0) / size.height as f32,
-                    ];
                     let bg_color = if cell.inverse() { fg_color } else { bg_color };
                     self.background_renderer
                         .add_rect(x, y, w, h, bg_color.to_linear());
@@ -323,13 +225,6 @@ impl Renderer {
                 let fg_color = if cell.inverse() { bg_color } else { fg_color };
                 let contents = cell.contents();
                 for cluster in contents.graphemes(true) {
-                    /*self.terminal_renderer.add_cluster(
-                        &self.queue,
-                        [x, y],
-                        [size.width as f32, size.height as f32],
-                        cluster,
-                        fg_color,
-                    );*/
                     if cluster.len() != 1 {
                         self.terminal_renderer.add_cluster(
                             &self.queue,
@@ -352,18 +247,7 @@ impl Renderer {
                 }
             }
         }
-        println!("layout cells = {:?}", Instant::now() - start);
-
-        //=              ╮  │
-        /*for cluster in "│ │".graphemes(true) {
-            self.terminal_renderer.add_cluster(
-                &self.queue,
-                [0.0, 28.0],
-                [size.width as f32, size.height as f32],
-                cluster,
-                Color::rgb(0xFF, 0xFF, 0xFF),
-            );
-        }*/
+        //println!("layout cells = {:?}", Instant::now() - start);
 
         if !screen.hide_cursor() {
             let (row, col) = screen.cursor_position();

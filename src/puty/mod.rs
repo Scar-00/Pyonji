@@ -1,13 +1,12 @@
-use std::{ffi::OsString, io::Write};
+use std::{ffi::OsString, io::Write, path::Path};
 
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use winit::event_loop::EventLoopProxy;
 
 use crate::terminal::SessionId;
 
 pub struct Pty {
-    _child: Box<dyn Child>,
     master: Box<dyn MasterPty>,
     writer: Box<dyn Write + Send>,
 }
@@ -18,7 +17,13 @@ pub enum Event {
 }
 
 impl Pty {
-    pub fn new(rows: u16, cols: u16, tx: EventLoopProxy<Event>, id: SessionId) -> Result<Self> {
+    pub fn new(
+        rows: u16,
+        cols: u16,
+        tx: EventLoopProxy<Event>,
+        id: SessionId,
+        path: Option<&Path>,
+    ) -> Result<Self> {
         let system = native_pty_system();
         let pair = system
             .openpty(PtySize {
@@ -30,6 +35,9 @@ impl Pty {
             .context("failed to open pty pair")?;
 
         let mut cmd = CommandBuilder::new("cmd.exe");
+        if let Some(path) = path {
+            cmd.arg(format!("/K \"cd {}\"", path.display()));
+        }
         cmd.env("TERM", "xterm-256color");
         std::env::vars_os().for_each(|mut var| {
             if var.0 == "PATH" {
@@ -39,7 +47,7 @@ impl Pty {
             cmd.env(var.0, var.1);
         });
 
-        let child = pair
+        let mut child = pair
             .slave
             .spawn_command(cmd)
             .context("failed to spawn cmd.exe")?;
@@ -53,6 +61,14 @@ impl Pty {
             .master
             .take_writer()
             .context("failed to take PTY writer")?;
+
+        std::thread::spawn({
+            let tx = tx.clone();
+            move || {
+                _ = child.wait();
+                _ = tx.send_event(Event::Closed(id));
+            }
+        });
 
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
@@ -74,7 +90,6 @@ impl Pty {
         });
 
         Ok(Self {
-            _child: child,
             master: pair.master,
             writer,
         })

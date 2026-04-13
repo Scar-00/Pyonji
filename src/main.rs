@@ -3,6 +3,7 @@
 mod puty;
 mod renderer;
 mod terminal;
+//mod ui;
 
 use std::sync::Arc;
 
@@ -12,20 +13,14 @@ use renderer::Renderer;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
-    event::{ElementState, Ime, MouseScrollDelta, WindowEvent},
+    event::{ElementState, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, ModifiersState, PhysicalKey},
-    window::{Window, WindowId},
+    platform::windows::IconExtWindows,
+    window::{Icon, Window, WindowId},
 };
 
 use crate::terminal::{SessionId, SessionManager};
-
-#[derive(Debug)]
-enum CursorState {
-    Bar,
-    Block,
-    Underline,
-}
 
 struct App {
     renderer: Option<Renderer>,
@@ -68,12 +63,20 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+impl App {
+    const TITLE: &str = "Pyonji";
+}
+
 impl ApplicationHandler<PtyEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let icon = Icon::from_path("./resources/icon.ico", None)
+            .inspect_err(|e| println!("icon-err = {e}"))
+            .ok();
         let Ok(window) = event_loop.create_window(
             Window::default_attributes()
                 .with_inner_size(PhysicalSize::new(1280, 720))
-                .with_title("Pyonji"),
+                .with_window_icon(icon)
+                .with_title(Self::TITLE),
         ) else {
             event_loop.exit();
             return;
@@ -97,10 +100,14 @@ impl ApplicationHandler<PtyEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: PtyEvent) {
         match event {
             PtyEvent::Closed(id) => {
+                println!("session closed = {id:?}");
                 self.session_manager.remove_session(id);
                 if self.session_manager.is_empty() {
                     event_loop.exit();
                 }
+                self.tabs[self.current_tab] = None;
+                self.switch_tab(self.current_tab.saturating_sub(1));
+                self.window.as_ref().map(|window| window.request_redraw());
             }
             PtyEvent::Data(id, data) => {
                 self.session_manager.update_session(id, &data);
@@ -244,6 +251,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 return;
             }
             WindowEvent::Ime(ime) => {
+                println!("ime = {ime:?}");
                 //Ime::Preedit
             }
             _ => {}
@@ -291,6 +299,7 @@ impl App {
             self.session_manager.set_active_session(id);
             self.current_tab = tab;
             if let Some(window) = self.window.as_ref() {
+                window.set_title(&format!("{} - Tab: {}", Self::TITLE, self.current_tab));
                 window.request_redraw();
             }
         } else {
@@ -299,6 +308,7 @@ impl App {
                 self.session_manager.set_active_session(id);
                 self.current_tab = tab;
                 if let Some(window) = self.window.as_ref() {
+                    window.set_title(&format!("{} - Tab: {}", Self::TITLE, self.current_tab));
                     window.request_redraw();
                 }
             }

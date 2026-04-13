@@ -3,6 +3,9 @@ name = "pyonji"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+install = []
+
 [dependencies]
 anyhow = "1.0"
 bumpalo = { version = "3.20.2", features = ["collections"] }
@@ -19,6 +22,7 @@ wgpu = { version = "28.0.0", default-features = false, features = ["wgsl", "vulk
 winit = "0.30"
 unicode-segmentation = "1.12"
 ahash = "0.8.12"
+fontdb = "0.23.0"
 
-[features]
-install = []
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.30"

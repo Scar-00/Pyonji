@@ -4,8 +4,7 @@ use winit::event_loop::EventLoopProxy;
 
 use crate::{
     puty::{Event, Pty},
-    terminal::TerminalSession,
-    CursorState,
+    terminal::{CursorState, TerminalSession},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -35,7 +34,7 @@ impl SessionManager {
             id,
             TerminalSession {
                 _id: id,
-                pty: Pty::new(rows, cols, self.proxy.clone(), id)?,
+                pty: Pty::new(rows, cols, self.proxy.clone(), id, None)?,
                 vt: vt100::Parser::new(rows, cols, 2000),
                 cursor_style: CursorState::Bar,
                 mouse_pressed_button: None,

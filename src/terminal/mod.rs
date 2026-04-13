@@ -1,10 +1,17 @@
 pub mod manager;
-use crate::{puty::Pty, CursorState};
+use crate::puty::Pty;
 pub use manager::*;
 use winit::{
     event::{ElementState, KeyEvent, MouseButton},
     keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey},
 };
+
+#[derive(Debug)]
+pub enum CursorState {
+    Bar,
+    Block,
+    Underline,
+}
 
 /*pub enum SplitDirection {
     Horizontal,
