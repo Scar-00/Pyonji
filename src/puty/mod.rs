@@ -36,7 +36,7 @@ impl Pty {
 
         let mut cmd = CommandBuilder::new("cmd.exe");
         if let Some(path) = path {
-            cmd.arg(format!("/K \"cd {}\"", path.display()));
+            cmd.arg(format!("/K cd {}", path.display()));
         }
         cmd.env("TERM", "xterm-256color");
         std::env::vars_os().for_each(|mut var| {

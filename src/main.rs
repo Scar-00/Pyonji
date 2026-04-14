@@ -5,9 +5,10 @@ mod renderer;
 mod terminal;
 //mod ui;
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
+use clap::Parser;
 use puty::Event as PtyEvent;
 use renderer::Renderer;
 use winit::{
@@ -16,13 +17,18 @@ use winit::{
     event::{ElementState, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, ModifiersState, PhysicalKey},
-    platform::windows::IconExtWindows,
     window::{Icon, Window, WindowId},
 };
 
 use crate::terminal::{SessionId, SessionManager};
 
+#[derive(clap::Parser)]
+struct Cli {
+    path: Option<PathBuf>,
+}
+
 struct App {
+    args: Cli,
     renderer: Option<Renderer>,
     window: Option<Arc<Window>>,
     session_manager: SessionManager,
@@ -38,11 +44,14 @@ struct App {
 }
 
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+
     let event_loop = EventLoop::<PtyEvent>::with_user_event()
         .build()
         .context("failed to create event loop")?;
     let proxy = event_loop.create_proxy();
     let mut app = App {
+        args: cli,
         renderer: None,
         window: None,
         session_manager: SessionManager::new(proxy),
@@ -65,16 +74,24 @@ fn main() -> Result<()> {
 
 impl App {
     const TITLE: &str = "Pyonji";
+    const ICON: &[u8] = include_bytes!("../resources/icon.ico");
 }
 
 impl ApplicationHandler<PtyEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let icon = Icon::from_path("./resources/icon.ico", None)
-            .inspect_err(|e| println!("icon-err = {e}"))
-            .ok();
+        let icon = image::load_from_memory(Self::ICON)
+            .ok()
+            .map(|image| {
+                let data = image.to_rgba8().to_vec();
+                Icon::from_rgba(data, image.width(), image.height())
+                    .inspect_err(|e| println!("icon-err = {e}"))
+                    .ok()
+            })
+            .flatten();
         let Ok(window) = event_loop.create_window(
             Window::default_attributes()
                 .with_inner_size(PhysicalSize::new(1280, 720))
+                .with_active(true)
                 .with_window_icon(icon)
                 .with_title(Self::TITLE),
         ) else {
@@ -90,7 +107,11 @@ impl ApplicationHandler<PtyEvent> for App {
         self.window = Some(window.clone());
         self.rows = rows;
         self.cols = cols;
-        if let Ok(session) = self.session_manager.create_session(rows, cols) {
+        if let Ok(session) = self.session_manager.create_session(
+            rows,
+            cols,
+            self.args.path.as_ref().map(|pb| pb.as_path()),
+        ) {
             self.session_manager.set_active_session(session);
             self.tabs[0] = Some(session);
         }
@@ -303,7 +324,10 @@ impl App {
                 window.request_redraw();
             }
         } else {
-            if let Ok(id) = self.session_manager.create_session(self.rows, self.cols) {
+            if let Ok(id) = self
+                .session_manager
+                .create_session(self.rows, self.cols, None)
+            {
                 self.tabs[tab] = Some(id);
                 self.session_manager.set_active_session(id);
                 self.current_tab = tab;

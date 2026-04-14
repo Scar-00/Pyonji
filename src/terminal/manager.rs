@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 use winit::event_loop::EventLoopProxy;
 
 use crate::{
@@ -27,14 +27,19 @@ impl SessionManager {
         }
     }
 
-    pub fn create_session(&mut self, rows: u16, cols: u16) -> Result<SessionId> {
+    pub fn create_session(
+        &mut self,
+        rows: u16,
+        cols: u16,
+        path: Option<&Path>,
+    ) -> Result<SessionId> {
         let id = SessionId(self.current_id);
         self.current_id += 1;
         self.sessions.insert(
             id,
             TerminalSession {
                 _id: id,
-                pty: Pty::new(rows, cols, self.proxy.clone(), id, None)?,
+                pty: Pty::new(rows, cols, self.proxy.clone(), id, path)?,
                 vt: vt100::Parser::new(rows, cols, 2000),
                 cursor_style: CursorState::Bar,
                 mouse_pressed_button: None,
