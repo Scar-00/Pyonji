@@ -1,5 +1,5 @@
 pub mod manager;
-use crate::puty::Pty;
+use crate::pty::Pty;
 pub use manager::*;
 use winit::{
     event::{ElementState, KeyEvent, MouseButton},
@@ -66,6 +66,35 @@ enum MouseAction {
 }
 
 impl TerminalSession {
+    pub fn uses_local_scrollback(&self) -> bool {
+        let screen = self.vt.screen();
+        !screen.alternate_screen() && screen.mouse_protocol_mode() == vt100::MouseProtocolMode::None
+    }
+
+    pub fn reset_scrollback(&mut self) -> bool {
+        let screen = self.vt.screen();
+        if screen.scrollback() == 0 {
+            return false;
+        }
+        self.vt.screen_mut().set_scrollback(0);
+        true
+    }
+
+    pub fn scroll_scrollback(&mut self, delta_lines: i32) -> bool {
+        if !self.uses_local_scrollback() || delta_lines == 0 {
+            return false;
+        }
+
+        let current = self.vt.screen().scrollback();
+        let next = if delta_lines.is_positive() {
+            current.saturating_add(delta_lines as usize)
+        } else {
+            current.saturating_sub(delta_lines.unsigned_abs() as usize)
+        };
+        self.vt.screen_mut().set_scrollback(next);
+        self.vt.screen().scrollback() != current
+    }
+
     fn interrupt_pty_data(&mut self, data: &[u8]) {
         let Ok(str) = std::str::from_utf8(data) else {
             return;

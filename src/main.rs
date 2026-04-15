@@ -1,6 +1,6 @@
 #![cfg_attr(all(windows, feature = "install"), windows_subsystem = "windows")]
 
-mod puty;
+mod pty;
 mod renderer;
 mod terminal;
 //mod ui;
@@ -9,7 +9,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use puty::Event as PtyEvent;
+use pty::Event as PtyEvent;
 use renderer::Renderer;
 use winit::{
     application::ApplicationHandler,
@@ -41,6 +41,7 @@ struct App {
     action_mode: bool,
     current_tab: usize,
     cursor_pos: Option<(f64, f64)>,
+    wheel_remainder: f32,
 }
 
 fn main() -> Result<()> {
@@ -64,6 +65,7 @@ fn main() -> Result<()> {
         action_mode: false,
         current_tab: 0,
         cursor_pos: None,
+        wheel_remainder: 0.0,
     };
 
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -121,13 +123,16 @@ impl ApplicationHandler<PtyEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: PtyEvent) {
         match event {
             PtyEvent::Closed(id) => {
-                println!("session closed = {id:?}");
                 self.session_manager.remove_session(id);
                 if self.session_manager.is_empty() {
                     event_loop.exit();
                 }
-                self.tabs[self.current_tab] = None;
-                self.switch_tab(self.current_tab.saturating_sub(1));
+                if let Some(tab) = self.tabs.iter().position(|session| *session == Some(id)) {
+                    self.tabs[tab] = None;
+                    if self.current_tab == tab {
+                        self.switch_to_previous_live_tab_or_stay(tab);
+                    }
+                }
                 self.window.as_ref().map(|window| window.request_redraw());
             }
             PtyEvent::Data(id, data) => {
@@ -179,7 +184,17 @@ impl ApplicationHandler<PtyEvent> for App {
                 self.cursor_pos = Some((position.x, position.y));
                 if let Some((col, row)) = self.cursor_to_cell(position.x, position.y) {
                     if let Some(session) = self.session_manager.active_session_mut() {
+                        let reset_scrollback = if session.uses_local_scrollback() {
+                            false
+                        } else {
+                            session.reset_scrollback()
+                        };
                         session.handle_mouse_move(self.modifiers, col, row);
+                        if reset_scrollback {
+                            if let Some(window) = self.window.as_ref() {
+                                window.request_redraw();
+                            }
+                        }
                     }
                 }
             }
@@ -191,7 +206,17 @@ impl ApplicationHandler<PtyEvent> for App {
                     return;
                 };
                 if let Some(session) = self.session_manager.active_session_mut() {
+                    let reset_scrollback = if session.uses_local_scrollback() {
+                        false
+                    } else {
+                        session.reset_scrollback()
+                    };
                     session.handle_mouse_button(button, state, self.modifiers, col, row);
+                    if reset_scrollback {
+                        if let Some(window) = self.window.as_ref() {
+                            window.request_redraw();
+                        }
+                    }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -211,8 +236,32 @@ impl ApplicationHandler<PtyEvent> for App {
                         }
                     }
                 };
+                let uses_local_scrollback = self
+                    .session_manager
+                    .active_session()
+                    .is_some_and(|session| session.uses_local_scrollback());
+                let whole_lines = if uses_local_scrollback {
+                    self.take_wheel_steps(lines)
+                } else {
+                    self.wheel_remainder = 0.0;
+                    0
+                };
                 if let Some(session) = self.session_manager.active_session_mut() {
-                    session.handle_mouse_wheel(lines, self.modifiers, col, row);
+                    if uses_local_scrollback {
+                        if whole_lines != 0 && session.scroll_scrollback(whole_lines) {
+                            if let Some(window) = self.window.as_ref() {
+                                window.request_redraw();
+                            }
+                        }
+                    } else {
+                        let reset_scrollback = session.reset_scrollback();
+                        session.handle_mouse_wheel(lines, self.modifiers, col, row);
+                        if reset_scrollback {
+                            if let Some(window) = self.window.as_ref() {
+                                window.request_redraw();
+                            }
+                        }
+                    }
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -250,12 +299,24 @@ impl ApplicationHandler<PtyEvent> for App {
                                 self.switch_tab(5);
                                 return;
                             }
+                            KeyCode::Digit7 => {
+                                self.switch_tab(6);
+                                return;
+                            }
+                            KeyCode::Digit8 => {
+                                self.switch_tab(7);
+                                return;
+                            }
+                            KeyCode::Digit9 => {
+                                self.switch_tab(8);
+                                return;
+                            }
                             KeyCode::KeyN => {
-                                self.switch_tab((self.current_tab + 1).max(5));
+                                self.switch_tab(self.next_tab_index());
                                 return;
                             }
                             KeyCode::KeyP => {
-                                self.switch_tab((self.current_tab - 1).min(0));
+                                self.switch_tab(self.previous_tab_index());
                                 return;
                             }
                             _ => {}
@@ -264,7 +325,13 @@ impl ApplicationHandler<PtyEvent> for App {
                 }
                 let is_csi = self.is_csi();
                 if let Some(session) = self.session_manager.active_session_mut() {
+                    let reset_scrollback = session.reset_scrollback();
                     session.handle_key_press(&event, self.modifiers, is_csi);
+                    if reset_scrollback {
+                        if let Some(window) = self.window.as_ref() {
+                            window.request_redraw();
+                        }
+                    }
                 }
             }
             WindowEvent::CloseRequested => {
@@ -281,6 +348,30 @@ impl ApplicationHandler<PtyEvent> for App {
 }
 
 impl App {
+    fn next_tab_index(&self) -> usize {
+        (self.current_tab + 1) % self.tabs.len()
+    }
+
+    fn previous_tab_index(&self) -> usize {
+        if self.current_tab == 0 {
+            self.tabs.len() - 1
+        } else {
+            self.current_tab - 1
+        }
+    }
+
+    fn switch_to_previous_live_tab_or_stay(&mut self, closed_tab: usize) {
+        if let Some(tab) = (0..self.tabs.len())
+            .map(|offset| (closed_tab + self.tabs.len() - 1 - offset) % self.tabs.len())
+            .find(|&tab| self.tabs[tab].is_some())
+        {
+            self.switch_tab(tab);
+            return;
+        }
+
+        self.current_tab = closed_tab.min(self.tabs.len().saturating_sub(1));
+    }
+
     fn cursor_to_cell(&self, x: f64, y: f64) -> Option<(u16, u16)> {
         if self.cols == 0 || self.rows == 0 || self.font_size <= 0.0 || self.line_height <= 0.0 {
             return None;
@@ -312,6 +403,19 @@ impl App {
         }
     }
 
+    fn take_wheel_steps(&mut self, delta_lines: f32) -> i32 {
+        let total = self.wheel_remainder + delta_lines;
+        let whole = if total > 0.0 {
+            total.floor() as i32
+        } else if total < 0.0 {
+            total.ceil() as i32
+        } else {
+            0
+        };
+        self.wheel_remainder = total - whole as f32;
+        whole
+    }
+
     fn switch_tab(&mut self, tab: usize) {
         if self.session_manager.active_session_id() == self.tabs[tab] {
             return;
@@ -319,6 +423,7 @@ impl App {
         if let Some(id) = self.tabs[tab] {
             self.session_manager.set_active_session(id);
             self.current_tab = tab;
+            self.wheel_remainder = 0.0;
             if let Some(window) = self.window.as_ref() {
                 window.set_title(&format!("{} - Tab: {}", Self::TITLE, self.current_tab));
                 window.request_redraw();
@@ -331,6 +436,7 @@ impl App {
                 self.tabs[tab] = Some(id);
                 self.session_manager.set_active_session(id);
                 self.current_tab = tab;
+                self.wheel_remainder = 0.0;
                 if let Some(window) = self.window.as_ref() {
                     window.set_title(&format!("{} - Tab: {}", Self::TITLE, self.current_tab));
                     window.request_redraw();

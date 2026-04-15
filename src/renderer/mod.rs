@@ -249,7 +249,7 @@ impl Renderer {
         }
         //println!("layout cells = {:?}", Instant::now() - start);
 
-        if !screen.hide_cursor() {
+        if !screen.hide_cursor() && screen.scrollback() == 0 {
             let (row, col) = screen.cursor_position();
             let x = self.font_size / 2.0 * col as f32;
             let y = self.line_heigt * (row + 1) as f32;

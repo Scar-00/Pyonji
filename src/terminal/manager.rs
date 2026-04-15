@@ -3,7 +3,7 @@ use std::{collections::HashMap, path::Path};
 use winit::event_loop::EventLoopProxy;
 
 use crate::{
-    puty::{Event, Pty},
+    pty::{Event, Pty},
     terminal::{CursorState, TerminalSession},
 };
 
@@ -64,7 +64,7 @@ impl SessionManager {
     pub fn resize_sessions(&mut self, rows: u16, cols: u16) {
         for session in self.sessions.values_mut() {
             session.pty.resize(rows, cols);
-            session.vt.set_size(rows, cols);
+            session.vt.screen_mut().set_size(rows, cols);
         }
     }
 

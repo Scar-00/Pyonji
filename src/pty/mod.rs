@@ -2,6 +2,7 @@ use std::{ffi::OsString, io::Write, path::Path};
 
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use vswhom::VsFindResult;
 use winit::event_loop::EventLoopProxy;
 
 use crate::terminal::SessionId;
@@ -36,11 +37,26 @@ impl Pty {
 
         let mut cmd = CommandBuilder::new("cmd.exe");
         if let Some(path) = path {
-            cmd.arg(format!("/K cd {}", path.display()));
+            cmd.cwd(path);
         }
         cmd.env("TERM", "xterm-256color");
+        let vs = VsFindResult::search();
         std::env::vars_os().for_each(|mut var| {
             if var.0 == "PATH" {
+                if let Some(ref vs) = vs {
+                    vs.windows_sdk_um_library_path.as_ref().map(|path| {
+                        var.1.push(OsString::from(format!(";{}", path.display())));
+                    });
+                    vs.windows_sdk_ucrt_library_path.as_ref().map(|path| {
+                        var.1.push(OsString::from(format!(";{}", path.display())));
+                    });
+                    vs.windows_sdk_root.as_ref().map(|path| {
+                        var.1.push(OsString::from(format!(";{}", path.display())));
+                    });
+                    vs.vs_exe_path.as_ref().map(|path| {
+                        var.1.push(OsString::from(format!(";{}", path.display())));
+                    });
+                }
                 var.1.push(OsString::from(";C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.39.33519\\lib\\x64"));
                 var.1.push(OsString::from(";C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\Llvm\\x64\\bin"));
             }
