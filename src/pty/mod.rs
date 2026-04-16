@@ -57,8 +57,6 @@ impl Pty {
                         var.1.push(OsString::from(format!(";{}", path.display())));
                     });
                 }
-                var.1.push(OsString::from(";C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.39.33519\\lib\\x64"));
-                var.1.push(OsString::from(";C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\Llvm\\x64\\bin"));
             }
             cmd.env(var.0, var.1);
         });
