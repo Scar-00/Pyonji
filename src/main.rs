@@ -105,6 +105,8 @@ impl ApplicationHandler<PtyEvent> for App {
         let rows = (size.height as f32 / self.line_height) as u16;
         let cols = (size.width as f32 / (self.font_size / 2.0)) as u16;
         let window = Arc::new(window);
+        self.font_size = self.font_size * window.scale_factor() as f32;
+        self.line_height = self.line_height * window.scale_factor() as f32;
         self.renderer = Renderer::new(window.clone(), self.font_size, self.line_height).ok();
         self.window = Some(window.clone());
         self.rows = rows;
