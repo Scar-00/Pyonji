@@ -1,4 +1,4 @@
-# Pyonji
+ Pyonji
 
 A GPU-accelerated terminal emulator written in Rust.
 
@@ -46,7 +46,6 @@ cargo run --release
 
 - [wgpu](https://wgpu.rs/) - GPU rendering
 - [winit](https://github.com/rust-windowing/winit) - Window management
-- [glyphon](https://github.com/grovesNL/glyphon) - GPU-accelerated text rendering
 - [vt100](https://github.com/doy/vt100-rust) - Terminal emulation
 - [portable-pty](https://github.com/wez/wezterm/tree/main/pty) - PTY handling
 

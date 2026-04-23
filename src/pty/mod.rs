@@ -1,4 +1,8 @@
-use std::{ffi::OsString, io::Write, path::Path};
+use std::{
+    ffi::OsString,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
@@ -10,6 +14,8 @@ use crate::terminal::SessionId;
 pub struct Pty {
     master: Box<dyn MasterPty>,
     writer: Box<dyn Write + Send>,
+    process_id: Option<u32>,
+    start_dir: Option<PathBuf>,
 }
 
 pub enum Event {
@@ -75,6 +81,10 @@ impl Pty {
             .master
             .take_writer()
             .context("failed to take PTY writer")?;
+        let process_id = child.process_id();
+        let start_dir = path
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok());
 
         std::thread::spawn({
             let tx = tx.clone();
@@ -106,6 +116,8 @@ impl Pty {
         Ok(Self {
             master: pair.master,
             writer,
+            process_id,
+            start_dir,
         })
     }
 
@@ -145,4 +157,116 @@ impl Pty {
             pixel_height: 0,
         });
     }
+
+    pub fn current_dir(&self) -> Option<PathBuf> {
+        self.live_current_dir().or_else(|| self.start_dir.clone())
+    }
+
+    #[cfg(windows)]
+    fn live_current_dir(&self) -> Option<PathBuf> {
+        use std::{
+            mem::{size_of, zeroed},
+            ptr::null_mut,
+        };
+
+        use ntapi::{
+            ntpebteb::PEB,
+            ntpsapi::{
+                NtQueryInformationProcess, ProcessBasicInformation, PROCESS_BASIC_INFORMATION,
+            },
+            ntrtl::RTL_USER_PROCESS_PARAMETERS,
+        };
+        use winapi::um::{
+            handleapi::CloseHandle,
+            memoryapi::ReadProcessMemory,
+            processthreadsapi::OpenProcess,
+            winnt::{PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ},
+        };
+
+        let pid = self.process_id?;
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid);
+            if process.is_null() {
+                return None;
+            }
+
+            let mut basic_info: PROCESS_BASIC_INFORMATION = zeroed();
+            let status = NtQueryInformationProcess(
+                process,
+                ProcessBasicInformation,
+                &mut basic_info as *mut _ as *mut _,
+                size_of::<PROCESS_BASIC_INFORMATION>() as u32,
+                null_mut(),
+            );
+            if status < 0 {
+                CloseHandle(process);
+                return None;
+            }
+
+            let mut peb: PEB = zeroed();
+            let mut bytes_read = 0usize;
+            if ReadProcessMemory(
+                process,
+                basic_info.PebBaseAddress as *const _,
+                &mut peb as *mut _ as *mut _,
+                size_of::<PEB>(),
+                &mut bytes_read,
+            ) == 0
+            {
+                CloseHandle(process);
+                return None;
+            }
+
+            let mut params: RTL_USER_PROCESS_PARAMETERS = zeroed();
+            if ReadProcessMemory(
+                process,
+                peb.ProcessParameters as *const _,
+                &mut params as *mut _ as *mut _,
+                size_of::<RTL_USER_PROCESS_PARAMETERS>(),
+                &mut bytes_read,
+            ) == 0
+            {
+                CloseHandle(process);
+                return None;
+            }
+
+            let path = read_remote_unicode_string(process, params.CurrentDirectory.DosPath);
+            CloseHandle(process);
+            path
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn live_current_dir(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn read_remote_unicode_string(
+    process: winapi::shared::ntdef::HANDLE,
+    value: winapi::shared::ntdef::UNICODE_STRING,
+) -> Option<PathBuf> {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+    use winapi::um::memoryapi::ReadProcessMemory;
+
+    if value.Buffer.is_null() || value.Length == 0 {
+        return None;
+    }
+
+    let mut bytes_read = 0usize;
+    let mut buffer = vec![0u16; (value.Length / 2) as usize];
+    unsafe {
+        if ReadProcessMemory(
+            process,
+            value.Buffer as *const _,
+            buffer.as_mut_ptr() as *mut _,
+            value.Length as usize,
+            &mut bytes_read,
+        ) == 0
+        {
+            return None;
+        }
+    }
+    Some(PathBuf::from(OsString::from_wide(&buffer)))
 }

@@ -787,10 +787,14 @@ impl App {
         }
         .max(1);
 
-        let Ok(session_id) = self
-            .session_manager
-            .create_session(new_rows, new_cols, None)
-        else {
+        let Ok(session_id) = self.session_manager.create_session(
+            new_rows,
+            new_cols,
+            self.session_manager
+                .session(active_session)
+                .and_then(|session| session.pty.current_dir())
+                .as_deref(),
+        ) else {
             return;
         };
         let Some(tab) = self.tabs[self.current_tab].as_mut() else {
