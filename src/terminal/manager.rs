@@ -13,7 +13,6 @@ pub struct SessionId(u64);
 pub struct SessionManager {
     current_id: u64,
     sessions: HashMap<SessionId, TerminalSession>,
-    active_session: Option<SessionId>,
     proxy: EventLoopProxy<Event>,
 }
 
@@ -22,7 +21,6 @@ impl SessionManager {
         Self {
             current_id: 0,
             sessions: HashMap::new(),
-            active_session: None,
             proxy,
         }
     }
@@ -61,44 +59,20 @@ impl SessionManager {
         session.vt.process(&data);
     }
 
-    pub fn resize_sessions(&mut self, rows: u16, cols: u16) {
-        for session in self.sessions.values_mut() {
-            session.pty.resize(rows, cols);
-            session.vt.screen_mut().set_size(rows, cols);
-        }
+    pub fn session(&self, id: SessionId) -> Option<&TerminalSession> {
+        self.sessions.get(&id)
     }
 
-    pub fn active_session(&self) -> Option<&TerminalSession> {
-        self.active_session
-            .as_ref()
-            .map(|id| self.sessions.get(id))
-            .flatten()
+    pub fn session_mut(&mut self, id: SessionId) -> Option<&mut TerminalSession> {
+        self.sessions.get_mut(&id)
     }
 
-    pub fn active_session_mut(&mut self) -> Option<&mut TerminalSession> {
-        self.active_session
-            .as_mut()
-            .map(|id| self.sessions.get_mut(id))
-            .flatten()
-    }
-
-    /*pub fn sessions(&self, ids: impl IntoIterator<Item = SessionId>) -> Vec<&TerminalSession> {
-        let mut sessions = Vec::new();
-        for id in ids {
-            let Some(session) = self.sessions.get(&id) else {
-                continue;
-            };
-            sessions.push(session);
-        }
-        sessions
-    }*/
-
-    pub fn set_active_session(&mut self, id: SessionId) {
-        self.active_session = Some(id);
-    }
-
-    pub fn active_session_id(&self) -> Option<SessionId> {
-        self.active_session
+    pub fn resize_session(&mut self, id: SessionId, rows: u16, cols: u16) {
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        session.pty.resize(rows, cols);
+        session.vt.screen_mut().set_size(rows, cols);
     }
 
     pub fn is_empty(&self) -> bool {

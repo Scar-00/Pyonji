@@ -17,7 +17,10 @@ use wgpu::{
 };
 use winit::{dpi::PhysicalSize, window::Window};
 
-use crate::{renderer::glyph::TerminalRenderer, terminal::CursorState};
+use crate::{
+    renderer::glyph::TerminalRenderer,
+    terminal::{CursorState, Divider, PaneGeometry, SplitDirection},
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Color([u8; 4]);
@@ -76,9 +79,17 @@ pub struct Renderer {
     format: TextureFormat,
     background_renderer: BackgroundRenderer,
     terminal_renderer: TerminalRenderer,
+    divider_renderer: BackgroundRenderer,
     arena: Arena,
     font_size: f32,
     line_heigt: f32,
+}
+
+pub struct RenderPane<'a> {
+    pub screen: &'a Screen,
+    pub cursor_style: &'a CursorState,
+    pub geometry: PaneGeometry,
+    pub is_active: bool,
 }
 
 impl Renderer {
@@ -132,6 +143,7 @@ impl Renderer {
 
         let background_renderer = BackgroundRenderer::new(&device, format);
         let terminal_renderer = TerminalRenderer::new(&device, &queue, format);
+        let divider_renderer = BackgroundRenderer::new(&device, format);
 
         Ok(Renderer {
             window,
@@ -143,6 +155,7 @@ impl Renderer {
             format,
             background_renderer,
             terminal_renderer,
+            divider_renderer,
             arena: Arena::new(),
             font_size,
             line_heigt,
@@ -173,8 +186,12 @@ impl Renderer {
         );
     }
 
-    pub fn render(&mut self, screen: &Screen, cursor_style: &CursorState) -> Result<()> {
+    pub fn render(&mut self, panes: &[RenderPane<'_>], dividers: &[Divider]) -> Result<()> {
         let size = self.window.inner_size();
+        let divider_color = [0.56, 0.60, 0.72, 0.95];
+        let divider_px = 1.0f32;
+        let divider_width = (divider_px / size.width.max(1) as f32) * 2.0;
+        let divider_height = (divider_px / size.height.max(1) as f32) * 2.0;
         let surface = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(SurfaceError::Lost | SurfaceError::Outdated) => {
@@ -199,78 +216,106 @@ impl Renderer {
         };
 
         //let start = Instant::now();
-        let (rows, cols) = screen.size();
         let [w, h] = [
             self.font_size / size.width as f32,
             (self.line_heigt * 2.0) / size.height as f32,
         ];
-        for row in 0..rows {
-            for col in 0..cols {
-                let Some(cell) = screen.cell(row, col) else {
-                    continue;
-                };
-                let fg_color = match cell.fgcolor() {
-                    vt100::Color::Default => Color::rgb(0xc6, 0xd0, 0xf5),
-                    x => Color::from(x),
-                };
-                let bg_color = Color::from(cell.bgcolor());
-                let x = self.font_size / 2.0 * col as f32;
-                let y = self.line_heigt * (row + 1) as f32;
-                {
-                    let [x, y] = self.ndc([x, y]);
-                    let bg_color = if cell.inverse() { fg_color } else { bg_color };
-                    self.background_renderer
-                        .add_rect(x, y, w, h, bg_color.to_linear());
-                }
-                let fg_color = if cell.inverse() { bg_color } else { fg_color };
-                let contents = cell.contents();
-                for cluster in contents.graphemes(true) {
-                    if cluster.len() != 1 {
-                        self.terminal_renderer.add_cluster(
-                            &self.queue,
-                            [x, y],
-                            [size.width as f32, size.height as f32],
-                            cluster,
-                            fg_color,
-                        );
-                    } else {
-                        for ch in cluster.chars() {
-                            self.terminal_renderer.add_glyph(
+        for pane in panes {
+            if pane.geometry.cols == 0 || pane.geometry.rows == 0 {
+                continue;
+            }
+            let (rows, cols) = pane.screen.size();
+            for row in 0..rows {
+                for col in 0..cols {
+                    let Some(cell) = pane.screen.cell(row, col) else {
+                        continue;
+                    };
+                    let fg_color = match cell.fgcolor() {
+                        vt100::Color::Default => Color::rgb(0xc6, 0xd0, 0xf5),
+                        x => Color::from(x),
+                    };
+                    let bg_color = Color::from(cell.bgcolor());
+                    let x =
+                        self.font_size / 2.0 * (pane.geometry.x as f32 + col as f32);
+                    let y = self.line_heigt * (pane.geometry.y as f32 + row as f32 + 1.0);
+                    {
+                        let [x, y] = self.ndc([x, y]);
+                        let bg_color = if cell.inverse() { fg_color } else { bg_color };
+                        self.background_renderer
+                            .add_rect(x, y, w, h, bg_color.to_linear());
+                    }
+                    let fg_color = if cell.inverse() { bg_color } else { fg_color };
+                    let contents = cell.contents();
+                    for cluster in contents.graphemes(true) {
+                        if cluster.len() != 1 {
+                            self.terminal_renderer.add_cluster(
                                 &self.queue,
                                 [x, y],
                                 [size.width as f32, size.height as f32],
-                                ch,
+                                cluster,
                                 fg_color,
                             );
+                        } else {
+                            for ch in cluster.chars() {
+                                self.terminal_renderer.add_glyph(
+                                    &self.queue,
+                                    [x, y],
+                                    [size.width as f32, size.height as f32],
+                                    ch,
+                                    fg_color,
+                                );
+                            }
                         }
                     }
                 }
             }
+
+            if pane.is_active && !pane.screen.hide_cursor() && pane.screen.scrollback() == 0 {
+                let (row, col) = pane.screen.cursor_position();
+                let x = self.font_size / 2.0 * (pane.geometry.x as f32 + col as f32);
+                let y = self.line_heigt * (pane.geometry.y as f32 + row as f32 + 1.0);
+                let [x, y] = self.ndc([x, y]);
+                let [w, h] = match pane.cursor_style {
+                    CursorState::Bar => [
+                        (self.font_size * 0.18) / size.width as f32,
+                        (self.line_heigt * 2.0) / size.height as f32,
+                    ],
+                    CursorState::Block => [
+                        (self.font_size) / size.width as f32,
+                        (self.line_heigt * 2.0) / size.height as f32,
+                    ],
+                    CursorState::Underline => [
+                        (self.font_size * 0.18) / size.width as f32,
+                        (self.line_heigt * 2.0) / size.height as f32,
+                    ],
+                };
+                self.background_renderer
+                    .add_rect(x, y, w, h, [0.78, 0.82, 0.96, 0.45]);
+            }
+        }
+
+        for divider in dividers {
+            match divider.direction {
+                SplitDirection::Vertical => {
+                    let x = self.font_size / 2.0 * divider.x as f32;
+                    let y = self.line_heigt * (divider.y + divider.rows) as f32;
+                    let height = divider_height * divider.rows.max(1) as f32 * self.line_heigt;
+                    let [x, y] = self.ndc([x, y]);
+                    self.divider_renderer
+                        .add_rect(x, y, divider_width, height, divider_color);
+                }
+                SplitDirection::Horizontal => {
+                    let x = self.font_size / 2.0 * divider.x as f32;
+                    let y = self.line_heigt * divider.y as f32 + divider_px;
+                    let width =
+                        divider_width * divider.cols.max(1) as f32 * (self.font_size / 2.0);
+                    let [x, y] = self.ndc([x, y]);
+                    self.divider_renderer
+                        .add_rect(x, y, width, divider_height, divider_color);
+                }
+            }
         }
         //println!("layout cells = {:?}", Instant::now() - start);
-
-        if !screen.hide_cursor() && screen.scrollback() == 0 {
-            let (row, col) = screen.cursor_position();
-            let x = self.font_size / 2.0 * col as f32;
-            let y = self.line_heigt * (row + 1) as f32;
-            let [x, y] = self.ndc([x, y]);
-            let [w, h] = match cursor_style {
-                CursorState::Bar => [
-                    (self.font_size * 0.18) / size.width as f32,
-                    (self.line_heigt * 2.0) / size.height as f32,
-                ],
-                CursorState::Block => [
-                    (self.font_size) / size.width as f32,
-                    (self.line_heigt * 2.0) / size.height as f32,
-                ],
-                CursorState::Underline => [
-                    (self.font_size * 0.18) / size.width as f32,
-                    (self.line_heigt * 2.0) / size.height as f32,
-                ],
-            };
-            self.background_renderer
-                .add_rect(x, y, w, h, [0.78, 0.82, 0.96, 0.45]);
-        }
 
         let mut encoder = self
             .device
@@ -301,6 +346,9 @@ impl Renderer {
             self.terminal_renderer
                 .render(&self.device, &self.queue, &mut pass)
                 .context("failed to render terminal")?;
+            self.divider_renderer
+                .render(&self.device, &self.queue, &mut pass)
+                .context("failed to render dividers")?;
         }
         self.queue.submit(Some(encoder.finish()));
         surface.present();
