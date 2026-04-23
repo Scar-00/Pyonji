@@ -69,8 +69,10 @@ fn main() -> Result<()> {
     };
 
     event_loop.set_control_flow(ControlFlow::Wait);
-    event_loop.run_app(&mut app)?;
-
+    if let Err(e) = event_loop.run_app(&mut app) {
+        std::fs::write("C:/dev/learning/pyonji/log.txt", format!("error = {e}"))?;
+        return Err(e.into());
+    }
     Ok(())
 }
 
