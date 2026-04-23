@@ -16,6 +16,7 @@ pub struct Pty {
     writer: Box<dyn Write + Send>,
     process_id: Option<u32>,
     start_dir: Option<PathBuf>,
+    program_name: String,
 }
 
 pub enum Event {
@@ -41,7 +42,8 @@ impl Pty {
             })
             .context("failed to open pty pair")?;
 
-        let mut cmd = CommandBuilder::new("cmd.exe");
+        let program_name = String::from("cmd.exe");
+        let mut cmd = CommandBuilder::new(&program_name);
         if let Some(path) = path {
             cmd.cwd(path);
         }
@@ -118,6 +120,7 @@ impl Pty {
             writer,
             process_id,
             start_dir,
+            program_name,
         })
     }
 
@@ -160,6 +163,10 @@ impl Pty {
 
     pub fn current_dir(&self) -> Option<PathBuf> {
         self.live_current_dir().or_else(|| self.start_dir.clone())
+    }
+
+    pub fn program_name(&self) -> &str {
+        &self.program_name
     }
 
     #[cfg(windows)]

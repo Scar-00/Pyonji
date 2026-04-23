@@ -120,13 +120,6 @@ pub struct Font {
 }
 
 impl Font {
-    pub fn from_file(path: &str, index: usize) -> Option<Self> {
-        let data = std::fs::read(path).ok()?;
-        let font = FontRef::from_index(&data, index)?;
-        let (offset, key) = (font.offset, font.key);
-        Some(Self { data, offset, key })
-    }
-
     pub fn from_data(data: &[u8], index: usize) -> Option<Self> {
         let font = FontRef::from_index(&data, index)?;
         let (offset, key) = (font.offset, font.key);
@@ -136,10 +129,6 @@ impl Font {
             key,
         })
     }
-
-    /*pub fn attributes(&self) -> Attributes {
-        self.as_ref().attributes()
-    }*/
 
     pub fn charmap(&self) -> Charmap<'_> {
         self.as_ref().charmap()
@@ -182,23 +171,10 @@ pub struct TerminalRenderer {
     atlas_size: [f32; 2],
 }
 
-/*
-    TOOD(K):
-    ...
-
-    glyph_map: Vec<[Option<Glyph>; 3]>
-
-    ..
-
-    if let Some(Some(glyph)) = self.glyph_map.get(glyph_id as usize).map(|bucket| bucket[variant.index()]) {
-        return Some(*glyph);
-    }
-
-*/
-
 impl TerminalRenderer {
+    const NORMAL_FONT: &[u8] = include_bytes!("../../../resources/fonts/SGr-IosevkaTerm-Light.ttc");
     const ICON_FONT: &[u8] =
-        include_bytes!("../../../resources/JetBrainsMonoNerdFontMono-Regular.ttf");
+        include_bytes!("../../../resources/fonts/JetBrainsMonoNerdFontMono-Regular.ttf");
     const DEFAULT_BUFFER_SIZE: u64 = (1024 * 16) * 32;
 
     fn load_glyph(&mut self, variant: FontVariant, id: u16) -> Option<Image> {
@@ -581,8 +557,7 @@ impl TerminalRenderer {
             mapped_at_creation: false,
         });
 
-        let normal_font = Font::from_file("C:/Windows/Fonts/Iosevka-Light.ttc", 0).unwrap();
-        //let icon_font = Font::from_file("C:/Windows/Fonts/seguisym.ttf", 0).unwrap();
+        let normal_font = Font::from_data(Self::NORMAL_FONT, 0).unwrap();
         let icon_font = Font::from_data(Self::ICON_FONT, 0).unwrap();
 
         Self {

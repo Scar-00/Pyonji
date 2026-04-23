@@ -92,6 +92,11 @@ pub struct RenderPane<'a> {
     pub is_active: bool,
 }
 
+pub struct RenderStatusTab {
+    pub label: String,
+    pub is_active: bool,
+}
+
 impl Renderer {
     pub fn new(window: Arc<Window>, font_size: f32, line_heigt: f32) -> Result<Self> {
         let size = window.inner_size();
@@ -186,8 +191,18 @@ impl Renderer {
         );
     }
 
-    pub fn render(&mut self, panes: &[RenderPane<'_>], dividers: &[Divider]) -> Result<()> {
+    pub fn render(
+        &mut self,
+        panes: &[RenderPane<'_>],
+        dividers: &[Divider],
+        status_tabs: &[RenderStatusTab],
+        current_tab_label: &str,
+    ) -> Result<()> {
         let size = self.window.inner_size();
+        let screen_size = [size.width as f32, size.height as f32];
+        let cell_width = self.font_size / 2.0;
+        let grid_cols = (size.width as f32 / cell_width).floor().max(1.0) as usize;
+        let grid_rows = (size.height as f32 / self.line_heigt).floor().max(1.0) as usize;
         let divider_color = [0.56, 0.60, 0.72, 0.95];
         let divider_px = 1.0f32;
         let divider_width = (divider_px / size.width.max(1) as f32) * 2.0;
@@ -235,8 +250,7 @@ impl Renderer {
                         x => Color::from(x),
                     };
                     let bg_color = Color::from(cell.bgcolor());
-                    let x =
-                        self.font_size / 2.0 * (pane.geometry.x as f32 + col as f32);
+                    let x = self.font_size / 2.0 * (pane.geometry.x as f32 + col as f32);
                     let y = self.line_heigt * (pane.geometry.y as f32 + row as f32 + 1.0);
                     {
                         let [x, y] = self.ndc([x, y]);
@@ -251,7 +265,7 @@ impl Renderer {
                             self.terminal_renderer.add_cluster(
                                 &self.queue,
                                 [x, y],
-                                [size.width as f32, size.height as f32],
+                                screen_size,
                                 cluster,
                                 fg_color,
                             );
@@ -260,7 +274,7 @@ impl Renderer {
                                 self.terminal_renderer.add_glyph(
                                     &self.queue,
                                     [x, y],
-                                    [size.width as f32, size.height as f32],
+                                    screen_size,
                                     ch,
                                     fg_color,
                                 );
@@ -307,14 +321,20 @@ impl Renderer {
                 SplitDirection::Horizontal => {
                     let x = self.font_size / 2.0 * divider.x as f32;
                     let y = self.line_heigt * divider.y as f32 + divider_px;
-                    let width =
-                        divider_width * divider.cols.max(1) as f32 * (self.font_size / 2.0);
+                    let width = divider_width * divider.cols.max(1) as f32 * (self.font_size / 2.0);
                     let [x, y] = self.ndc([x, y]);
                     self.divider_renderer
                         .add_rect(x, y, width, divider_height, divider_color);
                 }
             }
         }
+        self.draw_status_bar(
+            grid_cols,
+            grid_rows,
+            screen_size,
+            status_tabs,
+            current_tab_label,
+        );
         //println!("layout cells = {:?}", Instant::now() - start);
 
         let mut encoder = self
@@ -355,6 +375,151 @@ impl Renderer {
         self.arena.reset();
         Ok(())
     }
+
+    fn draw_status_bar(
+        &mut self,
+        grid_cols: usize,
+        grid_rows: usize,
+        screen_size: [f32; 2],
+        status_tabs: &[RenderStatusTab],
+        current_tab_label: &str,
+    ) {
+        if grid_cols == 0 || grid_rows == 0 {
+            return;
+        }
+
+        let bar_row = grid_rows.saturating_sub(1);
+        let bar_bottom = self.line_heigt * (bar_row as f32 + 1.0);
+        let bar_height = (self.line_heigt * 2.0) / screen_size[1].max(1.0);
+        let bar_y = self.ndc([0.0, bar_bottom])[1];
+
+        let bar_bg = [0.18, 0.14, 0.24, 1.0];
+        let active_bg = [0.79, 0.67, 0.93, 1.0];
+        let inactive_bg = [0.34, 0.27, 0.43, 1.0];
+        let right_bg = [0.61, 0.48, 0.78, 1.0];
+        let active_fg = Color::rgb(0x20, 0x14, 0x2c);
+        let inactive_fg = Color::rgb(0xf0, 0xe7, 0xfa);
+
+        self.background_renderer
+            .add_rect(-1.0, bar_y, 2.0, bar_height, bar_bg);
+
+        let right_text = fit_status_text(&format!(" current {} ", current_tab_label), grid_cols);
+        let right_width = right_text.chars().count().min(grid_cols);
+        let right_start = grid_cols.saturating_sub(right_width);
+        let left_limit = right_start.saturating_sub(1);
+
+        let mut cursor = 0usize;
+        for tab in status_tabs {
+            if cursor >= left_limit {
+                break;
+            }
+            let remaining = left_limit.saturating_sub(cursor);
+            if remaining < 4 {
+                break;
+            }
+
+            let label = fit_status_text(&format!(" {} ", tab.label), remaining);
+            let width = label.chars().count();
+            if width == 0 {
+                continue;
+            }
+
+            self.draw_status_segment(
+                cursor,
+                bar_bottom,
+                width,
+                if tab.is_active {
+                    active_bg
+                } else {
+                    inactive_bg
+                },
+            );
+            self.draw_status_text(
+                &label,
+                cursor,
+                bar_row,
+                screen_size,
+                if tab.is_active {
+                    active_fg
+                } else {
+                    inactive_fg
+                },
+            );
+            cursor += width;
+            if cursor < left_limit {
+                cursor += 1;
+            }
+        }
+
+        if right_width > 0 {
+            self.draw_status_segment(right_start, bar_bottom, right_width, right_bg);
+            self.draw_status_text(&right_text, right_start, bar_row, screen_size, active_fg);
+        }
+    }
+
+    fn draw_status_segment(
+        &mut self,
+        start_col: usize,
+        bottom_y: f32,
+        width_cols: usize,
+        color: [f32; 4],
+    ) {
+        if width_cols == 0 {
+            return;
+        }
+
+        let x = self.font_size / 2.0 * start_col as f32;
+        let width = ((self.font_size / 2.0) * width_cols as f32
+            / self.window.inner_size().width as f32)
+            * 2.0;
+        let [x, y] = self.ndc([x, bottom_y]);
+        let height = (self.line_heigt * 2.0) / self.window.inner_size().height.max(1) as f32;
+        self.background_renderer
+            .add_rect(x, y, width, height, color);
+    }
+
+    fn draw_status_text(
+        &mut self,
+        text: &str,
+        start_col: usize,
+        row: usize,
+        screen_size: [f32; 2],
+        color: Color,
+    ) {
+        let x = self.font_size / 2.0 * start_col as f32;
+        let y = self.line_heigt * (row as f32 + 1.0);
+        let mut col = 0usize;
+        for cluster in text.graphemes(true) {
+            let pos = [x + (self.font_size / 2.0) * col as f32, y];
+            if cluster.len() != 1 {
+                self.terminal_renderer
+                    .add_cluster(&self.queue, pos, screen_size, cluster, color);
+            } else {
+                for ch in cluster.chars() {
+                    self.terminal_renderer
+                        .add_glyph(&self.queue, pos, screen_size, ch, color);
+                }
+            }
+            col += 1;
+        }
+    }
+}
+
+fn fit_status_text(text: &str, max_cols: usize) -> String {
+    let len = text.chars().count();
+    if len <= max_cols {
+        return text.to_string();
+    }
+    if max_cols <= 3 {
+        return ".".repeat(max_cols);
+    }
+
+    let mut out = String::new();
+    for ch in text.chars().take(max_cols - 3) {
+        out.push(ch);
+    }
+    out.push_str("...");
+    out
 }
 
 fn ansi_index_to_rgb(idx: u8) -> Color {

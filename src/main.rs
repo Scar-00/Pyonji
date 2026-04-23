@@ -10,7 +10,7 @@ use std::{array, path::PathBuf, sync::Arc};
 use anyhow::{Context, Result};
 use clap::Parser;
 use pty::Event as PtyEvent;
-use renderer::{RenderPane, Renderer};
+use renderer::{RenderPane, RenderStatusTab, Renderer};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -100,6 +100,7 @@ fn main() -> Result<()> {
 impl App {
     const TITLE: &str = "Pyonji";
     const ICON: &[u8] = include_bytes!("../resources/icon.ico");
+    const STATUS_BAR_ROWS: u16 = 1;
 }
 
 impl ApplicationHandler<PtyEvent> for App {
@@ -130,14 +131,13 @@ impl ApplicationHandler<PtyEvent> for App {
         self.window = Some(window.clone());
 
         if let Ok(session) = self.session_manager.create_session(
-            self.rows.max(1),
+            self.terminal_rows().max(1),
             self.cols.max(1),
             self.args.path.as_deref(),
         ) {
             self.tabs[0] = Some(Tab::new(session));
             self.current_tab = 0;
             self.resize_current_tab_sessions();
-            self.update_window_title();
         }
         window.request_redraw();
     }
@@ -169,7 +169,6 @@ impl ApplicationHandler<PtyEvent> for App {
                     self.switch_to_previous_live_tab_or_stay(self.current_tab);
                 } else {
                     self.resize_current_tab_sessions();
-                    self.update_window_title();
                 }
                 self.window.as_ref().map(|window| window.request_redraw());
             }
@@ -193,6 +192,8 @@ impl ApplicationHandler<PtyEvent> for App {
                 let panes = self.current_tab_layouts();
                 let dividers = self.current_tab_dividers();
                 let active_session = self.current_active_session_id();
+                let status_tabs = self.render_status_tabs();
+                let current_tab_label = self.current_tab_status_label();
                 let Some(renderer) = self.renderer.as_mut() else {
                     return;
                 };
@@ -210,7 +211,9 @@ impl ApplicationHandler<PtyEvent> for App {
                     });
                 }
 
-                if let Err(e) = renderer.render(&render_panes, &dividers) {
+                if let Err(e) =
+                    renderer.render(&render_panes, &dividers, &status_tabs, &current_tab_label)
+                {
                     println!("failed to render = {e}");
                 }
             }
@@ -524,12 +527,10 @@ impl App {
             self.current_tab = tab;
             self.wheel_remainder = 0.0;
             self.resize_current_tab_sessions();
-            self.update_window_title();
             return;
         }
 
         self.current_tab = closed_tab.min(self.tabs.len().saturating_sub(1));
-        self.update_window_title();
     }
 
     fn cursor_to_cell(&self, x: f64, y: f64) -> Option<(u16, u16)> {
@@ -583,6 +584,7 @@ impl App {
     }
 
     fn current_tab_layouts(&self) -> Vec<(SessionId, PaneGeometry)> {
+        let rows = self.terminal_rows();
         self.tabs[self.current_tab]
             .as_ref()
             .map(|tab| {
@@ -590,13 +592,14 @@ impl App {
                     x: 0,
                     y: 0,
                     cols: self.cols,
-                    rows: self.rows,
+                    rows,
                 })
             })
             .unwrap_or_default()
     }
 
     fn current_tab_dividers(&self) -> Vec<Divider> {
+        let rows = self.terminal_rows();
         self.tabs[self.current_tab]
             .as_ref()
             .map(|tab| {
@@ -604,7 +607,7 @@ impl App {
                     x: 0,
                     y: 0,
                     cols: self.cols,
-                    rows: self.rows,
+                    rows,
                 })
             })
             .unwrap_or_default()
@@ -678,7 +681,7 @@ impl App {
         }
         let cell_width = self.font_size / 2.0;
         let col = (x.max(0.0) as f32 / cell_width).clamp(0.0, self.cols as f32);
-        let row = (y.max(0.0) as f32 / self.line_height).clamp(0.0, self.rows as f32);
+        let row = (y.max(0.0) as f32 / self.line_height).clamp(0.0, self.terminal_rows() as f32);
         Some((col, row))
     }
 
@@ -688,7 +691,6 @@ impl App {
         };
         if tab.set_active_session(session_id) {
             self.wheel_remainder = 0.0;
-            self.update_window_title();
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
             }
@@ -703,7 +705,6 @@ impl App {
             return;
         }
         self.wheel_remainder = 0.0;
-        self.update_window_title();
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }
@@ -714,7 +715,7 @@ impl App {
             x: 0,
             y: 0,
             cols: self.cols,
-            rows: self.rows,
+            rows: self.terminal_rows(),
         };
         let Some(tab) = self.tabs[self.current_tab].as_mut() else {
             return;
@@ -741,7 +742,7 @@ impl App {
             x: 0,
             y: 0,
             cols: self.cols,
-            rows: self.rows,
+            rows: self.terminal_rows(),
         };
         let Some(tab) = self.tabs[self.current_tab].as_mut() else {
             return;
@@ -806,7 +807,6 @@ impl App {
 
         self.wheel_remainder = 0.0;
         self.resize_current_tab_sessions();
-        self.update_window_title();
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }
@@ -814,10 +814,11 @@ impl App {
 
     fn switch_tab(&mut self, tab: usize) {
         if self.tabs[tab].is_none() {
-            let Ok(id) =
-                self.session_manager
-                    .create_session(self.rows.max(1), self.cols.max(1), None)
-            else {
+            let Ok(id) = self.session_manager.create_session(
+                self.terminal_rows().max(1),
+                self.cols.max(1),
+                None,
+            ) else {
                 return;
             };
             self.tabs[tab] = Some(Tab::new(id));
@@ -826,29 +827,46 @@ impl App {
         self.current_tab = tab;
         self.wheel_remainder = 0.0;
         self.resize_current_tab_sessions();
-        self.update_window_title();
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }
     }
 
-    fn update_window_title(&self) {
-        let Some(window) = self.window.as_ref() else {
-            return;
-        };
-        let pane_count = self.tabs[self.current_tab]
-            .as_ref()
-            .map(|tab| tab.sessions().len())
-            .unwrap_or(0);
-        if pane_count > 1 {
-            window.set_title(&format!(
-                "{} - Tab: {} - Panes: {}",
-                Self::TITLE,
-                self.current_tab + 1,
-                pane_count
-            ));
+    fn terminal_rows(&self) -> u16 {
+        if self.rows > Self::STATUS_BAR_ROWS {
+            self.rows - Self::STATUS_BAR_ROWS
         } else {
-            window.set_title(&format!("{} - Tab: {}", Self::TITLE, self.current_tab + 1));
+            self.rows
         }
+    }
+
+    fn tab_program_name(&self, tab_index: usize) -> &str {
+        self.tabs[tab_index]
+            .as_ref()
+            .and_then(Tab::active_session)
+            .and_then(|session_id| self.session_manager.session(session_id))
+            .map(|session| session.pty.program_name())
+            .unwrap_or("shell")
+    }
+
+    fn render_status_tabs(&self) -> Vec<RenderStatusTab> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, tab)| {
+                tab.as_ref().map(|_| RenderStatusTab {
+                    label: format!("{}:{}", index + 1, self.tab_program_name(index)),
+                    is_active: index == self.current_tab,
+                })
+            })
+            .collect()
+    }
+
+    fn current_tab_status_label(&self) -> String {
+        format!(
+            "{}:{}",
+            self.current_tab + 1,
+            self.tab_program_name(self.current_tab)
+        )
     }
 }
