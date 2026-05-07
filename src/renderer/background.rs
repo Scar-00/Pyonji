@@ -46,7 +46,7 @@ pub struct BackgroundRenderer {
     _shader: ShaderModule,
     pipeline: RenderPipeline,
     vertex_buffer: Buffer,
-    vertecies: Vec<Vertex>,
+    vertices: Vec<Vertex>,
 }
 
 impl BackgroundRenderer {
@@ -114,15 +114,15 @@ impl BackgroundRenderer {
             _shader: shader,
             pipeline,
             vertex_buffer,
-            vertecies: Vec::new(),
+            vertices: Vec::new(),
         }
     }
 
     fn maybe_grow_buffer(&mut self, device: &Device) {
-        if self.vertecies.len() * mem::size_of::<Vertex>() >= self.vertex_buffer.size() as usize {
+        if self.vertices.len() * mem::size_of::<Vertex>() >= self.vertex_buffer.size() as usize {
             self.vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("background vertices"),
-                size: (self.vertecies.len() * mem::size_of::<Vertex>()) as u64,
+                size: (self.vertices.len() * mem::size_of::<Vertex>()) as u64,
                 usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
@@ -131,39 +131,35 @@ impl BackgroundRenderer {
 
     pub fn render(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass) -> Result<()> {
         self.maybe_grow_buffer(device);
-        queue.write_buffer(
-            &self.vertex_buffer,
-            0,
-            bytemuck::cast_slice(&self.vertecies),
-        );
+        queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
         queue.submit([]);
 
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.draw(0..self.vertecies.len() as u32, 0..1);
-        self.vertecies.clear();
+        pass.draw(0..self.vertices.len() as u32, 0..1);
+        self.vertices.clear();
         Ok(())
     }
 
     pub fn add_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
-        self.vertecies.push(Vertex { pos: [x, y], color });
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex { pos: [x, y], color });
+        self.vertices.push(Vertex {
             pos: [x + w, y],
             color,
         });
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex {
             pos: [x, y + h],
             color,
         });
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex {
             pos: [x + w, y],
             color,
         });
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex {
             pos: [x, y + h],
             color,
         });
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex {
             pos: [x + w, y + h],
             color,
         });

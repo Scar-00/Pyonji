@@ -107,9 +107,11 @@ impl VertexData for Vertex {
         &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Uint32];
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FontVariant {
     Normal,
+    Bold,
+    Ime,
     Emoji,
 }
 
@@ -155,17 +157,22 @@ pub struct TerminalRenderer {
     _shader: ShaderModule,
     pipeline: RenderPipeline,
     vertex_buffer: Buffer,
-    vertecies: Vec<Vertex>,
+    vertices: Vec<Vertex>,
     glyph_atlas_texture: Texture,
     image_atlas_texture: Texture,
 
     uniform_bind_group: BindGroup,
 
     normal_font: Font,
+    bold_font: Font,
+    ime_font: Font,
     icon_font: Font,
     scale_context: ScaleContext,
     shape_context: ShapeContext,
-    glyph_map: Vec<Option<Glyph>>,
+    normal_glyph_map: Vec<Option<Glyph>>,
+    bold_glyph_map: Vec<Option<Glyph>>,
+    ime_glyph_map: Vec<Option<Glyph>>,
+    icon_glyph_map: Vec<Option<Glyph>>,
     glyph_atlas: BucketedAtlasAllocator,
     image_atlas: AtlasAllocator,
     atlas_size: [f32; 2],
@@ -173,6 +180,10 @@ pub struct TerminalRenderer {
 
 impl TerminalRenderer {
     const NORMAL_FONT: &[u8] = include_bytes!("../../../resources/fonts/SGr-IosevkaTerm-Light.ttc");
+    const BOLD_FONT: &[u8] =
+        include_bytes!("../../../resources/fonts/SGr-IosevkaTerm-SemiBold.ttc");
+    const IME_FONT: &[u8] =
+        include_bytes!("../../../resources/fonts/NotoSansMonoCJKkr-Regular.otf");
     const ICON_FONT: &[u8] =
         include_bytes!("../../../resources/fonts/JetBrainsMonoNerdFontMono-Regular.ttf");
     const DEFAULT_BUFFER_SIZE: u64 = (1024 * 16) * 32;
@@ -180,6 +191,8 @@ impl TerminalRenderer {
     fn load_glyph(&mut self, variant: FontVariant, id: u16) -> Option<Image> {
         let font = match variant {
             FontVariant::Normal => &self.normal_font,
+            FontVariant::Bold => &self.bold_font,
+            FontVariant::Ime => &self.ime_font,
             FontVariant::Emoji => &self.icon_font,
         };
         let mut scaler = self
@@ -207,92 +220,8 @@ impl TerminalRenderer {
         variant: FontVariant,
         glyph: impl Into<u32>,
     ) -> Option<Glyph> {
-        let glyph_id = self.normal_font.charmap().map(glyph);
-
-        if let Some(Some(glyph)) = self.glyph_map.get(glyph_id as usize) {
-            return Some(*glyph);
-        }
-
-        let image = self.load_glyph(variant, glyph_id)?;
-        let alloc = if image.content == Content::Mask {
-            let alloc = self.glyph_atlas.allocate(etagere::size2(
-                image.placement.width as i32,
-                image.placement.height as i32,
-            ))?;
-
-            queue.write_texture(
-                TexelCopyTextureInfo {
-                    texture: &self.glyph_atlas_texture,
-                    mip_level: 0,
-                    origin: Origin3d {
-                        x: alloc.rectangle.min.x as u32,
-                        y: alloc.rectangle.min.y as u32,
-                        z: 0,
-                    },
-                    aspect: TextureAspect::All,
-                },
-                &image.data,
-                TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(image.placement.width),
-                    rows_per_image: Some(image.placement.height),
-                },
-                Extent3d {
-                    width: image.placement.width,
-                    height: image.placement.height,
-                    depth_or_array_layers: 1,
-                },
-            );
-            alloc
-        } else {
-            let alloc = self.image_atlas.allocate(etagere::size2(
-                image.placement.width as i32,
-                image.placement.height as i32,
-            ))?;
-
-            queue.write_texture(
-                TexelCopyTextureInfo {
-                    texture: &self.image_atlas_texture,
-                    mip_level: 0,
-                    origin: Origin3d {
-                        x: alloc.rectangle.min.x as u32,
-                        y: alloc.rectangle.min.y as u32,
-                        z: 0,
-                    },
-                    aspect: TextureAspect::All,
-                },
-                &image.data,
-                TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4 * image.placement.width),
-                    rows_per_image: Some(image.placement.height),
-                },
-                Extent3d {
-                    width: image.placement.width,
-                    height: image.placement.height,
-                    depth_or_array_layers: 1,
-                },
-            );
-            alloc
-        };
-
-        let rect = alloc.rectangle;
-
-        let uv_min_x = (rect.min.x as f32) / self.atlas_size[0];
-        let uv_min_y = (rect.min.y as f32) / self.atlas_size[1];
-        let uv_max_x = (rect.min.x as f32 + image.placement.width as f32) / self.atlas_size[0];
-        let uv_max_y = (rect.min.y as f32 + image.placement.height as f32) / self.atlas_size[1];
-        let glyph = Glyph {
-            uv_min: [uv_min_x, uv_min_y],
-            uv_max: [uv_max_x, uv_max_y],
-            placement: image.placement,
-            content: image.content,
-        };
-        if glyph_id as usize >= self.glyph_map.len() {
-            self.glyph_map.resize(glyph_id as usize + 1, None);
-        }
-        self.glyph_map[glyph_id as usize] = Some(glyph);
-        Some(glyph)
+        let glyph_id = self.font(variant).charmap().map(glyph);
+        self.get_or_create_glyph_id(queue, variant, glyph_id)
     }
 
     fn get_or_create_glyph_id(
@@ -301,16 +230,14 @@ impl TerminalRenderer {
         variant: FontVariant,
         glyph_id: u16,
     ) -> Option<Glyph> {
-        if let Some(Some(glyph)) = self.glyph_map.get(glyph_id as usize) {
+        if let Some(Some(glyph)) = self.glyph_map(variant).get(glyph_id as usize) {
             return Some(*glyph);
         }
 
         let image = self.load_glyph(variant, glyph_id)?;
+        let size = etagere::size2(image.placement.width as i32, image.placement.height as i32);
         let alloc = if image.content == Content::Mask {
-            let alloc = self.glyph_atlas.allocate(etagere::size2(
-                image.placement.width as i32,
-                image.placement.height as i32,
-            ))?;
+            let alloc = self.glyph_atlas.allocate(size)?;
 
             queue.write_texture(
                 TexelCopyTextureInfo {
@@ -337,10 +264,7 @@ impl TerminalRenderer {
             );
             alloc
         } else {
-            let alloc = self.image_atlas.allocate(etagere::size2(
-                image.placement.width as i32,
-                image.placement.height as i32,
-            ))?;
+            let alloc = self.image_atlas.allocate(size)?;
 
             queue.write_texture(
                 TexelCopyTextureInfo {
@@ -380,11 +304,62 @@ impl TerminalRenderer {
             placement: image.placement,
             content: image.content,
         };
-        if glyph_id as usize >= self.glyph_map.len() {
-            self.glyph_map.resize(glyph_id as usize + 1, None);
+        let glyph_map = self.glyph_map_mut(variant);
+        if glyph_id as usize >= glyph_map.len() {
+            glyph_map.resize(glyph_id as usize + 1, None);
         }
-        self.glyph_map[glyph_id as usize] = Some(glyph);
+        glyph_map[glyph_id as usize] = Some(glyph);
         Some(glyph)
+    }
+
+    fn font(&self, variant: FontVariant) -> &Font {
+        match variant {
+            FontVariant::Normal => &self.normal_font,
+            FontVariant::Bold => &self.bold_font,
+            FontVariant::Ime => &self.ime_font,
+            FontVariant::Emoji => &self.icon_font,
+        }
+    }
+
+    fn glyph_map(&self, variant: FontVariant) -> &Vec<Option<Glyph>> {
+        match variant {
+            FontVariant::Normal => &self.normal_glyph_map,
+            FontVariant::Bold => &self.bold_glyph_map,
+            FontVariant::Ime => &self.ime_glyph_map,
+            FontVariant::Emoji => &self.icon_glyph_map,
+        }
+    }
+
+    fn glyph_map_mut(&mut self, variant: FontVariant) -> &mut Vec<Option<Glyph>> {
+        match variant {
+            FontVariant::Normal => &mut self.normal_glyph_map,
+            FontVariant::Bold => &mut self.bold_glyph_map,
+            FontVariant::Ime => &mut self.ime_glyph_map,
+            FontVariant::Emoji => &mut self.icon_glyph_map,
+        }
+    }
+
+    fn text_font_variant_for_cluster(&self, cluster: &str, bold: bool) -> FontVariant {
+        if self.font_supports_cluster(&self.normal_font, cluster) {
+            if bold {
+                FontVariant::Bold
+            } else {
+                FontVariant::Normal
+            }
+        } else if self.font_supports_cluster(&self.ime_font, cluster) {
+            FontVariant::Ime
+        } else {
+            FontVariant::Emoji
+        }
+    }
+
+    fn font_supports_cluster(&self, font: &Font, cluster: &str) -> bool {
+        cluster.chars().all(|ch| {
+            matches!(
+                ch as u32,
+                0x200C | 0x200D | 0xFE00..=0xFE0F | 0xE0100..=0xE01EF
+            ) || font.charmap().map(ch) != 0
+        })
     }
 
     pub fn new(device: &Device, _queue: &Queue, format: TextureFormat) -> Self {
@@ -558,21 +533,28 @@ impl TerminalRenderer {
         });
 
         let normal_font = Font::from_data(Self::NORMAL_FONT, 0).unwrap();
+        let bold_font = Font::from_data(Self::BOLD_FONT, 0).unwrap();
+        let ime_font = Font::from_data(Self::IME_FONT, 0).unwrap();
         let icon_font = Font::from_data(Self::ICON_FONT, 0).unwrap();
 
         Self {
             _shader: shader,
             pipeline,
             vertex_buffer,
-            vertecies: Vec::new(),
+            vertices: Vec::new(),
             uniform_bind_group,
             glyph_atlas_texture: glyph_texture,
             image_atlas_texture: image_texture,
 
-            glyph_map: Vec::new(),
+            normal_glyph_map: Vec::new(),
+            bold_glyph_map: Vec::new(),
+            ime_glyph_map: Vec::new(),
+            icon_glyph_map: Vec::new(),
             scale_context: ScaleContext::new(),
             shape_context: ShapeContext::new(),
-            normal_font: normal_font,
+            normal_font,
+            bold_font,
+            ime_font,
             icon_font,
             glyph_atlas: glyph_atlas_allocator,
             image_atlas: image_atlas_allocator,
@@ -582,19 +564,15 @@ impl TerminalRenderer {
 
     fn finalize(&mut self, device: &Device, queue: &Queue) {
         self.maybe_grow_buffer(device);
-        queue.write_buffer(
-            &self.vertex_buffer,
-            0,
-            bytemuck::cast_slice(&self.vertecies),
-        );
+        queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
         queue.submit([]);
     }
 
     fn maybe_grow_buffer(&mut self, device: &Device) {
-        if self.vertecies.len() * mem::size_of::<Vertex>() >= self.vertex_buffer.size() as usize {
+        if self.vertices.len() * mem::size_of::<Vertex>() >= self.vertex_buffer.size() as usize {
             self.vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("background vertices"),
-                size: (self.vertecies.len() * mem::size_of::<Vertex>()) as u64,
+                size: (self.vertices.len() * mem::size_of::<Vertex>()) as u64,
                 usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
@@ -611,8 +589,8 @@ impl TerminalRenderer {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.draw(0..(self.vertecies.len() as u32), 0..1);
-        self.vertecies.clear();
+        pass.draw(0..(self.vertices.len() as u32), 0..1);
+        self.vertices.clear();
         Ok(())
     }
 
@@ -623,10 +601,16 @@ impl TerminalRenderer {
         screen_size: [f32; 2],
         glyph: char,
         color: Color,
+        bold: bool,
     ) {
         let color = color.to_linear();
 
-        let Some(glyph) = self.get_or_create_glyph(queue, FontVariant::Normal, glyph) else {
+        let variant = if bold {
+            FontVariant::Bold
+        } else {
+            FontVariant::Normal
+        };
+        let Some(glyph) = self.get_or_create_glyph(queue, variant, glyph) else {
             return;
         };
 
@@ -655,37 +639,37 @@ impl TerminalRenderer {
         let bl = to_ndc(x0, y1);
         let br = to_ndc(x1, y1);
 
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex {
             pos: tl,
             uv: [glyph.uv_min[0], glyph.uv_min[1]],
             color,
             variant,
         });
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex {
             pos: tr,
             uv: [glyph.uv_max[0], glyph.uv_min[1]],
             color,
             variant,
         });
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex {
             pos: bl,
             uv: [glyph.uv_min[0], glyph.uv_max[1]],
             color,
             variant,
         });
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex {
             pos: tr,
             uv: [glyph.uv_max[0], glyph.uv_min[1]],
             color,
             variant,
         });
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex {
             pos: bl,
             uv: [glyph.uv_min[0], glyph.uv_max[1]],
             color,
             variant,
         });
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex {
             pos: br,
             uv: [glyph.uv_max[0], glyph.uv_max[1]],
             color,
@@ -693,7 +677,7 @@ impl TerminalRenderer {
         });
     }
 
-    pub fn add_glyph_id(
+    fn add_glyph_id(
         &mut self,
         queue: &Queue,
         pos: [f32; 2],
@@ -733,37 +717,37 @@ impl TerminalRenderer {
         let bl = to_ndc(x0, y1);
         let br = to_ndc(x1, y1);
 
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex {
             pos: tl,
             uv: [glyph.uv_min[0], glyph.uv_min[1]],
             color,
             variant,
         });
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex {
             pos: tr,
             uv: [glyph.uv_max[0], glyph.uv_min[1]],
             color,
             variant,
         });
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex {
             pos: bl,
             uv: [glyph.uv_min[0], glyph.uv_max[1]],
             color,
             variant,
         });
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex {
             pos: tr,
             uv: [glyph.uv_max[0], glyph.uv_min[1]],
             color,
             variant,
         });
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex {
             pos: bl,
             uv: [glyph.uv_min[0], glyph.uv_max[1]],
             color,
             variant,
         });
-        self.vertecies.push(Vertex {
+        self.vertices.push(Vertex {
             pos: br,
             uv: [glyph.uv_max[0], glyph.uv_max[1]],
             color,
@@ -778,20 +762,14 @@ impl TerminalRenderer {
         screen_size: [f32; 2],
         cluster: &str,
         color: Color,
+        bold: bool,
     ) {
-        let is_normal = cluster.chars().all(|ch| {
-            // Ignore joiners / variation selectors if needed.
-            // They often don't map to standalone glyphs.
-            matches!(
-                ch as u32,
-                0x200C | 0x200D | 0xFE00..=0xFE0F | 0xE0100..=0xE01EF
-            ) || self.normal_font.charmap().map(ch) != 0
-        });
-
-        let (font, variant) = if is_normal {
-            (&self.normal_font, FontVariant::Normal)
-        } else {
-            (&self.icon_font, FontVariant::Emoji)
+        let variant = self.text_font_variant_for_cluster(cluster, bold);
+        let font = match variant {
+            FontVariant::Normal => &self.normal_font,
+            FontVariant::Bold => &self.bold_font,
+            FontVariant::Ime => &self.ime_font,
+            FontVariant::Emoji => &self.icon_font,
         };
 
         let mut shaper = self

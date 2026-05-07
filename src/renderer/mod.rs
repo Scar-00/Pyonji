@@ -82,23 +82,30 @@ pub struct Renderer {
     divider_renderer: BackgroundRenderer,
     arena: Arena,
     font_size: f32,
-    line_heigt: f32,
+    line_height: f32,
 }
 
-pub struct RenderPane<'a> {
+pub struct Pane<'a> {
     pub screen: &'a Screen,
     pub cursor_style: &'a CursorState,
     pub geometry: PaneGeometry,
     pub is_active: bool,
 }
 
-pub struct RenderStatusTab {
+pub struct StatusTab {
     pub label: String,
     pub is_active: bool,
 }
 
+pub struct ImePreedit {
+    pub text: String,
+    pub geometry: PaneGeometry,
+    pub row: u16,
+    pub col: u16,
+}
+
 impl Renderer {
-    pub fn new(window: Arc<Window>, font_size: f32, line_heigt: f32) -> Result<Self> {
+    pub fn new(window: Arc<Window>, font_size: f32, line_height: f32) -> Result<Self> {
         let size = window.inner_size();
         let instance = Instance::new(&InstanceDescriptor {
             backends: Backends::VULKAN,
@@ -163,7 +170,7 @@ impl Renderer {
             divider_renderer,
             arena: Arena::new(),
             font_size,
-            line_heigt,
+            line_height,
         })
     }
 
@@ -193,16 +200,16 @@ impl Renderer {
 
     pub fn render(
         &mut self,
-        panes: &[RenderPane<'_>],
+        panes: &[Pane<'_>],
         dividers: &[Divider],
-        status_tabs: &[RenderStatusTab],
-        current_tab_label: &str,
+        status_tabs: Option<&[StatusTab]>,
+        ime_preedit: Option<&ImePreedit>,
     ) -> Result<()> {
         let size = self.window.inner_size();
         let screen_size = [size.width as f32, size.height as f32];
         let cell_width = self.font_size / 2.0;
         let grid_cols = (size.width as f32 / cell_width).floor().max(1.0) as usize;
-        let grid_rows = (size.height as f32 / self.line_heigt).floor().max(1.0) as usize;
+        let grid_rows = (size.height as f32 / self.line_height).floor().max(1.0) as usize;
         let divider_color = [0.56, 0.60, 0.72, 0.95];
         let divider_px = 1.0f32;
         let divider_width = (divider_px / size.width.max(1) as f32) * 2.0;
@@ -230,10 +237,9 @@ impl Renderer {
             Err(SurfaceError::Other) => return Ok(()),
         };
 
-        //let start = Instant::now();
         let [w, h] = [
             self.font_size / size.width as f32,
-            (self.line_heigt * 2.0) / size.height as f32,
+            (self.line_height * 2.0) / size.height as f32,
         ];
         for pane in panes {
             if pane.geometry.cols == 0 || pane.geometry.rows == 0 {
@@ -251,7 +257,7 @@ impl Renderer {
                     };
                     let bg_color = Color::from(cell.bgcolor());
                     let x = self.font_size / 2.0 * (pane.geometry.x as f32 + col as f32);
-                    let y = self.line_heigt * (pane.geometry.y as f32 + row as f32 + 1.0);
+                    let y = self.line_height * (pane.geometry.y as f32 + row as f32 + 1.0);
                     {
                         let [x, y] = self.ndc([x, y]);
                         let bg_color = if cell.inverse() { fg_color } else { bg_color };
@@ -260,6 +266,7 @@ impl Renderer {
                     }
                     let fg_color = if cell.inverse() { bg_color } else { fg_color };
                     let contents = cell.contents();
+                    let bold = cell.bold();
                     for cluster in contents.graphemes(true) {
                         if cluster.len() != 1 {
                             self.terminal_renderer.add_cluster(
@@ -268,6 +275,7 @@ impl Renderer {
                                 screen_size,
                                 cluster,
                                 fg_color,
+                                bold,
                             );
                         } else {
                             for ch in cluster.chars() {
@@ -277,6 +285,7 @@ impl Renderer {
                                     screen_size,
                                     ch,
                                     fg_color,
+                                    bold,
                                 );
                             }
                         }
@@ -287,20 +296,20 @@ impl Renderer {
             if pane.is_active && !pane.screen.hide_cursor() && pane.screen.scrollback() == 0 {
                 let (row, col) = pane.screen.cursor_position();
                 let x = self.font_size / 2.0 * (pane.geometry.x as f32 + col as f32);
-                let y = self.line_heigt * (pane.geometry.y as f32 + row as f32 + 1.0);
+                let y = self.line_height * (pane.geometry.y as f32 + row as f32 + 1.0);
                 let [x, y] = self.ndc([x, y]);
                 let [w, h] = match pane.cursor_style {
                     CursorState::Bar => [
                         (self.font_size * 0.18) / size.width as f32,
-                        (self.line_heigt * 2.0) / size.height as f32,
+                        (self.line_height * 2.0) / size.height as f32,
                     ],
                     CursorState::Block => [
                         (self.font_size) / size.width as f32,
-                        (self.line_heigt * 2.0) / size.height as f32,
+                        (self.line_height * 2.0) / size.height as f32,
                     ],
                     CursorState::Underline => [
                         (self.font_size * 0.18) / size.width as f32,
-                        (self.line_heigt * 2.0) / size.height as f32,
+                        (self.line_height * 2.0) / size.height as f32,
                     ],
                 };
                 self.background_renderer
@@ -308,19 +317,23 @@ impl Renderer {
             }
         }
 
+        if let Some(preedit) = ime_preedit {
+            self.draw_ime_preedit(preedit, screen_size);
+        }
+
         for divider in dividers {
             match divider.direction {
                 SplitDirection::Vertical => {
                     let x = self.font_size / 2.0 * divider.x as f32;
-                    let y = self.line_heigt * (divider.y + divider.rows) as f32;
-                    let height = divider_height * divider.rows.max(1) as f32 * self.line_heigt;
+                    let y = self.line_height * (divider.y + divider.rows) as f32;
+                    let height = divider_height * divider.rows.max(1) as f32 * self.line_height;
                     let [x, y] = self.ndc([x, y]);
                     self.divider_renderer
                         .add_rect(x, y, divider_width, height, divider_color);
                 }
                 SplitDirection::Horizontal => {
                     let x = self.font_size / 2.0 * divider.x as f32;
-                    let y = self.line_heigt * divider.y as f32 + divider_px;
+                    let y = self.line_height * divider.y as f32 + divider_px;
                     let width = divider_width * divider.cols.max(1) as f32 * (self.font_size / 2.0);
                     let [x, y] = self.ndc([x, y]);
                     self.divider_renderer
@@ -328,15 +341,9 @@ impl Renderer {
                 }
             }
         }
-        self.draw_status_bar(
-            grid_cols,
-            grid_rows,
-            screen_size,
-            status_tabs,
-            current_tab_label,
-        );
-        //println!("layout cells = {:?}", Instant::now() - start);
-
+        if let Some(tabs) = status_tabs {
+            self.draw_status_bar(grid_cols, grid_rows, screen_size, tabs);
+        }
         let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor {
@@ -381,32 +388,29 @@ impl Renderer {
         grid_cols: usize,
         grid_rows: usize,
         screen_size: [f32; 2],
-        status_tabs: &[RenderStatusTab],
-        current_tab_label: &str,
+        status_tabs: &[StatusTab],
     ) {
         if grid_cols == 0 || grid_rows == 0 {
             return;
         }
 
         let bar_row = grid_rows.saturating_sub(1);
-        let bar_bottom = self.line_heigt * (bar_row as f32 + 1.0);
-        let bar_height = (self.line_heigt * 2.0) / screen_size[1].max(1.0);
+        let bar_bottom = self.line_height * (bar_row as f32 + 1.0);
+        let bar_height = (self.line_height * 2.0) / screen_size[1].max(1.0);
         let bar_y = self.ndc([0.0, bar_bottom])[1];
 
-        let bar_bg = [0.18, 0.14, 0.24, 1.0];
-        let active_bg = [0.79, 0.67, 0.93, 1.0];
-        let inactive_bg = [0.34, 0.27, 0.43, 1.0];
-        let right_bg = [0.61, 0.48, 0.78, 1.0];
-        let active_fg = Color::rgb(0x20, 0x14, 0x2c);
+        let bg_color = None;
+        let active_bg = Color::rgb(0xbb, 0x9a, 0xf7);
+        let inactive_bg = Color::rgb(0x56, 0x5f, 0x89);
         let inactive_fg = Color::rgb(0xf0, 0xe7, 0xfa);
+        let active_fg = inactive_fg.clone();
 
-        self.background_renderer
-            .add_rect(-1.0, bar_y, 2.0, bar_height, bar_bg);
+        if let Some(bg) = bg_color {
+            self.background_renderer
+                .add_rect(-1.0, bar_y, 2.0, bar_height, bg);
+        }
 
-        let right_text = fit_status_text(&format!(" current {} ", current_tab_label), grid_cols);
-        let right_width = right_text.chars().count().min(grid_cols);
-        let right_start = grid_cols.saturating_sub(right_width);
-        let left_limit = right_start.saturating_sub(1);
+        let left_limit = grid_cols;
 
         let mut cursor = 0usize;
         for tab in status_tabs {
@@ -446,14 +450,6 @@ impl Renderer {
                 },
             );
             cursor += width;
-            if cursor < left_limit {
-                cursor += 1;
-            }
-        }
-
-        if right_width > 0 {
-            self.draw_status_segment(right_start, bar_bottom, right_width, right_bg);
-            self.draw_status_text(&right_text, right_start, bar_row, screen_size, active_fg);
         }
     }
 
@@ -462,7 +458,7 @@ impl Renderer {
         start_col: usize,
         bottom_y: f32,
         width_cols: usize,
-        color: [f32; 4],
+        color: Color,
     ) {
         if width_cols == 0 {
             return;
@@ -473,9 +469,9 @@ impl Renderer {
             / self.window.inner_size().width as f32)
             * 2.0;
         let [x, y] = self.ndc([x, bottom_y]);
-        let height = (self.line_heigt * 2.0) / self.window.inner_size().height.max(1) as f32;
+        let height = (self.line_height * 2.0) / self.window.inner_size().height.max(1) as f32;
         self.background_renderer
-            .add_rect(x, y, width, height, color);
+            .add_rect(x, y, width, height, color.to_linear());
     }
 
     fn draw_status_text(
@@ -487,19 +483,59 @@ impl Renderer {
         color: Color,
     ) {
         let x = self.font_size / 2.0 * start_col as f32;
-        let y = self.line_heigt * (row as f32 + 1.0);
+        let y = self.line_height * (row as f32 + 1.0);
         let mut col = 0usize;
         for cluster in text.graphemes(true) {
             let pos = [x + (self.font_size / 2.0) * col as f32, y];
             if cluster.len() != 1 {
-                self.terminal_renderer
-                    .add_cluster(&self.queue, pos, screen_size, cluster, color);
+                self.terminal_renderer.add_cluster(
+                    &self.queue,
+                    pos,
+                    screen_size,
+                    cluster,
+                    color,
+                    false,
+                );
             } else {
                 for ch in cluster.chars() {
-                    self.terminal_renderer
-                        .add_glyph(&self.queue, pos, screen_size, ch, color);
+                    self.terminal_renderer.add_glyph(
+                        &self.queue,
+                        pos,
+                        screen_size,
+                        ch,
+                        color,
+                        false,
+                    );
                 }
             }
+            col += 1;
+        }
+    }
+
+    fn draw_ime_preedit(&mut self, preedit: &ImePreedit, screen_size: [f32; 2]) {
+        let x = self.font_size / 2.0 * (preedit.geometry.x as f32 + preedit.col as f32);
+        let y = self.line_height * (preedit.geometry.y as f32 + preedit.row as f32 + 1.0);
+        let width_cols = preedit.text.graphemes(true).count().max(1);
+        let width = ((self.font_size / 2.0) * width_cols as f32
+            / self.window.inner_size().width.max(1) as f32)
+            * 2.0;
+        let height = (self.line_height * 2.0) / self.window.inner_size().height.max(1) as f32;
+        let [bg_x, bg_y] = self.ndc([x, y]);
+
+        self.background_renderer
+            .add_rect(bg_x, bg_y, width, height, [0.22, 0.24, 0.32, 0.92]);
+
+        let mut col = 0usize;
+        for cluster in preedit.text.graphemes(true) {
+            let pos = [x + (self.font_size / 2.0) * col as f32, y];
+            self.terminal_renderer.add_cluster(
+                &self.queue,
+                pos,
+                screen_size,
+                cluster,
+                Color::rgb(0xf0, 0xe7, 0xfa),
+                false,
+            );
             col += 1;
         }
     }

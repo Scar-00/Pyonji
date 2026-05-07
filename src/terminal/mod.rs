@@ -363,7 +363,10 @@ impl Tab {
         if sessions.len() <= 1 {
             return Some(active);
         }
-        let current = sessions.iter().position(|session| *session == active).unwrap_or(0);
+        let current = sessions
+            .iter()
+            .position(|session| *session == active)
+            .unwrap_or(0);
         let next = sessions[(current + 1) % sessions.len()];
         self.active_session = Some(next);
         Some(next)
@@ -392,10 +395,7 @@ impl Tab {
     }
 
     pub fn sessions(&self) -> Vec<SessionId> {
-        self.root
-            .as_ref()
-            .map(Pane::sessions)
-            .unwrap_or_default()
+        self.root.as_ref().map(Pane::sessions).unwrap_or_default()
     }
 
     pub fn layout(&self, area: PaneGeometry) -> Vec<(SessionId, PaneGeometry)> {
@@ -534,6 +534,38 @@ enum MouseAction {
     Motion,
 }
 
+fn control_key_byte(code: KeyCode) -> Option<u8> {
+    match code {
+        KeyCode::KeyA => Some(0x01),
+        KeyCode::KeyB => Some(0x02),
+        KeyCode::KeyC => Some(0x03),
+        KeyCode::KeyD => Some(0x04),
+        KeyCode::KeyE => Some(0x05),
+        KeyCode::KeyF => Some(0x06),
+        KeyCode::KeyG => Some(0x07),
+        KeyCode::KeyH => Some(0x08),
+        KeyCode::KeyI => Some(0x09),
+        KeyCode::KeyJ => Some(0x0a),
+        KeyCode::KeyK => Some(0x0b),
+        KeyCode::KeyL => Some(0x0c),
+        KeyCode::KeyM => Some(0x0d),
+        KeyCode::KeyN => Some(0x0e),
+        KeyCode::KeyO => Some(0x0f),
+        KeyCode::KeyP => Some(0x10),
+        KeyCode::KeyQ => Some(0x11),
+        KeyCode::KeyR => Some(0x12),
+        KeyCode::KeyS => Some(0x13),
+        KeyCode::KeyT => Some(0x14),
+        KeyCode::KeyU => Some(0x15),
+        KeyCode::KeyV => Some(0x16),
+        KeyCode::KeyW => Some(0x17),
+        KeyCode::KeyX => Some(0x18),
+        KeyCode::KeyY => Some(0x19),
+        KeyCode::KeyZ => Some(0x1a),
+        _ => None,
+    }
+}
+
 impl TerminalSession {
     pub fn uses_local_scrollback(&self) -> bool {
         let screen = self.vt.screen();
@@ -590,114 +622,11 @@ impl TerminalSession {
         }
 
         if let PhysicalKey::Code(code) = event.physical_key {
-            if mods.control_key() {
-                match code {
-                    KeyCode::KeyC => {
-                        self.pty.add_bytes(&[3]);
-                        return;
-                    }
-                    KeyCode::KeyA => {
-                        self.pty.add_bytes(&[0x01]);
-                        return;
-                    }
-                    KeyCode::KeyB => {
-                        self.pty.add_bytes(&[0x02]);
-                        return;
-                    }
-                    KeyCode::KeyD => {
-                        self.pty.add_bytes(&[0x04]);
-                        return;
-                    }
-                    KeyCode::KeyE => {
-                        self.pty.add_bytes(&[0x05]);
-                        return;
-                    }
-                    KeyCode::KeyF => {
-                        self.pty.add_bytes(&[0x06]);
-                        return;
-                    }
-                    KeyCode::KeyG => {
-                        self.pty.add_bytes(&[0x07]);
-                        return;
-                    }
-                    KeyCode::KeyH => {
-                        self.pty.add_bytes(&[0x08]);
-                        return;
-                    }
-                    KeyCode::KeyI => {
-                        self.pty.add_bytes(&[0x09]);
-                        return;
-                    }
-                    KeyCode::KeyJ => {
-                        self.pty.add_bytes(&[0x0a]);
-                        return;
-                    }
-                    KeyCode::KeyK => {
-                        self.pty.add_bytes(&[0x0b]);
-                        return;
-                    }
-                    KeyCode::KeyL => {
-                        self.pty.add_bytes(&[0x0c]);
-                        return;
-                    }
-                    KeyCode::KeyM => {
-                        self.pty.add_bytes(&[0x0d]);
-                        return;
-                    }
-                    KeyCode::KeyN => {
-                        self.pty.add_bytes(&[0x0e]);
-                        return;
-                    }
-                    KeyCode::KeyO => {
-                        self.pty.add_bytes(&[0x0f]);
-                        return;
-                    }
-                    KeyCode::KeyP => {
-                        self.pty.add_bytes(&[0x10]);
-                        return;
-                    }
-                    KeyCode::KeyQ => {
-                        self.pty.add_bytes(&[0x11]);
-                        return;
-                    }
-                    KeyCode::KeyR => {
-                        self.pty.add_bytes(&[0x12]);
-                        return;
-                    }
-                    KeyCode::KeyS => {
-                        self.pty.add_bytes(&[0x13]);
-                        return;
-                    }
-                    KeyCode::KeyT => {
-                        self.pty.add_bytes(&[0x14]);
-                        return;
-                    }
-                    KeyCode::KeyU => {
-                        self.pty.add_bytes(&[0x15]);
-                        return;
-                    }
-                    KeyCode::KeyV => {
-                        self.pty.add_bytes(&[0x16]);
-                        return;
-                    }
-                    KeyCode::KeyW => {
-                        self.pty.add_bytes(&[0x17]);
-                        return;
-                    }
-                    KeyCode::KeyX => {
-                        self.pty.add_bytes(&[0x18]);
-                        return;
-                    }
-                    KeyCode::KeyY => {
-                        self.pty.add_bytes(&[0x19]);
-                        return;
-                    }
-                    KeyCode::KeyZ => {
-                        self.pty.add_bytes(&[0x1a]);
-                        return;
-                    }
-                    _ => {}
-                }
+            if mods.control_key()
+                && let Some(byte) = control_key_byte(code)
+            {
+                self.pty.add_bytes([byte]);
+                return;
             }
         }
         let is_app_cursor_mode = self.vt.screen().application_cursor();
@@ -939,45 +868,4 @@ impl TerminalSession {
             }
         }
     }
-
-    /*pub fn handle_mouse_button(
-        &mut self,
-        button: MouseButton,
-        mods: ModifiersState,
-        size: PhysicalSize<u32>,
-    ) {
-        if self.vt.screen().mouse_protocol_mode() != MouseProtocolMode::None {
-            let button_code = match button {
-                MouseButton::Left => 0,
-                MouseButton::Middle => 1,
-                MouseButton::Right => 2,
-                _ => return,
-            };
-
-            let mut code = button_code;
-            if mods.shift_key() {
-                code += 4;
-            }
-            if mods.alt_key() {
-                code += 8;
-            }
-            if mods.control_key() {
-                code += 16;
-            }
-            if action == MouseAction::Drag {
-                code += 32;
-            }
-
-            // SGR format: different M/m for press vs release
-            let terminator = match action {
-                MouseAction::Press | MouseAction::Drag => 'M',
-                MouseAction::Release => 'm',
-                MouseAction::Move => 'm', // Motion without button
-            };
-
-            // Coords are 1-indexed in SGR mode
-            let seq = format!("\x1b[<{};{};{}{}", code, col + 1, row + 1, terminator);
-            self.pty.add_bytes(seq.as_bytes());
-        }
-    }*/
 }

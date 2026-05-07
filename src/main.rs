@@ -1,20 +1,22 @@
 #![cfg_attr(all(windows, feature = "install"), windows_subsystem = "windows")]
 
+#[cfg(feature = "install")]
+mod logging;
 mod pty;
 mod renderer;
 mod terminal;
-//mod ui;
 
 use std::{array, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use pty::Event as PtyEvent;
-use renderer::{RenderPane, RenderStatusTab, Renderer};
+use renderer::{ImePreedit, Pane, Renderer, StatusTab};
+use tracing::error;
 use winit::{
     application::ApplicationHandler,
-    dpi::PhysicalSize,
-    event::{ElementState, MouseScrollDelta, WindowEvent},
+    dpi::{PhysicalPosition, PhysicalSize},
+    event::{ElementState, Ime, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, ModifiersState, PhysicalKey},
     window::{Icon, Window, WindowId},
@@ -47,6 +49,9 @@ struct App {
     divider_drag: Option<DividerDrag>,
     resize_mode_held: bool,
     resize_mode_used: bool,
+    ime_enabled: bool,
+    ime_preedit: Option<String>,
+    status_bar_hidden: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -63,6 +68,9 @@ struct DividerDrag {
 }
 
 fn main() -> Result<()> {
+    #[cfg(feature = "install")]
+    logging::init();
+
     let cli = Cli::parse();
 
     let event_loop = EventLoop::<PtyEvent>::with_user_event()
@@ -87,14 +95,16 @@ fn main() -> Result<()> {
         divider_drag: None,
         resize_mode_held: false,
         resize_mode_used: false,
+        ime_enabled: false,
+        ime_preedit: None,
+        status_bar_hidden: false,
     };
 
     event_loop.set_control_flow(ControlFlow::Wait);
-    if let Err(e) = event_loop.run_app(&mut app) {
-        std::fs::write("C:/dev/learning/pyonji/log.txt", format!("error = {e}"))?;
-        return Err(e.into());
-    }
-    Ok(())
+    event_loop.run_app(&mut app).map_err(|error| {
+        error!(%error, "event loop failed");
+        error.into()
+    })
 }
 
 impl App {
@@ -107,9 +117,7 @@ impl ApplicationHandler<PtyEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let icon = image::load_from_memory(Self::ICON).ok().and_then(|image| {
             let data = image.to_rgba8().to_vec();
-            Icon::from_rgba(data, image.width(), image.height())
-                .inspect_err(|e| println!("icon-err = {e}"))
-                .ok()
+            Icon::from_rgba(data, image.width(), image.height()).ok()
         });
         let Ok(window) = event_loop.create_window(
             Window::default_attributes()
@@ -127,19 +135,29 @@ impl ApplicationHandler<PtyEvent> for App {
         self.cols = (size.width as f32 / (self.font_size / 2.0)) as u16;
 
         let window = Arc::new(window);
-        self.renderer = Renderer::new(window.clone(), self.font_size, self.line_height).ok();
+        self.renderer = match Renderer::new(window.clone(), self.font_size, self.line_height) {
+            Ok(renderer) => Some(renderer),
+            Err(error) => {
+                error!(error = ?error, "failed to initialize renderer");
+                None
+            }
+        };
         self.window = Some(window.clone());
 
-        if let Ok(session) = self.session_manager.create_session(
+        match self.session_manager.create_session(
             self.terminal_rows().max(1),
             self.cols.max(1),
             self.args.path.as_deref(),
         ) {
-            self.tabs[0] = Some(Tab::new(session));
-            self.current_tab = 0;
-            self.resize_current_tab_sessions();
+            Ok(session) => {
+                self.tabs[0] = Some(Tab::new(session));
+                self.current_tab = 0;
+                self.resize_current_tab_sessions();
+            }
+            Err(error) => error!(error = ?error, "failed to create initial session"),
         }
         window.request_redraw();
+        self.update_ime_cursor_area();
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: PtyEvent) {
@@ -171,12 +189,14 @@ impl ApplicationHandler<PtyEvent> for App {
                     self.resize_current_tab_sessions();
                 }
                 self.window.as_ref().map(|window| window.request_redraw());
+                self.update_ime_cursor_area();
             }
             PtyEvent::Data(id, data) => {
                 self.session_manager.update_session(id, &data);
                 if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
                 }
+                self.update_ime_cursor_area();
             }
         }
     }
@@ -192,8 +212,8 @@ impl ApplicationHandler<PtyEvent> for App {
                 let panes = self.current_tab_layouts();
                 let dividers = self.current_tab_dividers();
                 let active_session = self.current_active_session_id();
-                let status_tabs = self.render_status_tabs();
-                let current_tab_label = self.current_tab_status_label();
+                let status_tabs = self.status_tabs();
+                let ime_preedit = self.ime_preedit();
                 let Some(renderer) = self.renderer.as_mut() else {
                     return;
                 };
@@ -203,7 +223,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     let Some(session) = self.session_manager.session(session_id) else {
                         continue;
                     };
-                    render_panes.push(RenderPane {
+                    render_panes.push(Pane {
                         screen: session.vt.screen(),
                         cursor_style: &session.cursor_style,
                         geometry,
@@ -211,10 +231,13 @@ impl ApplicationHandler<PtyEvent> for App {
                     });
                 }
 
-                if let Err(e) =
-                    renderer.render(&render_panes, &dividers, &status_tabs, &current_tab_label)
-                {
-                    println!("failed to render = {e}");
+                if let Err(e) = renderer.render(
+                    &render_panes,
+                    &dividers,
+                    status_tabs.as_deref(),
+                    ime_preedit.as_ref(),
+                ) {
+                    error!(error = ?e, "failed to render");
                 }
             }
             WindowEvent::Resized(size) => {
@@ -231,6 +254,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 };
                 renderer.resize(size);
                 window.request_redraw();
+                self.update_ime_cursor_area();
             }
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
@@ -296,6 +320,7 @@ impl ApplicationHandler<PtyEvent> for App {
 
                 if state == ElementState::Pressed {
                     self.set_active_session(hit.session_id);
+                    self.update_ime_cursor_area();
                 }
 
                 if let Some(session) = self.session_manager.session_mut(hit.session_id) {
@@ -460,20 +485,10 @@ impl ApplicationHandler<PtyEvent> for App {
                                 self.split_current_tab(SplitDirection::Horizontal);
                                 return;
                             }
-                            KeyCode::ArrowLeft => {
-                                self.resize_active_pane(SplitDirection::Vertical, -1);
-                                return;
-                            }
-                            KeyCode::ArrowRight => {
-                                self.resize_active_pane(SplitDirection::Vertical, 1);
-                                return;
-                            }
-                            KeyCode::ArrowUp => {
-                                self.resize_active_pane(SplitDirection::Horizontal, -1);
-                                return;
-                            }
-                            KeyCode::ArrowDown => {
-                                self.resize_active_pane(SplitDirection::Horizontal, 1);
+                            KeyCode::KeyS => {
+                                self.status_bar_hidden = !self.status_bar_hidden;
+                                self.resize_current_tab_sessions();
+                                self.window.as_ref().map(|window| window.request_redraw());
                                 return;
                             }
                             _ => {}
@@ -498,9 +513,7 @@ impl ApplicationHandler<PtyEvent> for App {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
-            WindowEvent::Ime(ime) => {
-                println!("ime = {ime:?}");
-            }
+            WindowEvent::Ime(event) => self.handle_ime_event(event),
             _ => {}
         }
     }
@@ -621,6 +634,7 @@ impl App {
                 geometry.cols.max(1),
             );
         }
+        self.update_ime_cursor_area();
     }
 
     fn pane_hit_test(&self, x: f64, y: f64) -> Option<PaneHit> {
@@ -691,6 +705,7 @@ impl App {
         };
         if tab.set_active_session(session_id) {
             self.wheel_remainder = 0.0;
+            self.update_ime_cursor_area();
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
             }
@@ -705,6 +720,7 @@ impl App {
             return;
         }
         self.wheel_remainder = 0.0;
+        self.update_ime_cursor_area();
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }
@@ -788,15 +804,19 @@ impl App {
         }
         .max(1);
 
-        let Ok(session_id) = self.session_manager.create_session(
+        let session_id = match self.session_manager.create_session(
             new_rows,
             new_cols,
             self.session_manager
                 .session(active_session)
                 .and_then(|session| session.pty.current_dir())
                 .as_deref(),
-        ) else {
-            return;
+        ) {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                error!(error = ?error, "failed to split session");
+                return;
+            }
         };
         let Some(tab) = self.tabs[self.current_tab].as_mut() else {
             return;
@@ -814,12 +834,16 @@ impl App {
 
     fn switch_tab(&mut self, tab: usize) {
         if self.tabs[tab].is_none() {
-            let Ok(id) = self.session_manager.create_session(
+            let id = match self.session_manager.create_session(
                 self.terminal_rows().max(1),
                 self.cols.max(1),
                 None,
-            ) else {
-                return;
+            ) {
+                Ok(id) => id,
+                Err(error) => {
+                    error!(error = ?error, "failed to create tab session");
+                    return;
+                }
             };
             self.tabs[tab] = Some(Tab::new(id));
         }
@@ -827,13 +851,14 @@ impl App {
         self.current_tab = tab;
         self.wheel_remainder = 0.0;
         self.resize_current_tab_sessions();
+        self.update_ime_cursor_area();
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }
     }
 
     fn terminal_rows(&self) -> u16 {
-        if self.rows > Self::STATUS_BAR_ROWS {
+        if self.rows > Self::STATUS_BAR_ROWS && !self.status_bar_hidden {
             self.rows - Self::STATUS_BAR_ROWS
         } else {
             self.rows
@@ -849,24 +874,112 @@ impl App {
             .unwrap_or("shell")
     }
 
-    fn render_status_tabs(&self) -> Vec<RenderStatusTab> {
-        self.tabs
-            .iter()
-            .enumerate()
-            .filter_map(|(index, tab)| {
-                tab.as_ref().map(|_| RenderStatusTab {
-                    label: format!("{}:{}", index + 1, self.tab_program_name(index)),
-                    is_active: index == self.current_tab,
+    fn status_tabs(&self) -> Option<Vec<StatusTab>> {
+        if self.status_bar_hidden {
+            return None;
+        }
+
+        Some(
+            self.tabs
+                .iter()
+                .enumerate()
+                .filter_map(|(index, tab)| {
+                    tab.as_ref().map(|_| StatusTab {
+                        label: format!("{} {}", index + 1, self.tab_program_name(index)),
+                        is_active: index == self.current_tab,
+                    })
                 })
-            })
-            .collect()
+                .collect(),
+        )
     }
 
-    fn current_tab_status_label(&self) -> String {
-        format!(
-            "{}:{}",
-            self.current_tab + 1,
-            self.tab_program_name(self.current_tab)
-        )
+    fn handle_ime_event(&mut self, event: Ime) {
+        match event {
+            Ime::Enabled => {
+                self.ime_enabled = true;
+                self.update_ime_cursor_area();
+            }
+            Ime::Preedit(text, _) => {
+                self.ime_preedit = (!text.is_empty()).then_some(text);
+                self.update_ime_cursor_area();
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
+            }
+            Ime::Commit(text) => {
+                self.ime_preedit = None;
+                let Some(active_session) = self.current_active_session_id() else {
+                    return;
+                };
+                let reset_scrollback = self
+                    .session_manager
+                    .session_mut(active_session)
+                    .is_some_and(|session| session.reset_scrollback());
+                self.session_manager.send_text(active_session, &text);
+                if reset_scrollback {
+                    if let Some(window) = self.window.as_ref() {
+                        window.request_redraw();
+                    }
+                }
+                self.update_ime_cursor_area();
+            }
+            Ime::Disabled => {
+                self.ime_enabled = false;
+                self.ime_preedit = None;
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
+            }
+        }
+    }
+
+    fn update_ime_cursor_area(&self) {
+        if !self.ime_enabled {
+            return;
+        }
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let Some(active_session) = self.current_active_session_id() else {
+            return;
+        };
+        let Some(session) = self.session_manager.session(active_session) else {
+            return;
+        };
+        let Some((_, geometry)) = self
+            .current_tab_layouts()
+            .into_iter()
+            .find(|(session_id, _)| *session_id == active_session)
+        else {
+            return;
+        };
+
+        let (row, col) = session.vt.screen().cursor_position();
+        let cell_width = self.font_size / 2.0;
+        let x = cell_width * (geometry.x as f32 + col as f32);
+        let y = self.line_height * (geometry.y as f32 + row as f32);
+
+        window.set_ime_cursor_area(
+            PhysicalPosition::new(x as i32, y as i32),
+            PhysicalSize::new(cell_width.ceil() as u32, self.line_height.ceil() as u32),
+        );
+    }
+
+    fn ime_preedit(&self) -> Option<ImePreedit> {
+        let text = self.ime_preedit.as_ref()?;
+        let active_session = self.current_active_session_id()?;
+        let session = self.session_manager.session(active_session)?;
+        let (_, geometry) = self
+            .current_tab_layouts()
+            .into_iter()
+            .find(|(session_id, _)| *session_id == active_session)?;
+        let (row, col) = session.vt.screen().cursor_position();
+
+        Some(ImePreedit {
+            text: text.clone(),
+            geometry,
+            row,
+            col,
+        })
     }
 }

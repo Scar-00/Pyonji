@@ -59,6 +59,13 @@ impl SessionManager {
         session.vt.process(&data);
     }
 
+    pub fn send_text(&mut self, id: SessionId, text: &str) {
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        session.pty.add_bytes(text.as_bytes());
+    }
+
     pub fn session(&self, id: SessionId) -> Option<&TerminalSession> {
         self.sessions.get(&id)
     }
