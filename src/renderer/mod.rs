@@ -30,7 +30,7 @@ impl Color {
         Self([r, g, b, 0xFF])
     }
 
-    pub fn to_linear(&self) -> [f32; 4] {
+    pub fn to_linear(self) -> [f32; 4] {
         fn srgb_to_linear(c: u8) -> f32 {
             let c = c as f32 / 255.0;
             if c <= 0.04045 {
@@ -48,7 +48,7 @@ impl Color {
         ]
     }
 
-    pub fn to_wgpu(&self) -> wgpu::Color {
+    pub fn to_wgpu(self) -> wgpu::Color {
         let [r, g, b, a] = self.to_linear();
         wgpu::Color {
             r: r.into(),
@@ -62,7 +62,7 @@ impl Color {
 impl From<vt100::Color> for Color {
     fn from(value: vt100::Color) -> Self {
         match value {
-            vt100::Color::Idx(idx) => Self::from(ansi_index_to_rgb(idx)),
+            vt100::Color::Idx(idx) => ansi_index_to_rgb(idx),
             vt100::Color::Rgb(r, g, b) => Self([r, g, b, 0xFF]),
             vt100::Color::Default => Self([0x18, 0x18, 0x18, 0xFF]),
         }
@@ -183,11 +183,14 @@ impl Renderer {
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
         self.surface.configure(
             &self.device,
             &SurfaceConfiguration {
                 usage: TextureUsages::RENDER_ATTACHMENT,
-                format: self.format.clone(),
+                format: self.format,
                 width: size.width,
                 height: size.height,
                 present_mode: PresentMode::AutoVsync,
@@ -217,11 +220,14 @@ impl Renderer {
         let surface = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(SurfaceError::Lost | SurfaceError::Outdated) => {
+                if size.width == 0 || size.height == 0 {
+                    return Ok(());
+                }
                 self.surface.configure(
                     &self.device,
                     &SurfaceConfiguration {
                         usage: TextureUsages::RENDER_ATTACHMENT,
-                        format: self.format.clone(),
+                        format: self.format,
                         width: size.width,
                         height: size.height,
                         present_mode: PresentMode::AutoVsync,
@@ -403,7 +409,7 @@ impl Renderer {
         let active_bg = Color::rgb(0xbb, 0x9a, 0xf7);
         let inactive_bg = Color::rgb(0x56, 0x5f, 0x89);
         let inactive_fg = Color::rgb(0xf0, 0xe7, 0xfa);
-        let active_fg = inactive_fg.clone();
+        let active_fg = inactive_fg;
 
         if let Some(bg) = bg_color {
             self.background_renderer
@@ -484,8 +490,7 @@ impl Renderer {
     ) {
         let x = self.font_size / 2.0 * start_col as f32;
         let y = self.line_height * (row as f32 + 1.0);
-        let mut col = 0usize;
-        for cluster in text.graphemes(true) {
+        for (col, cluster) in text.graphemes(true).enumerate() {
             let pos = [x + (self.font_size / 2.0) * col as f32, y];
             if cluster.len() != 1 {
                 self.terminal_renderer.add_cluster(
@@ -508,7 +513,6 @@ impl Renderer {
                     );
                 }
             }
-            col += 1;
         }
     }
 
@@ -525,8 +529,7 @@ impl Renderer {
         self.background_renderer
             .add_rect(bg_x, bg_y, width, height, [0.22, 0.24, 0.32, 0.92]);
 
-        let mut col = 0usize;
-        for cluster in preedit.text.graphemes(true) {
+        for (col, cluster) in preedit.text.graphemes(true).enumerate() {
             let pos = [x + (self.font_size / 2.0) * col as f32, y];
             self.terminal_renderer.add_cluster(
                 &self.queue,
@@ -536,7 +539,6 @@ impl Renderer {
                 Color::rgb(0xf0, 0xe7, 0xfa),
                 false,
             );
-            col += 1;
         }
     }
 }

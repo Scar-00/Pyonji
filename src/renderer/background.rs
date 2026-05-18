@@ -10,7 +10,7 @@ use wgpu::{
     VertexFormat, VertexState, VertexStepMode,
 };
 
-const SHADER_SRC: &str = r#"
+const SHADER_SRC: &str = r"
 struct VertexInput {
     @location(0) pos: vec2<f32>,
     @location(1) color: vec4<f32>,
@@ -33,7 +33,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return in.color;
 }
-"#;
+";
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -94,7 +94,7 @@ impl BackgroundRenderer {
                 entry_point: Some("fs_main"),
                 compilation_options: PipelineCompilationOptions::default(),
                 targets: &[Some(ColorTargetState {
-                    format: format,
+                    format,
                     blend: Some(BlendState::ALPHA_BLENDING),
                     write_mask: ColorWrites::ALL,
                 })],

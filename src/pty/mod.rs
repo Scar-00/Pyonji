@@ -1,12 +1,10 @@
 use std::{
-    ffi::OsString,
     io::Write,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
-use vswhom::VsFindResult;
 use winit::event_loop::EventLoopProxy;
 
 use crate::terminal::SessionId;
@@ -48,24 +46,7 @@ impl Pty {
             cmd.cwd(path);
         }
         cmd.env("TERM", "xterm-256color");
-        let vs = VsFindResult::search();
-        std::env::vars_os().for_each(|mut var| {
-            if var.0 == "PATH" {
-                if let Some(ref vs) = vs {
-                    vs.windows_sdk_um_library_path.as_ref().map(|path| {
-                        var.1.push(OsString::from(format!(";{}", path.display())));
-                    });
-                    vs.windows_sdk_ucrt_library_path.as_ref().map(|path| {
-                        var.1.push(OsString::from(format!(";{}", path.display())));
-                    });
-                    vs.windows_sdk_root.as_ref().map(|path| {
-                        var.1.push(OsString::from(format!(";{}", path.display())));
-                    });
-                    vs.vs_exe_path.as_ref().map(|path| {
-                        var.1.push(OsString::from(format!(";{}", path.display())));
-                    });
-                }
-            }
+        std::env::vars_os().for_each(|var| {
             cmd.env(var.0, var.1);
         });
 
@@ -100,16 +81,12 @@ impl Pty {
             let mut buf = [0u8; 8192];
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) => {
+                    Ok(0) | Err(_) => {
                         _ = tx.send_event(Event::Closed(id));
                         break;
                     }
                     Ok(n) => {
                         _ = tx.send_event(Event::Data(id, buf[..n].to_vec()));
-                    }
-                    Err(_) => {
-                        _ = tx.send_event(Event::Closed(id));
-                        break;
                     }
                 }
             }
@@ -138,9 +115,9 @@ impl Pty {
 
     pub fn add_csi_tilde(&mut self, csi_param: Option<u8>, byte: u8) {
         if let Some(m) = csi_param {
-            self.add_bytes(format!("\x1b[{};{}~", byte, m).as_bytes());
+            self.add_bytes(format!("\x1b[{byte};{m}~").as_bytes());
         } else {
-            self.add_bytes(format!("\x1b[{}~", byte).as_bytes());
+            self.add_bytes(format!("\x1b[{byte}~").as_bytes());
         }
     }
 
@@ -217,7 +194,7 @@ impl Pty {
                 basic_info.PebBaseAddress as *const _,
                 &mut peb as *mut _ as *mut _,
                 size_of::<PEB>(),
-                &mut bytes_read,
+                &raw mut bytes_read,
             ) == 0
             {
                 CloseHandle(process);
@@ -230,7 +207,7 @@ impl Pty {
                 peb.ProcessParameters as *const _,
                 &mut params as *mut _ as *mut _,
                 size_of::<RTL_USER_PROCESS_PARAMETERS>(),
-                &mut bytes_read,
+                &raw mut bytes_read,
             ) == 0
             {
                 CloseHandle(process);
@@ -269,7 +246,7 @@ fn read_remote_unicode_string(
             value.Buffer as *const _,
             buffer.as_mut_ptr() as *mut _,
             value.Length as usize,
-            &mut bytes_read,
+            &raw mut bytes_read,
         ) == 0
         {
             return None;

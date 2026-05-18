@@ -24,6 +24,7 @@ use winit::{
 
 use crate::terminal::{
     Divider, PaneGeometry, PanePathStep, SessionId, SessionManager, SplitDirection, Tab,
+    TerminalSession,
 };
 
 #[derive(clap::Parser)]
@@ -152,7 +153,7 @@ impl ApplicationHandler<PtyEvent> for App {
             Ok(session) => {
                 self.tabs[0] = Some(Tab::new(session));
                 self.current_tab = 0;
-                self.resize_current_tab_sessions();
+                self.resize_tab();
             }
             Err(error) => error!(error = ?error, "failed to create initial session"),
         }
@@ -186,16 +187,14 @@ impl ApplicationHandler<PtyEvent> for App {
                 if removed_current_tab {
                     self.switch_to_previous_live_tab_or_stay(self.current_tab);
                 } else {
-                    self.resize_current_tab_sessions();
+                    self.resize_tab();
                 }
-                self.window.as_ref().map(|window| window.request_redraw());
+                self.request_redraw();
                 self.update_ime_cursor_area();
             }
             PtyEvent::Data(id, data) => {
                 self.session_manager.update_session(id, &data);
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
-                }
+                self.request_redraw();
                 self.update_ime_cursor_area();
             }
         }
@@ -209,30 +208,30 @@ impl ApplicationHandler<PtyEvent> for App {
     ) {
         match event {
             WindowEvent::RedrawRequested => {
-                let panes = self.current_tab_layouts();
-                let dividers = self.current_tab_dividers();
-                let active_session = self.current_active_session_id();
+                let panes = self.tab_layouts();
+                let active = self.active_session();
+                let dividers = self.tab_dividers();
                 let status_tabs = self.status_tabs();
                 let ime_preedit = self.ime_preedit();
                 let Some(renderer) = self.renderer.as_mut() else {
                     return;
                 };
 
-                let mut render_panes = Vec::with_capacity(panes.len());
+                let mut pane_data = Vec::with_capacity(panes.len());
                 for (session_id, geometry) in panes {
                     let Some(session) = self.session_manager.session(session_id) else {
                         continue;
                     };
-                    render_panes.push(Pane {
+                    pane_data.push(Pane {
                         screen: session.vt.screen(),
                         cursor_style: &session.cursor_style,
                         geometry,
-                        is_active: Some(session_id) == active_session,
+                        is_active: Some(session_id) == active,
                     });
                 }
 
                 if let Err(e) = renderer.render(
-                    &render_panes,
+                    &pane_data,
                     &dividers,
                     status_tabs.as_deref(),
                     ime_preedit.as_ref(),
@@ -246,7 +245,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 }
                 self.rows = (size.height as f32 / self.line_height) as u16;
                 self.cols = (size.width as f32 / (self.font_size / 2.0)) as u16;
-                self.resize_current_tab_sessions();
+                self.resize_tab();
 
                 let Some((window, renderer)) = self.window.as_ref().zip(self.renderer.as_mut())
                 else {
@@ -283,9 +282,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     };
                     session.handle_mouse_move(self.modifiers, hit.col, hit.row);
                     if reset_scrollback {
-                        if let Some(window) = self.window.as_ref() {
-                            window.request_redraw();
-                        }
+                        self.request_redraw();
                     }
                 }
             }
@@ -331,9 +328,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     };
                     session.handle_mouse_button(button, state, self.modifiers, hit.col, hit.row);
                     if reset_scrollback {
-                        if let Some(window) = self.window.as_ref() {
-                            window.request_redraw();
-                        }
+                        self.request_redraw();
                     }
                 }
             }
@@ -368,17 +363,13 @@ impl ApplicationHandler<PtyEvent> for App {
                 if let Some(session) = self.session_manager.session_mut(hit.session_id) {
                     if uses_local_scrollback {
                         if whole_lines != 0 && session.scroll_scrollback(whole_lines) {
-                            if let Some(window) = self.window.as_ref() {
-                                window.request_redraw();
-                            }
+                            self.request_redraw();
                         }
                     } else {
                         let reset_scrollback = session.reset_scrollback();
                         session.handle_mouse_wheel(lines, self.modifiers, hit.col, hit.row);
                         if reset_scrollback {
-                            if let Some(window) = self.window.as_ref() {
-                                window.request_redraw();
-                            }
+                            self.request_redraw();
                         }
                     }
                 }
@@ -487,8 +478,8 @@ impl ApplicationHandler<PtyEvent> for App {
                             }
                             KeyCode::KeyS => {
                                 self.status_bar_hidden = !self.status_bar_hidden;
-                                self.resize_current_tab_sessions();
-                                self.window.as_ref().map(|window| window.request_redraw());
+                                self.resize_tab();
+                                self.request_redraw();
                                 return;
                             }
                             _ => {}
@@ -496,7 +487,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     }
                 }
 
-                let Some(active_session) = self.current_active_session_id() else {
+                let Some(active_session) = self.active_session() else {
                     return;
                 };
                 let is_csi = self.is_csi();
@@ -504,9 +495,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     let reset_scrollback = session.reset_scrollback();
                     session.handle_key_press(&event, self.modifiers, is_csi);
                     if reset_scrollback {
-                        if let Some(window) = self.window.as_ref() {
-                            window.request_redraw();
-                        }
+                        self.request_redraw();
                     }
                 }
             }
@@ -520,6 +509,12 @@ impl ApplicationHandler<PtyEvent> for App {
 }
 
 impl App {
+    fn request_redraw(&self) {
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+    }
+
     fn next_tab_index(&self) -> usize {
         (self.current_tab + 1) % self.tabs.len()
     }
@@ -539,7 +534,7 @@ impl App {
         {
             self.current_tab = tab;
             self.wheel_remainder = 0.0;
-            self.resize_current_tab_sessions();
+            self.resize_tab();
             return;
         }
 
@@ -590,13 +585,13 @@ impl App {
         whole
     }
 
-    fn current_active_session_id(&self) -> Option<SessionId> {
+    fn active_session(&self) -> Option<SessionId> {
         self.tabs[self.current_tab]
             .as_ref()
             .and_then(Tab::active_session)
     }
 
-    fn current_tab_layouts(&self) -> Vec<(SessionId, PaneGeometry)> {
+    fn tab_layouts(&self) -> Vec<(SessionId, PaneGeometry)> {
         let rows = self.terminal_rows();
         self.tabs[self.current_tab]
             .as_ref()
@@ -611,7 +606,7 @@ impl App {
             .unwrap_or_default()
     }
 
-    fn current_tab_dividers(&self) -> Vec<Divider> {
+    fn tab_dividers(&self) -> Vec<Divider> {
         let rows = self.terminal_rows();
         self.tabs[self.current_tab]
             .as_ref()
@@ -626,8 +621,8 @@ impl App {
             .unwrap_or_default()
     }
 
-    fn resize_current_tab_sessions(&mut self) {
-        for (session_id, geometry) in self.current_tab_layouts() {
+    fn resize_tab(&mut self) {
+        for (session_id, geometry) in self.tab_layouts() {
             self.session_manager.resize_session(
                 session_id,
                 geometry.rows.max(1),
@@ -639,7 +634,7 @@ impl App {
 
     fn pane_hit_test(&self, x: f64, y: f64) -> Option<PaneHit> {
         let (col, row) = self.cursor_to_cell(x, y)?;
-        for (session_id, geometry) in self.current_tab_layouts() {
+        for (session_id, geometry) in self.tab_layouts() {
             if !geometry.contains_global_cell(col, row) {
                 continue;
             }
@@ -660,7 +655,7 @@ impl App {
             return None;
         }
         const HIT_SLOP: f64 = 6.0;
-        for divider in self.current_tab_dividers() {
+        for divider in self.tab_dividers() {
             match divider.direction {
                 SplitDirection::Vertical => {
                     let line_x = cell_width * divider.x as f64;
@@ -706,9 +701,7 @@ impl App {
         if tab.set_active_session(session_id) {
             self.wheel_remainder = 0.0;
             self.update_ime_cursor_area();
-            if let Some(window) = self.window.as_ref() {
-                window.request_redraw();
-            }
+            self.request_redraw();
         }
     }
 
@@ -721,9 +714,7 @@ impl App {
         }
         self.wheel_remainder = 0.0;
         self.update_ime_cursor_area();
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
-        }
+        self.request_redraw();
     }
 
     fn resize_active_pane(&mut self, direction: SplitDirection, delta_first: i16) {
@@ -740,10 +731,8 @@ impl App {
             return;
         }
         self.wheel_remainder = 0.0;
-        self.resize_current_tab_sessions();
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
-        }
+        self.resize_tab();
+        self.request_redraw();
     }
 
     fn resize_dragged_divider(&mut self, drag: &DividerDrag, x: f64, y: f64) {
@@ -767,18 +756,16 @@ impl App {
             return;
         }
         self.wheel_remainder = 0.0;
-        self.resize_current_tab_sessions();
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
-        }
+        self.resize_tab();
+        self.request_redraw();
     }
 
     fn split_current_tab(&mut self, direction: SplitDirection) {
-        let Some(active_session) = self.current_active_session_id() else {
+        let Some(active_session) = self.active_session() else {
             return;
         };
         let Some((_, geometry)) = self
-            .current_tab_layouts()
+            .tab_layouts()
             .into_iter()
             .find(|(session_id, _)| *session_id == active_session)
         else {
@@ -826,10 +813,8 @@ impl App {
         }
 
         self.wheel_remainder = 0.0;
-        self.resize_current_tab_sessions();
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
-        }
+        self.resize_tab();
+        self.request_redraw();
     }
 
     fn switch_tab(&mut self, tab: usize) {
@@ -850,11 +835,9 @@ impl App {
 
         self.current_tab = tab;
         self.wheel_remainder = 0.0;
-        self.resize_current_tab_sessions();
+        self.resize_tab();
         self.update_ime_cursor_area();
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
-        }
+        self.request_redraw();
     }
 
     fn terminal_rows(&self) -> u16 {
@@ -870,8 +853,7 @@ impl App {
             .as_ref()
             .and_then(Tab::active_session)
             .and_then(|session_id| self.session_manager.session(session_id))
-            .map(|session| session.pty.program_name())
-            .unwrap_or("shell")
+            .map_or("shell", |session| session.pty.program_name())
     }
 
     fn status_tabs(&self) -> Option<Vec<StatusTab>> {
@@ -902,33 +884,27 @@ impl App {
             Ime::Preedit(text, _) => {
                 self.ime_preedit = (!text.is_empty()).then_some(text);
                 self.update_ime_cursor_area();
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
-                }
+                self.request_redraw();
             }
             Ime::Commit(text) => {
                 self.ime_preedit = None;
-                let Some(active_session) = self.current_active_session_id() else {
+                let Some(active_session) = self.active_session() else {
                     return;
                 };
                 let reset_scrollback = self
                     .session_manager
                     .session_mut(active_session)
-                    .is_some_and(|session| session.reset_scrollback());
+                    .is_some_and(TerminalSession::reset_scrollback);
                 self.session_manager.send_text(active_session, &text);
                 if reset_scrollback {
-                    if let Some(window) = self.window.as_ref() {
-                        window.request_redraw();
-                    }
+                    self.request_redraw();
                 }
                 self.update_ime_cursor_area();
             }
             Ime::Disabled => {
                 self.ime_enabled = false;
                 self.ime_preedit = None;
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
-                }
+                self.request_redraw();
             }
         }
     }
@@ -940,14 +916,14 @@ impl App {
         let Some(window) = self.window.as_ref() else {
             return;
         };
-        let Some(active_session) = self.current_active_session_id() else {
+        let Some(active_session) = self.active_session() else {
             return;
         };
         let Some(session) = self.session_manager.session(active_session) else {
             return;
         };
         let Some((_, geometry)) = self
-            .current_tab_layouts()
+            .tab_layouts()
             .into_iter()
             .find(|(session_id, _)| *session_id == active_session)
         else {
@@ -956,8 +932,8 @@ impl App {
 
         let (row, col) = session.vt.screen().cursor_position();
         let cell_width = self.font_size / 2.0;
-        let x = cell_width * (geometry.x as f32 + col as f32);
-        let y = self.line_height * (geometry.y as f32 + row as f32);
+        let x = cell_width * (f32::from(geometry.x) + f32::from(col));
+        let y = self.line_height * (f32::from(geometry.y) + f32::from(row));
 
         window.set_ime_cursor_area(
             PhysicalPosition::new(x as i32, y as i32),
@@ -967,10 +943,10 @@ impl App {
 
     fn ime_preedit(&self) -> Option<ImePreedit> {
         let text = self.ime_preedit.as_ref()?;
-        let active_session = self.current_active_session_id()?;
+        let active_session = self.active_session()?;
         let session = self.session_manager.session(active_session)?;
         let (_, geometry) = self
-            .current_tab_layouts()
+            .tab_layouts()
             .into_iter()
             .find(|(session_id, _)| *session_id == active_session)?;
         let (row, col) = session.vt.screen().cursor_position();

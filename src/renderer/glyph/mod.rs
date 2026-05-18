@@ -33,12 +33,12 @@ pub trait VertexData: Sized {
         VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as BufferAddress,
             step_mode: VertexStepMode::Vertex,
-            attributes: &Self::VERTEX_ATTRIBUTES,
+            attributes: Self::VERTEX_ATTRIBUTES,
         }
     }
 }
 
-const SHADER_SRC: &str = r#"
+const SHADER_SRC: &str = r"
 struct VertexInput {
     @location(0) pos: vec2<f32>,
     @location(1) uv: vec2<f32>,
@@ -86,9 +86,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             return vec4<f32>(1.0);
         }
     }
-
 }
-"#;
+";
 
 const GLYPH_VARIANT_GLYPH: u32 = 0;
 const GLYPH_VARIANT_IMAGE: u32 = 1;
@@ -123,7 +122,7 @@ pub struct Font {
 
 impl Font {
     pub fn from_data(data: &[u8], index: usize) -> Option<Self> {
-        let font = FontRef::from_index(&data, index)?;
+        let font = FontRef::from_index(data, index)?;
         let (offset, key) = (font.offset, font.key);
         Some(Self {
             data: data.to_vec(),
@@ -516,7 +515,7 @@ impl TerminalRenderer {
                 entry_point: Some("fs_main"),
                 compilation_options: PipelineCompilationOptions::default(),
                 targets: &[Some(ColorTargetState {
-                    format: format,
+                    format,
                     blend: Some(BlendState::ALPHA_BLENDING),
                     write_mask: ColorWrites::ALL,
                 })],

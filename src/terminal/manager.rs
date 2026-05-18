@@ -55,8 +55,8 @@ impl SessionManager {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
-        session.interrupt_pty_data(&data);
-        session.vt.process(&data);
+        session.interrupt_pty_data(data);
+        session.vt.process(data);
     }
 
     pub fn send_text(&mut self, id: SessionId, text: &str) {

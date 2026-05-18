@@ -621,13 +621,11 @@ impl TerminalSession {
             return;
         }
 
-        if let PhysicalKey::Code(code) = event.physical_key {
-            if mods.control_key()
-                && let Some(byte) = control_key_byte(code)
-            {
+        if let PhysicalKey::Code(code) = event.physical_key
+            && mods.control_key()
+            && let Some(byte) = control_key_byte(code) {
                 self.pty.add_bytes([byte]);
                 return;
-            }
         }
         let is_app_cursor_mode = self.vt.screen().application_cursor();
         let _is_keypad_mode = self.vt.screen().application_keypad();
