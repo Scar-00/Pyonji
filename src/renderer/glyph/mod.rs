@@ -72,12 +72,18 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
+fn sharpen_alpha(a: f32, amount: f32) -> f32 {
+    return clamp((a - 0.5) * amount + 0.5, 0.0, 1.0);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     switch in.variant {
         case 0u: {
             let tex = textureSample(glyph_tex, glyph_samp, vec2<f32>(in.uv));
-            return vec4<f32>(in.color.xyz, tex.r);
+            var alpha = tex.r;
+            alpha = sharpen_alpha(alpha, 1.2);
+            return vec4<f32>(in.color.xyz, alpha);
         }
         case 1u: {
             return textureSample(image_tex, image_samp, vec2<f32>(in.uv));
