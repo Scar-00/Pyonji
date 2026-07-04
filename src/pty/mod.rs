@@ -1,20 +1,25 @@
-use std::{ffi::OsString, io::Write, path::Path};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
-use vswhom::VsFindResult;
 use winit::event_loop::EventLoopProxy;
 
-use crate::terminal::SessionId;
+use crate::{config::Config, terminal::SessionId};
 
 pub struct Pty {
     master: Box<dyn MasterPty>,
     writer: Box<dyn Write + Send>,
+    process_id: Option<u32>,
 }
 
 pub enum Event {
     Closed(SessionId),
     Data(SessionId, Vec<u8>),
+    ProgramChanged((SessionId, String)),
+    ConfigChanged(Config),
 }
 
 impl Pty {
@@ -35,29 +40,13 @@ impl Pty {
             })
             .context("failed to open pty pair")?;
 
-        let mut cmd = CommandBuilder::new("cmd.exe");
+        let program_name = String::from("cmd.exe");
+        let mut cmd = CommandBuilder::new(&program_name);
         if let Some(path) = path {
             cmd.cwd(path);
         }
         cmd.env("TERM", "xterm-256color");
-        let vs = VsFindResult::search();
-        std::env::vars_os().for_each(|mut var| {
-            if var.0 == "PATH" {
-                if let Some(ref vs) = vs {
-                    vs.windows_sdk_um_library_path.as_ref().map(|path| {
-                        var.1.push(OsString::from(format!(";{}", path.display())));
-                    });
-                    vs.windows_sdk_ucrt_library_path.as_ref().map(|path| {
-                        var.1.push(OsString::from(format!(";{}", path.display())));
-                    });
-                    vs.windows_sdk_root.as_ref().map(|path| {
-                        var.1.push(OsString::from(format!(";{}", path.display())));
-                    });
-                    vs.vs_exe_path.as_ref().map(|path| {
-                        var.1.push(OsString::from(format!(";{}", path.display())));
-                    });
-                }
-            }
+        std::env::vars_os().for_each(|var| {
             cmd.env(var.0, var.1);
         });
 
@@ -75,6 +64,7 @@ impl Pty {
             .master
             .take_writer()
             .context("failed to take PTY writer")?;
+        let process_id = child.process_id();
 
         std::thread::spawn({
             let tx = tx.clone();
@@ -88,16 +78,12 @@ impl Pty {
             let mut buf = [0u8; 8192];
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) => {
+                    Ok(0) | Err(_) => {
                         _ = tx.send_event(Event::Closed(id));
                         break;
                     }
                     Ok(n) => {
                         _ = tx.send_event(Event::Data(id, buf[..n].to_vec()));
-                    }
-                    Err(_) => {
-                        _ = tx.send_event(Event::Closed(id));
-                        break;
                     }
                 }
             }
@@ -106,6 +92,7 @@ impl Pty {
         Ok(Self {
             master: pair.master,
             writer,
+            process_id,
         })
     }
 
@@ -123,9 +110,9 @@ impl Pty {
 
     pub fn add_csi_tilde(&mut self, csi_param: Option<u8>, byte: u8) {
         if let Some(m) = csi_param {
-            self.add_bytes(format!("\x1b[{};{}~", byte, m).as_bytes());
+            self.add_bytes(format!("\x1b[{byte};{m}~").as_bytes());
         } else {
-            self.add_bytes(format!("\x1b[{}~", byte).as_bytes());
+            self.add_bytes(format!("\x1b[{byte}~").as_bytes());
         }
     }
 
@@ -145,4 +132,116 @@ impl Pty {
             pixel_height: 0,
         });
     }
+
+    pub fn current_dir(&self) -> Option<PathBuf> {
+        self.live_current_dir()
+    }
+
+    #[cfg(windows)]
+    fn live_current_dir(&self) -> Option<PathBuf> {
+        use std::{
+            mem::{size_of, zeroed},
+            ptr::null_mut,
+        };
+
+        use ntapi::{
+            ntpebteb::PEB,
+            ntpsapi::{
+                NtQueryInformationProcess, ProcessBasicInformation, PROCESS_BASIC_INFORMATION,
+            },
+            ntrtl::RTL_USER_PROCESS_PARAMETERS,
+        };
+        use winapi::um::{
+            handleapi::CloseHandle,
+            memoryapi::ReadProcessMemory,
+            processthreadsapi::OpenProcess,
+            winnt::{PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ},
+        };
+
+        let pid = self.process_id?;
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid);
+            if process.is_null() {
+                return None;
+            }
+
+            let mut basic_info: PROCESS_BASIC_INFORMATION = zeroed();
+            let status = NtQueryInformationProcess(
+                process,
+                ProcessBasicInformation,
+                &raw mut basic_info as *mut _,
+                size_of::<PROCESS_BASIC_INFORMATION>() as u32,
+                null_mut(),
+            );
+            if status < 0 {
+                CloseHandle(process);
+                return None;
+            }
+
+            let mut peb: PEB = zeroed();
+            let mut bytes_read = 0usize;
+            if ReadProcessMemory(
+                process,
+                basic_info.PebBaseAddress as *const _,
+                &raw mut peb as *mut _,
+                size_of::<PEB>(),
+                &raw mut bytes_read,
+            ) == 0
+            {
+                CloseHandle(process);
+                return None;
+            }
+
+            let mut params: RTL_USER_PROCESS_PARAMETERS = zeroed();
+            if ReadProcessMemory(
+                process,
+                peb.ProcessParameters as *const _,
+                &raw mut params as *mut _,
+                size_of::<RTL_USER_PROCESS_PARAMETERS>(),
+                &raw mut bytes_read,
+            ) == 0
+            {
+                CloseHandle(process);
+                return None;
+            }
+
+            let path = read_remote_unicode_string(process, params.CurrentDirectory.DosPath);
+            CloseHandle(process);
+            path
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn live_current_dir(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn read_remote_unicode_string(
+    process: winapi::shared::ntdef::HANDLE,
+    value: winapi::shared::ntdef::UNICODE_STRING,
+) -> Option<PathBuf> {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+    use winapi::um::memoryapi::ReadProcessMemory;
+
+    if value.Buffer.is_null() || value.Length == 0 {
+        return None;
+    }
+
+    let mut bytes_read = 0usize;
+    let mut buffer = vec![0u16; (value.Length / 2) as usize];
+    unsafe {
+        if ReadProcessMemory(
+            process,
+            value.Buffer as *const _,
+            buffer.as_mut_ptr() as *mut _,
+            value.Length as usize,
+            &raw mut bytes_read,
+        ) == 0
+        {
+            return None;
+        }
+    }
+    Some(PathBuf::from(OsString::from_wide(&buffer)))
 }
