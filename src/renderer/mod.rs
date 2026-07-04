@@ -13,7 +13,7 @@ use wgpu::{
     ExperimentalFeatures, Features, Instance, InstanceDescriptor, Limits, LoadOp, MemoryHints,
     Operations, PowerPreference, PresentMode, Queue, RenderPassColorAttachment,
     RenderPassDescriptor, RequestAdapterOptions, StoreOp, Surface, SurfaceConfiguration,
-    SurfaceError, TextureFormat, TextureUsages, Trace,
+    SurfaceError, TextureFormat, TextureUsages, TextureViewDescriptor, Trace,
 };
 use winit::{dpi::PhysicalSize, window::Window};
 
@@ -32,7 +32,7 @@ impl Color {
 
     pub fn to_linear(self) -> [f32; 4] {
         fn srgb_to_linear(c: u8) -> f32 {
-            let c = c as f32 / 255.0;
+            let c = f32::from(c) / 255.0;
             if c <= 0.04045 {
                 c / 12.92
             } else {
@@ -44,7 +44,7 @@ impl Color {
             srgb_to_linear(r),
             srgb_to_linear(g),
             srgb_to_linear(b),
-            a as f32 / 255.0,
+            f32::from(a) / 255.0,
         ]
     }
 
@@ -105,7 +105,12 @@ pub struct ImePreedit {
 }
 
 impl Renderer {
-    pub fn new(window: Arc<Window>, font_size: f32, line_height: f32) -> Result<Self> {
+    pub fn new(
+        window: Arc<Window>,
+        font_family: Option<&str>,
+        font_size: f32,
+        line_height: f32,
+    ) -> Result<Self> {
         let size = window.inner_size();
         let instance = Instance::new(&InstanceDescriptor {
             backends: Backends::VULKAN,
@@ -137,7 +142,7 @@ impl Renderer {
             .formats
             .iter()
             .copied()
-            .find(|f| f.is_srgb())
+            .find(TextureFormat::is_srgb)
             .or_else(|| surface_caps.formats.first().copied())
             .context("no surface formats available")?;
 
@@ -154,7 +159,7 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let background_renderer = BackgroundRenderer::new(&device, format);
-        let terminal_renderer = TerminalRenderer::new(&device, &queue, format);
+        let terminal_renderer = TerminalRenderer::new(&device, font_family, font_size, format);
         let divider_renderer = BackgroundRenderer::new(&device, format);
 
         Ok(Renderer {
@@ -201,6 +206,20 @@ impl Renderer {
         );
     }
 
+    pub fn evict_glyphs(&mut self) {
+        self.terminal_renderer.evict_glyphs(&self.queue);
+    }
+
+    pub fn set_font_metrics(&mut self, font_size: f32, line_height: f32) {
+        self.font_size = font_size;
+        self.line_height = line_height;
+        self.terminal_renderer.set_font_size(font_size);
+    }
+
+    pub fn set_font_family(&mut self, font_family: &str) {
+        self.terminal_renderer.set_font_family(font_family);
+    }
+
     pub fn render(
         &mut self,
         panes: &[Pane<'_>],
@@ -239,8 +258,7 @@ impl Renderer {
                 return Ok(());
             }
             Err(SurfaceError::OutOfMemory) => anyhow::bail!("surface out of memory"),
-            Err(SurfaceError::Timeout) => return Ok(()),
-            Err(SurfaceError::Other) => return Ok(()),
+            Err(SurfaceError::Other | SurfaceError::Timeout) => return Ok(()),
         };
 
         let [w, h] = [
@@ -262,8 +280,8 @@ impl Renderer {
                         x => Color::from(x),
                     };
                     let bg_color = Color::from(cell.bgcolor());
-                    let x = self.font_size / 2.0 * (pane.geometry.x as f32 + col as f32);
-                    let y = self.line_height * (pane.geometry.y as f32 + row as f32 + 1.0);
+                    let x = self.font_size / 2.0 * (f32::from(pane.geometry.x) + f32::from(col));
+                    let y = self.line_height * (f32::from(pane.geometry.y) + f32::from(row) + 1.0);
                     {
                         let [x, y] = self.ndc([x, y]);
                         let bg_color = if cell.inverse() { fg_color } else { bg_color };
@@ -273,6 +291,7 @@ impl Renderer {
                     let fg_color = if cell.inverse() { bg_color } else { fg_color };
                     let contents = cell.contents();
                     let bold = cell.bold();
+                    #[allow(clippy::if_not_else)]
                     for cluster in contents.graphemes(true) {
                         if cluster.len() != 1 {
                             self.terminal_renderer.add_cluster(
@@ -301,8 +320,8 @@ impl Renderer {
 
             if pane.is_active && !pane.screen.hide_cursor() && pane.screen.scrollback() == 0 {
                 let (row, col) = pane.screen.cursor_position();
-                let x = self.font_size / 2.0 * (pane.geometry.x as f32 + col as f32);
-                let y = self.line_height * (pane.geometry.y as f32 + row as f32 + 1.0);
+                let x = self.font_size / 2.0 * (f32::from(pane.geometry.x) + f32::from(col));
+                let y = self.line_height * (f32::from(pane.geometry.y) + f32::from(row) + 1.0);
                 let [x, y] = self.ndc([x, y]);
                 let [w, h] = match pane.cursor_style {
                     CursorState::Bar => [
@@ -314,8 +333,8 @@ impl Renderer {
                         (self.line_height * 2.0) / size.height as f32,
                     ],
                     CursorState::Underline => [
-                        (self.font_size * 0.18) / size.width as f32,
-                        (self.line_height * 2.0) / size.height as f32,
+                        (self.font_size) / size.width as f32,
+                        (self.line_height * 0.1) / size.height as f32,
                     ],
                 };
                 self.background_renderer
@@ -330,17 +349,18 @@ impl Renderer {
         for divider in dividers {
             match divider.direction {
                 SplitDirection::Vertical => {
-                    let x = self.font_size / 2.0 * divider.x as f32;
-                    let y = self.line_height * (divider.y + divider.rows) as f32;
-                    let height = divider_height * divider.rows.max(1) as f32 * self.line_height;
+                    let x = self.font_size / 2.0 * f32::from(divider.x);
+                    let y = self.line_height * f32::from(divider.y + divider.rows);
+                    let height = divider_height * f32::from(divider.rows.max(1)) * self.line_height;
                     let [x, y] = self.ndc([x, y]);
                     self.divider_renderer
                         .add_rect(x, y, divider_width, height, divider_color);
                 }
                 SplitDirection::Horizontal => {
-                    let x = self.font_size / 2.0 * divider.x as f32;
-                    let y = self.line_height * divider.y as f32 + divider_px;
-                    let width = divider_width * divider.cols.max(1) as f32 * (self.font_size / 2.0);
+                    let x = self.font_size / 2.0 * f32::from(divider.x);
+                    let y = self.line_height * f32::from(divider.y) + divider_px;
+                    let width =
+                        divider_width * f32::from(divider.cols.max(1)) * (self.font_size / 2.0);
                     let [x, y] = self.ndc([x, y]);
                     self.divider_renderer
                         .add_rect(x, y, width, divider_height, divider_color);
@@ -359,7 +379,9 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("main render pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &surface.texture.create_view(&Default::default()),
+                    view: &surface
+                        .texture
+                        .create_view(&TextureViewDescriptor::default()),
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Clear(Color([0x18, 0x18, 0x18, 0xFF]).to_wgpu()),
@@ -374,14 +396,11 @@ impl Renderer {
             });
 
             self.background_renderer
-                .render(&self.device, &self.queue, &mut pass)
-                .context("failed to render background")?;
+                .render(&self.device, &self.queue, &mut pass);
             self.terminal_renderer
-                .render(&self.device, &self.queue, &mut pass)
-                .context("failed to render terminal")?;
+                .render(&self.device, &self.queue, &mut pass);
             self.divider_renderer
-                .render(&self.device, &self.queue, &mut pass)
-                .context("failed to render dividers")?;
+                .render(&self.device, &self.queue, &mut pass);
         }
         self.queue.submit(Some(encoder.finish()));
         surface.present();
@@ -492,6 +511,7 @@ impl Renderer {
         let y = self.line_height * (row as f32 + 1.0);
         for (col, cluster) in text.graphemes(true).enumerate() {
             let pos = [x + (self.font_size / 2.0) * col as f32, y];
+            #[allow(clippy::if_not_else)]
             if cluster.len() != 1 {
                 self.terminal_renderer.add_cluster(
                     &self.queue,
@@ -517,8 +537,8 @@ impl Renderer {
     }
 
     fn draw_ime_preedit(&mut self, preedit: &ImePreedit, screen_size: [f32; 2]) {
-        let x = self.font_size / 2.0 * (preedit.geometry.x as f32 + preedit.col as f32);
-        let y = self.line_height * (preedit.geometry.y as f32 + preedit.row as f32 + 1.0);
+        let x = self.font_size / 2.0 * (f32::from(preedit.geometry.x) + f32::from(preedit.col));
+        let y = self.line_height * (f32::from(preedit.geometry.y) + f32::from(preedit.row) + 1.0);
         let width_cols = preedit.text.graphemes(true).count().max(1);
         let width = ((self.font_size / 2.0) * width_cols as f32
             / self.window.inner_size().width.max(1) as f32)

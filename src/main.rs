@@ -1,23 +1,35 @@
 #![cfg_attr(all(windows, feature = "install"), windows_subsystem = "windows")]
+#![warn(clippy::pedantic)]
+#![allow(
+    clippy::similar_names,
+    clippy::ptr_as_ptr,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::struct_field_names,
+    clippy::too_many_lines,
+    clippy::cast_sign_loss,
+    clippy::struct_excessive_bools
+)]
 
+mod config;
 #[cfg(feature = "install")]
 mod logging;
 mod pty;
 mod renderer;
 mod terminal;
 
-use std::{array, path::PathBuf, sync::Arc};
-
 use anyhow::{Context, Result};
 use clap::Parser;
+use config::Config;
 use pty::Event as PtyEvent;
 use renderer::{ImePreedit, Pane, Renderer, StatusTab};
+use std::{array, path::PathBuf, sync::Arc};
 use tracing::error;
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
     event::{ElementState, Ime, MouseScrollDelta, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{KeyCode, ModifiersState, PhysicalKey},
     window::{Icon, Window, WindowId},
 };
@@ -34,6 +46,7 @@ struct Cli {
 
 struct App {
     args: Cli,
+    config: Config,
     renderer: Option<Renderer>,
     window: Option<Arc<Window>>,
     session_manager: SessionManager,
@@ -68,38 +81,24 @@ struct DividerDrag {
     direction: SplitDirection,
 }
 
+const CONFIG_PATH: &str = "init.lua";
+
 fn main() -> Result<()> {
     #[cfg(feature = "install")]
     logging::init();
 
     let cli = Cli::parse();
 
+    let config = Config::load(CONFIG_PATH.into())?;
+    println!("config = {config:#?}");
+
     let event_loop = EventLoop::<PtyEvent>::with_user_event()
         .build()
         .context("failed to create event loop")?;
     let proxy = event_loop.create_proxy();
-    let mut app = App {
-        args: cli,
-        renderer: None,
-        window: None,
-        session_manager: SessionManager::new(proxy),
-        modifiers: ModifiersState::default(),
-        font_size: 24.0,
-        line_height: 28.0,
-        rows: 20,
-        cols: 80,
-        tabs: array::from_fn(|_| None),
-        action_mode: false,
-        current_tab: 0,
-        cursor_pos: None,
-        wheel_remainder: 0.0,
-        divider_drag: None,
-        resize_mode_held: false,
-        resize_mode_used: false,
-        ime_enabled: false,
-        ime_preedit: None,
-        status_bar_hidden: false,
-    };
+    Config::watch(CONFIG_PATH.into(), proxy.clone());
+
+    let mut app = App::new(cli, config, proxy);
 
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut app).map_err(|error| {
@@ -112,6 +111,63 @@ impl App {
     const TITLE: &str = "Pyonji";
     const ICON: &[u8] = include_bytes!("../resources/icon.ico");
     const STATUS_BAR_ROWS: u16 = 1;
+}
+
+impl App {
+    pub fn new(cli: Cli, config: Config, proxy: EventLoopProxy<PtyEvent>) -> Self {
+        let (font_size, line_height) = config.font_metrics();
+        Self {
+            args: cli,
+            config,
+            renderer: None,
+            window: None,
+            session_manager: SessionManager::new(proxy),
+            modifiers: ModifiersState::default(),
+            font_size: font_size as f32,
+            line_height: (font_size * line_height) as f32,
+            rows: 20,
+            cols: 80,
+            tabs: array::from_fn(|_| None),
+            action_mode: false,
+            current_tab: 0,
+            cursor_pos: None,
+            wheel_remainder: 0.0,
+            divider_drag: None,
+            resize_mode_held: false,
+            resize_mode_used: false,
+            ime_enabled: false,
+            ime_preedit: None,
+            status_bar_hidden: false,
+        }
+    }
+
+    pub fn apply_config(&mut self, config: Config) {
+        self.config = config;
+        let (font_size, line_height) = self.config.font_metrics();
+        self.font_size = font_size as f32;
+        self.line_height = (font_size * line_height) as f32;
+        let Some(size) = self.window.as_ref().map(|window| window.inner_size()) else {
+            return;
+        };
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_font_metrics(self.font_size, self.line_height);
+            if let Some(font_family) = self
+                .config
+                .font_family
+                .as_ref()
+                .map(config::Value::value)
+                .as_deref()
+            {
+                renderer.set_font_family(font_family);
+            }
+            renderer.evict_glyphs();
+        }
+        self.rows = (size.height as f32 / self.line_height) as u16;
+        self.cols = (size.width as f32 / (self.font_size / 2.0)) as u16;
+        self.resize_tab();
+
+        self.request_redraw();
+    }
 }
 
 impl ApplicationHandler<PtyEvent> for App {
@@ -136,7 +192,16 @@ impl ApplicationHandler<PtyEvent> for App {
         self.cols = (size.width as f32 / (self.font_size / 2.0)) as u16;
 
         let window = Arc::new(window);
-        self.renderer = match Renderer::new(window.clone(), self.font_size, self.line_height) {
+        self.renderer = match Renderer::new(
+            window.clone(),
+            self.config
+                .font_family
+                .as_ref()
+                .map(config::Value::value)
+                .as_deref(),
+            self.font_size,
+            self.line_height,
+        ) {
             Ok(renderer) => Some(renderer),
             Err(error) => {
                 error!(error = ?error, "failed to initialize renderer");
@@ -196,6 +261,15 @@ impl ApplicationHandler<PtyEvent> for App {
                 self.session_manager.update_session(id, &data);
                 self.request_redraw();
                 self.update_ime_cursor_area();
+            }
+            PtyEvent::ProgramChanged((id, title)) => {
+                let Some(session) = self.session_manager.session_mut(id) else {
+                    return;
+                };
+                session.set_title(title);
+            }
+            PtyEvent::ConfigChanged(config) => {
+                self.apply_config(config);
             }
         }
     }
@@ -307,7 +381,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         ElementState::Released if self.divider_drag.take().is_some() => {
                             return;
                         }
-                        _ => {}
+                        ElementState::Released => {}
                     }
                 }
 
@@ -352,7 +426,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 let uses_local_scrollback = self
                     .session_manager
                     .session(hit.session_id)
-                    .is_some_and(|session| session.uses_local_scrollback());
+                    .is_some_and(TerminalSession::uses_local_scrollback);
                 let whole_lines = if uses_local_scrollback {
                     self.take_wheel_steps(lines)
                 } else {
@@ -482,6 +556,12 @@ impl ApplicationHandler<PtyEvent> for App {
                                 self.request_redraw();
                                 return;
                             }
+                            KeyCode::KeyR => {
+                                if let Ok(config) = Config::load(CONFIG_PATH.into()) {
+                                    self.apply_config(config);
+                                }
+                                return;
+                            }
                             _ => {}
                         }
                     }
@@ -549,8 +629,8 @@ impl App {
         let cell_width = self.font_size / 2.0;
         let col = ((x.max(0.0) as f32) / cell_width).floor() as i32 + 1;
         let row = ((y.max(0.0) as f32) / self.line_height).floor() as i32 + 1;
-        let col = col.clamp(1, self.cols as i32) as u16;
-        let row = row.clamp(1, self.rows as i32) as u16;
+        let col = col.clamp(1, i32::from(self.cols)) as u16;
+        let row = row.clamp(1, i32::from(self.rows)) as u16;
         Some((col, row))
     }
 
@@ -649,18 +729,18 @@ impl App {
     }
 
     fn divider_hit_test(&self, x: f64, y: f64) -> Option<Divider> {
-        let cell_width = self.font_size as f64 / 2.0;
-        let line_height = self.line_height as f64;
+        const HIT_SLOP: f64 = 6.0;
+        let cell_width = f64::from(self.font_size) / 2.0;
+        let line_height = f64::from(self.line_height);
         if cell_width <= 0.0 || line_height <= 0.0 {
             return None;
         }
-        const HIT_SLOP: f64 = 6.0;
         for divider in self.tab_dividers() {
             match divider.direction {
                 SplitDirection::Vertical => {
-                    let line_x = cell_width * divider.x as f64;
-                    let min_y = line_height * divider.y as f64;
-                    let max_y = line_height * (divider.y + divider.rows) as f64;
+                    let line_x = cell_width * f64::from(divider.x);
+                    let min_y = line_height * f64::from(divider.y);
+                    let max_y = line_height * f64::from(divider.y + divider.rows);
                     if (x - line_x).abs() <= HIT_SLOP
                         && y >= min_y - HIT_SLOP
                         && y <= max_y + HIT_SLOP
@@ -669,9 +749,9 @@ impl App {
                     }
                 }
                 SplitDirection::Horizontal => {
-                    let line_y = line_height * divider.y as f64;
-                    let min_x = cell_width * divider.x as f64;
-                    let max_x = cell_width * (divider.x + divider.cols) as f64;
+                    let line_y = line_height * f64::from(divider.y);
+                    let min_x = cell_width * f64::from(divider.x);
+                    let max_x = cell_width * f64::from(divider.x + divider.cols);
                     if (y - line_y).abs() <= HIT_SLOP
                         && x >= min_x - HIT_SLOP
                         && x <= max_x + HIT_SLOP
@@ -689,8 +769,9 @@ impl App {
             return None;
         }
         let cell_width = self.font_size / 2.0;
-        let col = (x.max(0.0) as f32 / cell_width).clamp(0.0, self.cols as f32);
-        let row = (y.max(0.0) as f32 / self.line_height).clamp(0.0, self.terminal_rows() as f32);
+        let col = (x.max(0.0) as f32 / cell_width).clamp(0.0, f32::from(self.cols));
+        let row =
+            (y.max(0.0) as f32 / self.line_height).clamp(0.0, f32::from(self.terminal_rows()));
         Some((col, row))
     }
 
@@ -853,7 +934,7 @@ impl App {
             .as_ref()
             .and_then(Tab::active_session)
             .and_then(|session_id| self.session_manager.session(session_id))
-            .map_or("shell", |session| session.pty.program_name())
+            .map_or("shell", |session| session.title())
     }
 
     fn status_tabs(&self) -> Option<Vec<StatusTab>> {

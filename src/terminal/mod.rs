@@ -34,7 +34,7 @@ pub struct PaneGeometry {
 }
 
 impl PaneGeometry {
-    pub fn contains_global_cell(&self, col: u16, row: u16) -> bool {
+    pub fn contains_global_cell(self, col: u16, row: u16) -> bool {
         let min_col = self.x.saturating_add(1);
         let min_row = self.y.saturating_add(1);
         let max_col = self.x.saturating_add(self.cols);
@@ -42,7 +42,7 @@ impl PaneGeometry {
         col >= min_col && col <= max_col && row >= min_row && row <= max_row
     }
 
-    pub fn local_cell(&self, col: u16, row: u16) -> (u16, u16) {
+    pub fn local_cell(self, col: u16, row: u16) -> (u16, u16) {
         (col.saturating_sub(self.x), row.saturating_sub(self.y))
     }
 }
@@ -115,14 +115,14 @@ impl Pane {
 
     pub fn first_session(&self) -> SessionId {
         match self {
-            Self::Leaf { session } => *session,
+            Self::Leaf { session, .. } => *session,
             Self::Split { first, .. } => first.first_session(),
         }
     }
 
     pub fn remove_session(self, target: SessionId) -> Option<Self> {
         match self {
-            Self::Leaf { session } => (session != target).then_some(Self::Leaf { session }),
+            Self::Leaf { session, .. } => (session != target).then_some(Self::Leaf { session }),
             Self::Split {
                 direction,
                 ratio_per_mille,
@@ -149,7 +149,7 @@ impl Pane {
         dividers: &mut Vec<Divider>,
     ) {
         match self {
-            Self::Leaf { session } => panes.push((*session, area)),
+            Self::Leaf { session, .. } => panes.push((*session, area)),
             Self::Split {
                 direction,
                 ratio_per_mille,
@@ -217,7 +217,7 @@ impl Pane {
                     return false;
                 }
                 let total = split_axis_size(area, direction);
-                let next = clamp_first_size(first_size as i32 + delta_first as i32, total);
+                let next = clamp_first_size(i32::from(first_size) + i32::from(delta_first), total);
                 *ratio_per_mille = ratio_from_first_size(next, total);
                 true
             }
@@ -256,8 +256,8 @@ impl Pane {
                 }
                 let total = split_axis_size(area, direction);
                 let offset = match direction {
-                    SplitDirection::Horizontal => position - area.y as f32,
-                    SplitDirection::Vertical => position - area.x as f32,
+                    SplitDirection::Horizontal => position - f32::from(area.y),
+                    SplitDirection::Vertical => position - f32::from(area.x),
                 };
                 let next = clamp_first_size(offset.round() as i32, total);
                 *ratio_per_mille = ratio_from_first_size(next, total);
@@ -306,7 +306,7 @@ impl Pane {
 
     fn collect_sessions(&self, sessions: &mut Vec<SessionId>) {
         match self {
-            Self::Leaf { session } => sessions.push(*session),
+            Self::Leaf { session, .. } => sessions.push(*session),
             Self::Split { first, second, .. } => {
                 first.collect_sessions(sessions);
                 second.collect_sessions(sessions);
@@ -500,29 +500,30 @@ fn first_split_size(total: u16, ratio_per_mille: u16) -> u16 {
     if total <= 1 {
         return total;
     }
-    let size = ((total as u32 * ratio_per_mille as u32) + 500) / 1000;
-    clamp_first_size(size as i32, total)
+    let size = ((u32::from(total) * u32::from(ratio_per_mille)) + 500) / 1000;
+    clamp_first_size(size.cast_signed(), total)
 }
 
 fn clamp_first_size(size: i32, total: u16) -> u16 {
     if total <= 1 {
         return total;
     }
-    size.clamp(1, total as i32 - 1) as u16
+    size.clamp(1, i32::from(total) - 1) as u16
 }
 
 fn ratio_from_first_size(first_size: u16, total: u16) -> u16 {
     if total <= 1 {
         return 500;
     }
-    (((first_size as u32 * 1000) + (total as u32 / 2)) / total as u32).clamp(1, 999) as u16
+    (((u32::from(first_size) * 1000) + (u32::from(total) / 2)) / u32::from(total)).clamp(1, 999) as u16
 }
 
 pub struct TerminalSession {
     pub _id: SessionId,
     pub pty: Pty,
-    pub vt: vt100::Parser,
+    pub vt: vt100::Parser<CB>,
     pub cursor_style: CursorState,
+    pub title: String,
     pub mouse_pressed_button: Option<MouseButton>,
     pub last_mouse_cell: Option<(u16, u16)>,
 }
@@ -623,9 +624,10 @@ impl TerminalSession {
 
         if let PhysicalKey::Code(code) = event.physical_key
             && mods.control_key()
-            && let Some(byte) = control_key_byte(code) {
-                self.pty.add_bytes([byte]);
-                return;
+            && let Some(byte) = control_key_byte(code)
+        {
+            self.pty.add_bytes([byte]);
+            return;
         }
         let is_app_cursor_mode = self.vt.screen().application_cursor();
         let _is_keypad_mode = self.vt.screen().application_keypad();
@@ -641,16 +643,16 @@ impl TerminalSession {
                 }
             }
             Key::Named(NamedKey::ArrowUp) => {
-                self.pty.add_cursor_key(is_csi, b'A', is_app_cursor_mode)
+                self.pty.add_cursor_key(is_csi, b'A', is_app_cursor_mode);
             }
             Key::Named(NamedKey::ArrowDown) => {
-                self.pty.add_cursor_key(is_csi, b'B', is_app_cursor_mode)
+                self.pty.add_cursor_key(is_csi, b'B', is_app_cursor_mode);
             }
             Key::Named(NamedKey::ArrowRight) => {
-                self.pty.add_cursor_key(is_csi, b'C', is_app_cursor_mode)
+                self.pty.add_cursor_key(is_csi, b'C', is_app_cursor_mode);
             }
             Key::Named(NamedKey::ArrowLeft) => {
-                self.pty.add_cursor_key(is_csi, b'D', is_app_cursor_mode)
+                self.pty.add_cursor_key(is_csi, b'D', is_app_cursor_mode);
             }
             Key::Named(NamedKey::Home) => self.pty.add_csi_key(is_csi, b'H'),
             Key::Named(NamedKey::End) => self.pty.add_csi_key(is_csi, b'F'),
@@ -660,28 +662,28 @@ impl TerminalSession {
             Key::Named(NamedKey::PageDown) => self.pty.add_csi_tilde(is_csi, 6),
             Key::Named(NamedKey::F1) => {
                 if let Some(m) = is_csi {
-                    self.pty.add_bytes(format!("\x1b[1;{}P", m).as_bytes());
+                    self.pty.add_bytes(format!("\x1b[1;{m}P").as_bytes());
                 } else {
                     self.pty.add_bytes(b"\x1bOP");
                 }
             }
             Key::Named(NamedKey::F2) => {
                 if let Some(m) = is_csi {
-                    self.pty.add_bytes(format!("\x1b[1;{}Q", m).as_bytes());
+                    self.pty.add_bytes(format!("\x1b[1;{m}Q").as_bytes());
                 } else {
                     self.pty.add_bytes(b"\x1bOQ");
                 }
             }
             Key::Named(NamedKey::F3) => {
                 if let Some(m) = is_csi {
-                    self.pty.add_bytes(format!("\x1b[1;{}R", m).as_bytes());
+                    self.pty.add_bytes(format!("\x1b[1;{m}R").as_bytes());
                 } else {
                     self.pty.add_bytes(b"\x1bOR");
                 }
             }
             Key::Named(NamedKey::F4) => {
                 if let Some(m) = is_csi {
-                    self.pty.add_bytes(format!("\x1b[1;{}S", m).as_bytes());
+                    self.pty.add_bytes(format!("\x1b[1;{m}S").as_bytes());
                 } else {
                     self.pty.add_bytes(b"\x1bOS");
                 }
@@ -780,6 +782,14 @@ impl TerminalSession {
         self.last_mouse_cell = Some((col, row));
     }
 
+    pub fn set_title(&mut self, title: String) {
+        self.title = title;
+    }
+
+    pub fn title(&self) -> &str {
+        self.title.as_str()
+    }
+
     fn send_mouse_event(
         &mut self,
         action: MouseAction,
@@ -849,7 +859,7 @@ impl TerminalSession {
         match encoding {
             vt100::MouseProtocolEncoding::Sgr => {
                 let terminator = if release { 'm' } else { 'M' };
-                let seq = format!("\x1b[<{};{};{}{}", code, col, row, terminator);
+                let seq = format!("\x1b[<{code};{col};{row}{terminator}");
                 self.pty.add_bytes(seq.as_bytes());
             }
             vt100::MouseProtocolEncoding::Default | vt100::MouseProtocolEncoding::Utf8 => {

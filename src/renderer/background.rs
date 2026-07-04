@@ -1,4 +1,3 @@
-use anyhow::Result;
 use std::{borrow::Cow, mem};
 
 use bytemuck::{Pod, Zeroable};
@@ -129,7 +128,7 @@ impl BackgroundRenderer {
         }
     }
 
-    pub fn render(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass) -> Result<()> {
+    pub fn render(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass) {
         self.maybe_grow_buffer(device);
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
         queue.submit([]);
@@ -138,7 +137,6 @@ impl BackgroundRenderer {
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.draw(0..self.vertices.len() as u32, 0..1);
         self.vertices.clear();
-        Ok(())
     }
 
     pub fn add_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {

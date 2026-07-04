@@ -7,19 +7,19 @@ use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use winit::event_loop::EventLoopProxy;
 
-use crate::terminal::SessionId;
+use crate::{config::Config, terminal::SessionId};
 
 pub struct Pty {
     master: Box<dyn MasterPty>,
     writer: Box<dyn Write + Send>,
     process_id: Option<u32>,
-    start_dir: Option<PathBuf>,
-    program_name: String,
 }
 
 pub enum Event {
     Closed(SessionId),
     Data(SessionId, Vec<u8>),
+    ProgramChanged((SessionId, String)),
+    ConfigChanged(Config),
 }
 
 impl Pty {
@@ -65,9 +65,6 @@ impl Pty {
             .take_writer()
             .context("failed to take PTY writer")?;
         let process_id = child.process_id();
-        let start_dir = path
-            .map(Path::to_path_buf)
-            .or_else(|| std::env::current_dir().ok());
 
         std::thread::spawn({
             let tx = tx.clone();
@@ -96,8 +93,6 @@ impl Pty {
             master: pair.master,
             writer,
             process_id,
-            start_dir,
-            program_name,
         })
     }
 
@@ -139,11 +134,7 @@ impl Pty {
     }
 
     pub fn current_dir(&self) -> Option<PathBuf> {
-        self.live_current_dir().or_else(|| self.start_dir.clone())
-    }
-
-    pub fn program_name(&self) -> &str {
-        &self.program_name
+        self.live_current_dir()
     }
 
     #[cfg(windows)]
@@ -178,7 +169,7 @@ impl Pty {
             let status = NtQueryInformationProcess(
                 process,
                 ProcessBasicInformation,
-                &mut basic_info as *mut _ as *mut _,
+                &raw mut basic_info as *mut _,
                 size_of::<PROCESS_BASIC_INFORMATION>() as u32,
                 null_mut(),
             );
@@ -192,7 +183,7 @@ impl Pty {
             if ReadProcessMemory(
                 process,
                 basic_info.PebBaseAddress as *const _,
-                &mut peb as *mut _ as *mut _,
+                &raw mut peb as *mut _,
                 size_of::<PEB>(),
                 &raw mut bytes_read,
             ) == 0
@@ -205,7 +196,7 @@ impl Pty {
             if ReadProcessMemory(
                 process,
                 peb.ProcessParameters as *const _,
-                &mut params as *mut _ as *mut _,
+                &raw mut params as *mut _,
                 size_of::<RTL_USER_PROCESS_PARAMETERS>(),
                 &raw mut bytes_read,
             ) == 0
