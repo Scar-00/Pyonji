@@ -4,13 +4,13 @@ use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
 use etagere::{AtlasAllocator, BucketedAtlasAllocator};
 use swash::{
+    CacheKey, Charmap, FontRef,
     scale::{
-        image::{Content, Image},
         Render, ScaleContext, Source, StrikeWith,
+        image::{Content, Image},
     },
     shape::{Direction, ShapeContext},
     zeno::{Format, Placement, Vector},
-    CacheKey, Charmap, FontRef,
 };
 use wgpu::{
     AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,

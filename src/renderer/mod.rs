@@ -1,6 +1,7 @@
 mod background;
 mod glyph;
 use background::BackgroundRenderer;
+pub use glyph::VertexData;
 
 use std::sync::Arc;
 
@@ -19,7 +20,7 @@ use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::{
     renderer::glyph::TerminalRenderer,
-    terminal::{CursorState, Divider, PaneGeometry, SplitDirection},
+    terminal::{CursorState, Divider, PaneGeometry, SplitDirection}, ui::renderer::UiRenderer,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -28,6 +29,19 @@ pub struct Color([u8; 4]);
 impl Color {
     pub fn rgb(r: u8, g: u8, b: u8) -> Self {
         Self([r, g, b, 0xFF])
+    }
+
+    pub fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self([r, g, b, a])
+    }
+
+    pub fn u32(v: u32) -> Self {
+        Color([
+            ((v << 24) & 0xFF) as u8,
+            ((v << 16) & 0xFF) as u8,
+            ((v << 08) & 0xFF) as u8,
+            ((v << 00) & 0xFF) as u8,
+        ])
     }
 
     pub fn to_linear(self) -> [f32; 4] {
@@ -83,6 +97,8 @@ pub struct Renderer {
     arena: Arena,
     font_size: f32,
     line_height: f32,
+
+    pub ui_renderer: UiRenderer,
 }
 
 pub struct Pane<'a> {
@@ -161,6 +177,7 @@ impl Renderer {
         let background_renderer = BackgroundRenderer::new(&device, format);
         let terminal_renderer = TerminalRenderer::new(&device, font_family, font_size, format);
         let divider_renderer = BackgroundRenderer::new(&device, format);
+        let ui_renderer = UiRenderer::new(&device, format);
 
         Ok(Renderer {
             window,
@@ -176,6 +193,8 @@ impl Renderer {
             arena: Arena::new(),
             font_size,
             line_height,
+
+            ui_renderer
         })
     }
 
@@ -401,6 +420,7 @@ impl Renderer {
                 .render(&self.device, &self.queue, &mut pass);
             self.divider_renderer
                 .render(&self.device, &self.queue, &mut pass);
+            self.ui_renderer.render(&self.device, &self.queue, &mut pass);
         }
         self.queue.submit(Some(encoder.finish()));
         surface.present();

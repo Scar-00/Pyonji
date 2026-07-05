@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use winit::event_loop::EventLoopProxy;
 
 use crate::{config::Config, terminal::SessionId};
@@ -147,7 +147,7 @@ impl Pty {
         use ntapi::{
             ntpebteb::PEB,
             ntpsapi::{
-                NtQueryInformationProcess, ProcessBasicInformation, PROCESS_BASIC_INFORMATION,
+                NtQueryInformationProcess, PROCESS_BASIC_INFORMATION, ProcessBasicInformation,
             },
             ntrtl::RTL_USER_PROCESS_PARAMETERS,
         };

@@ -10,6 +10,7 @@
     clippy::cast_sign_loss,
     clippy::struct_excessive_bools
 )]
+#![feature(path_absolute_method)]
 
 mod config;
 #[cfg(feature = "install")]
@@ -17,6 +18,10 @@ mod logging;
 mod pty;
 mod renderer;
 mod terminal;
+mod ui;
+
+#[cfg(not(feature = "install"))]
+use tracing_subscriber::prelude::*;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -34,9 +39,11 @@ use winit::{
     window::{Icon, Window, WindowId},
 };
 
-use crate::terminal::{
-    Divider, PaneGeometry, PanePathStep, SessionId, SessionManager, SplitDirection, Tab,
-    TerminalSession,
+use crate::{
+    renderer::Color, terminal::{
+        Divider, PaneGeometry, PanePathStep, SessionId, SessionManager, SplitDirection, Tab,
+        TerminalSession,
+    }, ui::{IntoElement, Render, UiLayer, div::div, types::{Point, Positioning, Size, Sizing, Style}}
 };
 
 #[derive(clap::Parser)]
@@ -66,6 +73,8 @@ struct App {
     ime_enabled: bool,
     ime_preedit: Option<String>,
     status_bar_hidden: bool,
+
+    ui_layer: Option<UiLayer>,
 }
 
 #[derive(Clone, Copy)]
@@ -81,22 +90,29 @@ struct DividerDrag {
     direction: SplitDirection,
 }
 
-const CONFIG_PATH: &str = "init.lua";
-
 fn main() -> Result<()> {
     #[cfg(feature = "install")]
     logging::init();
+    #[cfg(not(feature = "install"))]
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::filter::LevelFilter::WARN)
+        .init();
 
     let cli = Cli::parse();
-
-    let config = Config::load(CONFIG_PATH.into())?;
-    println!("config = {config:#?}");
 
     let event_loop = EventLoop::<PtyEvent>::with_user_event()
         .build()
         .context("failed to create event loop")?;
     let proxy = event_loop.create_proxy();
-    Config::watch(CONFIG_PATH.into(), proxy.clone());
+
+    let config = if let Ok(dir) = Config::load() {
+        Config::watch(proxy.clone());
+        dir
+    } else {
+        tracing::warn!("failed to load config");
+        Config::default()
+    };
 
     let mut app = App::new(cli, config, proxy);
 
@@ -138,6 +154,8 @@ impl App {
             ime_enabled: false,
             ime_preedit: None,
             status_bar_hidden: false,
+
+            ui_layer: None,
         }
     }
 
@@ -167,6 +185,24 @@ impl App {
         self.resize_tab();
 
         self.request_redraw();
+    }
+
+    fn open_ui(&mut self) {
+        let Some(ui) = self.ui_layer.as_mut() else {
+            return;
+        };
+        _ = ui.open(|_| Root {});
+    }
+}
+
+struct Root;
+
+impl Render for Root {
+    fn render(&mut self, _cx: &mut UiLayer) -> impl IntoElement {
+        div()
+            .style(Style::default().size(Size{ width: Sizing::Fract(1.0), height: Sizing::Fract(0.5) }).inset(Point::new(50.0, 0.0)).pos(Positioning::Absolute))
+            .child(div().style(Style::default().size(Size{ width: Sizing::Fract(0.5), height: Sizing::Fract(0.5) }).color(Color::rgb(0xFF, 0, 0))))
+            .child(div().style(Style::default().size(Size{ width: Sizing::Fract(0.5), height: Sizing::Fract(0.75) }).color(Color::rgb(0, 0xFF, 0))))
     }
 }
 
@@ -209,6 +245,8 @@ impl ApplicationHandler<PtyEvent> for App {
             }
         };
         self.window = Some(window.clone());
+        self.ui_layer = UiLayer::new_init(window.clone()).ok();
+        self.open_ui();
 
         match self.session_manager.create_session(
             self.terminal_rows().max(1),
@@ -303,7 +341,11 @@ impl ApplicationHandler<PtyEvent> for App {
                         is_active: Some(session_id) == active,
                     });
                 }
-
+                if let Some((ui_layer, window)) = self.ui_layer.as_mut().zip(self.window.as_ref()) {
+                    ui_layer.layout(window.inner_size());
+                    ui_layer.prepaint();
+                    _ = ui_layer.paint(&mut renderer.ui_renderer);
+                }
                 if let Err(e) = renderer.render(
                     &pane_data,
                     &dividers,
@@ -557,7 +599,7 @@ impl ApplicationHandler<PtyEvent> for App {
                                 return;
                             }
                             KeyCode::KeyR => {
-                                if let Ok(config) = Config::load(CONFIG_PATH.into()) {
+                                if let Ok(config) = Config::load() {
                                     self.apply_config(config);
                                 }
                                 return;
@@ -645,11 +687,7 @@ impl App {
         if self.modifiers.control_key() {
             value += 4;
         }
-        if value == 1 {
-            None
-        } else {
-            Some(value)
-        }
+        if value == 1 { None } else { Some(value) }
     }
 
     fn take_wheel_steps(&mut self, delta_lines: f32) -> i32 {

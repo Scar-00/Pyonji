@@ -515,7 +515,8 @@ fn ratio_from_first_size(first_size: u16, total: u16) -> u16 {
     if total <= 1 {
         return 500;
     }
-    (((u32::from(first_size) * 1000) + (u32::from(total) / 2)) / u32::from(total)).clamp(1, 999) as u16
+    (((u32::from(first_size) * 1000) + (u32::from(total) / 2)) / u32::from(total)).clamp(1, 999)
+        as u16
 }
 
 pub struct TerminalSession {

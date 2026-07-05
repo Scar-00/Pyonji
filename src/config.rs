@@ -5,18 +5,19 @@ use notify::RecursiveMode;
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::thread;
+use std::time::Duration;
 use winit::event_loop::EventLoopProxy;
 
-#[derive(Debug, Clone)]
-pub struct Value<T: Debug + Clone>(T);
+#[derive(Debug, Default, Clone)]
+pub struct Value<T: Debug + Clone + Default>(T);
 
-impl<T: Debug + Clone + FromLua> Value<T> {
+impl<T: Debug + Clone + FromLua + Default> Value<T> {
     pub fn value(&self) -> T {
         self.0.clone()
     }
 }
 
-impl<T: Debug + Clone + FromLua> FromLua for Value<T> {
+impl<T: Debug + Clone + FromLua + Default> FromLua for Value<T> {
     fn from_lua(value: LuaValue, lua: &Lua) -> LuaResult<Self> {
         if let Some(v) = value.as_function() {
             v.call::<T>(()).map(|v| Self(v))
@@ -26,7 +27,7 @@ impl<T: Debug + Clone + FromLua> FromLua for Value<T> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct Config {
     pub font_family: Option<Value<String>>,
     pub font_size: Option<Value<f64>>,
@@ -46,7 +47,8 @@ impl FromLua for Config {
 }
 
 impl Config {
-    pub fn load(path: PathBuf) -> Result<Self> {
+    pub fn load() -> Result<Self> {
+        let path = Self::path().context("not config path")?;
         let lua = Lua::new();
         let chunk = lua.load(path);
         let chunk = chunk.into_function()?;
@@ -54,34 +56,44 @@ impl Config {
         Ok(res)
     }
 
-    pub fn watch(path: PathBuf, proxy: EventLoopProxy<PtyEvent>) {
-        let config_path = path.clone();
+    pub fn watch(proxy: EventLoopProxy<PtyEvent>) {
+        let Some(path) = Self::path() else {
+            return;
+        };
         thread::spawn(move || {
-            use notify::{Event, EventKind, RecommendedWatcher, Watcher};
-            let config = notify::Config::default();
-            let Ok(mut watcher) = RecommendedWatcher::new(
-                move |ev: notify::Result<Event>| {
+            let func = move || -> Result<()> {
+                use notify::{EventKind, RecommendedWatcher, Watcher};
+                use std::sync::mpsc;
+                let (tx, rx) = mpsc::channel();
+                let config = notify::Config::default()
+                    .with_poll_interval(Duration::from_secs(1))
+                    .with_compare_contents(true);
+                let mut watcher = RecommendedWatcher::new(tx, config)?;
+                watcher.watch(&dbg!(path.absolute()?), RecursiveMode::Recursive)?;
+                while let Ok(ev) = rx.recv() {
                     if let Ok(ev) = ev
                         && let EventKind::Modify(_) = ev.kind
-                        && let Ok(config) = Self::load(config_path.clone())
+                        && let Ok(config) = Self::load()
                     {
                         _ = proxy.send_event(PtyEvent::ConfigChanged(config));
                     }
-                },
-                config,
-            ) else {
-                return;
+                }
+                Ok(())
             };
-            _ = watcher.watch(&path, RecursiveMode::NonRecursive);
+            if let Err(e) = func() {
+                tracing::error!(?e, "watcher thread error");
+            }
         });
+    }
+
+    pub fn path() -> Option<PathBuf> {
+        Some("init.lua".into())
+        //dirs::config_local_dir().map(|dir| dir.join("pyonji").join("init.lua"))
     }
 
     pub fn font_metrics(&self) -> (f64, f64) {
         let font_size = self.font_size.as_ref().map_or(24.0, Value::value);
-        let line_height = self
-            .line_height
-            .as_ref()
-            .map_or(28.0 / 24.0, Value::value);
+        let line_height = self.line_height.as_ref().map_or(28.0 / 24.0, Value::value);
         (font_size, line_height)
     }
 }
