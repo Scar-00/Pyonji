@@ -1,7 +1,12 @@
-use crate::{renderer::Color, ui::{
-    ElementId, IntoElement, UiLayer,
-    render::{AnyElement, Element}, renderer::UiRenderer, types::*
-}};
+use crate::{
+    renderer::Color,
+    ui::{
+        render::{AnyElement, Element},
+        renderer::UiRenderer,
+        types::*,
+        ElementId, IntoElement, UiLayer,
+    },
+};
 
 pub fn div() -> Div {
     Div::default()
@@ -36,6 +41,7 @@ impl Element for Div {
     }
 
     fn prepaint(&mut self, cx: &mut UiLayer, _: ElementId, _bounds: Rect) {
+        println!("{_bounds:#?}");
         self.children
             .iter_mut()
             .for_each(|child| AnyElement::prepaint(child, cx));
@@ -47,7 +53,9 @@ impl Element for Div {
         if let Some(color) = &self.style.color {
             renderer.add_rect(x, y, width, height, color.to_linear());
         }
-        self.children.iter_mut().for_each(|child| child.paint(cx, renderer));
+        self.children
+            .iter_mut()
+            .for_each(|child| child.paint(cx, renderer));
     }
 }
 

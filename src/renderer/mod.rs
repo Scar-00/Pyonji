@@ -1,7 +1,6 @@
 mod background;
 mod glyph;
 use background::BackgroundRenderer;
-pub use glyph::VertexData;
 
 use std::sync::Arc;
 
@@ -10,22 +9,27 @@ use bumpalo::Bump as Arena;
 use unicode_segmentation::UnicodeSegmentation;
 use vt100::Screen;
 use wgpu::{
-    Adapter, Backends, CommandEncoderDescriptor, CompositeAlphaMode, Device, DeviceDescriptor,
-    ExperimentalFeatures, Features, Instance, InstanceDescriptor, Limits, LoadOp, MemoryHints,
+    Adapter, BackendOptions, Backends, CommandEncoderDescriptor, CompositeAlphaMode,
+    CurrentSurfaceTexture, Device, DeviceDescriptor, ExperimentalFeatures, Features, Instance,
+    InstanceDescriptor, InstanceFlags, Limits, LoadOp, MemoryBudgetThresholds, MemoryHints,
     Operations, PowerPreference, PresentMode, Queue, RenderPassColorAttachment,
     RenderPassDescriptor, RequestAdapterOptions, StoreOp, Surface, SurfaceConfiguration,
-    SurfaceError, TextureFormat, TextureUsages, TextureViewDescriptor, Trace,
+    TextureFormat, TextureUsages, TextureViewDescriptor, Trace,
 };
 use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::{
     renderer::glyph::TerminalRenderer,
-    terminal::{CursorState, Divider, PaneGeometry, SplitDirection}, ui::renderer::UiRenderer,
+    terminal::{CursorState, Divider, PaneGeometry, SplitDirection},
+    UiLayer,
 };
+
+use egui_wgpu::{Renderer as UiRenderer, RendererOptions};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Color([u8; 4]);
 
+#[allow(unused)]
 impl Color {
     pub fn rgb(r: u8, g: u8, b: u8) -> Self {
         Self([r, g, b, 0xFF])
@@ -128,9 +132,12 @@ impl Renderer {
         line_height: f32,
     ) -> Result<Self> {
         let size = window.inner_size();
-        let instance = Instance::new(&InstanceDescriptor {
+        let instance = Instance::new(InstanceDescriptor {
             backends: Backends::VULKAN,
-            ..Default::default()
+            flags: InstanceFlags::default(),
+            memory_budget_thresholds: MemoryBudgetThresholds::default(),
+            backend_options: BackendOptions::default(),
+            display: Some(Box::new(window.clone())),
         });
         let surface = instance
             .create_surface(window.clone())
@@ -177,7 +184,7 @@ impl Renderer {
         let background_renderer = BackgroundRenderer::new(&device, format);
         let terminal_renderer = TerminalRenderer::new(&device, font_family, font_size, format);
         let divider_renderer = BackgroundRenderer::new(&device, format);
-        let ui_renderer = UiRenderer::new(&device, format);
+        let ui_renderer = UiRenderer::new(&device, format, RendererOptions::default());
 
         Ok(Renderer {
             window,
@@ -194,7 +201,7 @@ impl Renderer {
             font_size,
             line_height,
 
-            ui_renderer
+            ui_renderer,
         })
     }
 
@@ -245,6 +252,8 @@ impl Renderer {
         dividers: &[Divider],
         status_tabs: Option<&[StatusTab]>,
         ime_preedit: Option<&ImePreedit>,
+        ui_layer: &mut Option<UiLayer>,
+        ui_builder: impl FnMut(&mut egui::Ui),
     ) -> Result<()> {
         let size = self.window.inner_size();
         let screen_size = [size.width as f32, size.height as f32];
@@ -256,8 +265,10 @@ impl Renderer {
         let divider_width = (divider_px / size.width.max(1) as f32) * 2.0;
         let divider_height = (divider_px / size.height.max(1) as f32) * 2.0;
         let surface = match self.surface.get_current_texture() {
-            Ok(frame) => frame,
-            Err(SurfaceError::Lost | SurfaceError::Outdated) => {
+            CurrentSurfaceTexture::Success(frame) => frame,
+            CurrentSurfaceTexture::Lost
+            | CurrentSurfaceTexture::Outdated
+            | CurrentSurfaceTexture::Suboptimal(_) => {
                 if size.width == 0 || size.height == 0 {
                     return Ok(());
                 }
@@ -276,8 +287,10 @@ impl Renderer {
                 );
                 return Ok(());
             }
-            Err(SurfaceError::OutOfMemory) => anyhow::bail!("surface out of memory"),
-            Err(SurfaceError::Other | SurfaceError::Timeout) => return Ok(()),
+            CurrentSurfaceTexture::Occluded | CurrentSurfaceTexture::Timeout => {
+                return Ok(());
+            }
+            CurrentSurfaceTexture::Validation => anyhow::bail!("surface out of memory"),
         };
 
         let [w, h] = [
@@ -394,13 +407,14 @@ impl Renderer {
             .create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("render encoder"),
             });
+        let view = surface
+            .texture
+            .create_view(&TextureViewDescriptor::default());
         {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("main render pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &surface
-                        .texture
-                        .create_view(&TextureViewDescriptor::default()),
+                    view: &view,
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Clear(Color([0x18, 0x18, 0x18, 0xFF]).to_wgpu()),
@@ -420,7 +434,21 @@ impl Renderer {
                 .render(&self.device, &self.queue, &mut pass);
             self.divider_renderer
                 .render(&self.device, &self.queue, &mut pass);
-            self.ui_renderer.render(&self.device, &self.queue, &mut pass);
+        }
+        {
+            if let Some(layer) = ui_layer {
+                if layer.shown() {
+                    layer.render(
+                        &mut self.ui_renderer,
+                        &self.window,
+                        &self.device,
+                        &self.queue,
+                        &mut encoder,
+                        &view,
+                        ui_builder,
+                    );
+                }
+            }
         }
         self.queue.submit(Some(encoder.finish()));
         surface.present();

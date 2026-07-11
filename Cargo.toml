@@ -18,7 +18,7 @@ portable-pty = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 vt100 = "0.16.2"
-wgpu = { version = "28.0.0", default-features = false, features = ["wgsl", "vulkan"] }
+wgpu = { version = "29.0.4", default-features = false, features = ["wgsl", "vulkan"] }
 winit = "0.30"
 unicode-segmentation = "1.12"
 ahash = "0.8.12"
@@ -35,6 +35,13 @@ slotmap = "1.1.1"
 taffy = "0.12.1"
 smol = "2.0.2"
 derive_more = { version = "2.1.1", features = ["deref", "deref_mut"] }
+egui = "0.35.0"
+egui-winit = "0.35.0"
+egui-wgpu = "0.35.0"
+egui_flex = "0.7.0"
+git-version = "0.3.9"
+const_format = "0.2.36"
+nucleo-matcher = "0.3.1"
 
 [target.'cfg(windows)'.dependencies]
 ntapi = "0.4.3"

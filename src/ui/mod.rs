@@ -7,7 +7,9 @@ pub mod types;
 
 use crate::ui::{
     entity::{Entity, EntityId},
-    render::{AnyElement, Element}, renderer::UiRenderer, types::{Pixel, Point, Size, Style},
+    render::{AnyElement, Element},
+    renderer::UiRenderer,
+    types::{Pixel, Point, Size, Style},
 };
 use anyhow::Result;
 use context::Context;
@@ -15,7 +17,7 @@ use entity::EntityMap;
 pub use render::{IntoElement, Render};
 use std::collections::HashSet;
 use std::sync::Arc;
-use taffy::{NodeId, TaffyTree, prelude};
+use taffy::{prelude, NodeId, TaffyTree};
 use winit::{dpi::PhysicalSize, window::Window};
 
 pub type ElementId = NodeId;
@@ -34,10 +36,10 @@ pub struct UiLayer {
 impl UiLayer {
     pub fn ndc_pos(&self, coords: Point<Pixel>) -> Point<f32> {
         let size = self.window.inner_size();
-        let Point{ x, y } = coords;
+        let Point { x, y } = coords;
         Point {
             x: (*x as f32 / size.width as f32) * 2.0 - 1.0,
-            y: (*y as f32 / size.height as f32) * 2.0,
+            y: 1.0 - (*y as f32 / size.height as f32) * 2.0,
         }
     }
 
@@ -114,7 +116,8 @@ impl UiLayer {
         self.update_root(|this, root| {
             let id = root.layout(this);
             _ = this.layout_tree.compute_layout(
-                id, taffy::Size {
+                id,
+                taffy::Size {
                     width: taffy::AvailableSpace::Definite(size.width as f32),
                     height: taffy::AvailableSpace::Definite(size.height as f32),
                 },

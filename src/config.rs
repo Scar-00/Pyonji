@@ -1,14 +1,16 @@
 use crate::PtyEvent;
 use anyhow::{Context, Result};
+use derive_more::{Deref, DerefMut};
 use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
 use std::fmt::Debug;
+use std::ops::Deref as _;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 use winit::event_loop::EventLoopProxy;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Deref, DerefMut)]
 pub struct Value<T: Debug + Clone + Default>(T);
 
 impl<T: Debug + Clone + FromLua + Default> Value<T> {
@@ -87,13 +89,21 @@ impl Config {
     }
 
     pub fn path() -> Option<PathBuf> {
-        Some("init.lua".into())
-        //dirs::config_local_dir().map(|dir| dir.join("pyonji").join("init.lua"))
+        cfg_select! {
+            feature = "install" => {
+                dirs::config_local_dir().map(|dir| dir.join("pyonji").join("init.lua"))
+            }
+            _ => Some("init.lua".into())
+        }
     }
 
     pub fn font_metrics(&self) -> (f64, f64) {
         let font_size = self.font_size.as_ref().map_or(24.0, Value::value);
         let line_height = self.line_height.as_ref().map_or(28.0 / 24.0, Value::value);
         (font_size, line_height)
+    }
+
+    pub fn font_family(&self) -> Option<&str> {
+        self.font_family.as_ref().map(|v| v.deref().as_str())
     }
 }

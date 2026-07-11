@@ -4,13 +4,13 @@ use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
 use etagere::{AtlasAllocator, BucketedAtlasAllocator};
 use swash::{
-    CacheKey, Charmap, FontRef,
     scale::{
-        Render, ScaleContext, Source, StrikeWith,
         image::{Content, Image},
+        Render, ScaleContext, Source, StrikeWith,
     },
     shape::{Direction, ShapeContext},
     zeno::{Format, Placement, Vector},
+    CacheKey, Charmap, FontRef,
 };
 use wgpu::{
     AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
@@ -523,7 +523,7 @@ impl TerminalRenderer {
 
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("selection pipeline layout"),
-            bind_group_layouts: &[&uniform_bind_group_layout],
+            bind_group_layouts: &[Some(&uniform_bind_group_layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {

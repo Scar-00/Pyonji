@@ -52,10 +52,7 @@ impl From<Size<Sizing>> for taffy::Size<taffy::Dimension> {
             Sizing::Fract(fract) => taffy::Dimension::percent(fract),
         };
 
-        Self {
-            width,
-            height,
-        }
+        Self { width, height }
     }
 }
 
@@ -75,7 +72,7 @@ impl From<&Layout> for Rect {
             size: Size {
                 width: value.size.width.into(),
                 height: value.size.height.into(),
-            }
+            },
         }
     }
 }
@@ -125,15 +122,18 @@ impl Style {
 impl From<&Style> for taffy::Style {
     fn from(value: &Style) -> Self {
         let mut style = Self::default();
-        value.sizeing.as_ref().map(|size| style.size = size.clone().into());
+        value
+            .sizeing
+            .as_ref()
+            .map(|size| style.size = size.clone().into());
         value.positioning.as_ref().map(|pos| match pos {
             Positioning::Absolute => style.position = taffy::Position::Absolute,
             Positioning::Relative => style.position = taffy::Position::Relative,
         });
-        value.inset.as_ref().map(|inset| {
-            style.inset.left = LengthPercentageAuto::length(*inset.x as f32);
-            style.inset.bottom = LengthPercentageAuto::length(*inset.y as f32);
-        });
+        style.justify_content = Some(taffy::AlignContent::CENTER);
+        style.align_items = Some(taffy::AlignItems::CENTER);
+        style.display = taffy::Display::Flex;
+        style.flex_direction = taffy::FlexDirection::Row;
         style
     }
 }

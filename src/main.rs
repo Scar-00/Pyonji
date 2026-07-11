@@ -12,14 +12,17 @@
 )]
 #![feature(path_absolute_method)]
 
+mod cmd;
 mod config;
 #[cfg(feature = "install")]
 mod logging;
 mod pty;
 mod renderer;
 mod terminal;
-mod ui;
+//mod ui;
 
+use const_format::formatcp;
+use egui_wgpu::ScreenDescriptor;
 #[cfg(not(feature = "install"))]
 use tracing_subscriber::prelude::*;
 
@@ -28,8 +31,11 @@ use clap::Parser;
 use config::Config;
 use pty::Event as PtyEvent;
 use renderer::{ImePreedit, Pane, Renderer, StatusTab};
-use std::{array, path::PathBuf, sync::Arc};
+use std::{array, cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 use tracing::error;
+use wgpu::{
+    LoadOp, Operations, RenderPassColorAttachment, RenderPassDescriptor, StoreOp, TextureView,
+};
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
@@ -40,11 +46,115 @@ use winit::{
 };
 
 use crate::{
-    renderer::Color, terminal::{
+    cmd::{Palette, State as CmdState, UiAction},
+    terminal::{
         Divider, PaneGeometry, PanePathStep, SessionId, SessionManager, SplitDirection, Tab,
         TerminalSession,
-    }, ui::{IntoElement, Render, UiLayer, div::div, types::{Point, Positioning, Size, Sizing, Style}}
+    },
 };
+
+use egui::{Context as EContext, Ui, ViewportId};
+use egui_wgpu::Renderer as UiRenderer;
+use egui_winit::State as EGuiState;
+
+pub struct UiLayer {
+    pub cx: EContext,
+    pub state: EGuiState,
+    shown: bool,
+}
+
+impl UiLayer {
+    pub fn new(event_loop: &ActiveEventLoop, scale_factor: f32) -> Self {
+        let cx = EContext::default();
+        let state = EGuiState::new(
+            cx.clone(),
+            ViewportId::ROOT,
+            event_loop,
+            Some(scale_factor),
+            None,
+            None,
+        );
+        Self {
+            cx,
+            state,
+            shown: false,
+        }
+    }
+
+    pub fn render(
+        &mut self,
+        renderer: &mut UiRenderer,
+        window: &Window,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &TextureView,
+        ui_builder: impl FnMut(&mut Ui),
+    ) {
+        let input = self.state.take_egui_input(window);
+        let output = self.cx.run_ui(input, ui_builder);
+
+        self.state
+            .handle_platform_output(window, output.platform_output.clone());
+
+        let paint_jobs = self
+            .cx
+            .tessellate(output.shapes, self.cx.pixels_per_point());
+        let size = window.inner_size();
+        let screen_descriptor = ScreenDescriptor {
+            size_in_pixels: [size.width, size.height],
+            pixels_per_point: window.scale_factor() as f32,
+        };
+
+        for (id, dt) in &output.textures_delta.set {
+            renderer.update_texture(device, queue, *id, dt);
+        }
+
+        renderer.update_buffers(device, queue, encoder, &paint_jobs, &screen_descriptor);
+
+        {
+            let mut pass = encoder
+                .begin_render_pass(&RenderPassDescriptor {
+                    label: Some("overlay render pass"),
+                    color_attachments: &[Some(RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        ops: Operations {
+                            load: LoadOp::Load,
+                            store: StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime();
+            renderer.render(&mut pass, &paint_jobs, &screen_descriptor);
+        }
+
+        for id in &output.textures_delta.free {
+            renderer.free_texture(id);
+        }
+    }
+
+    pub fn handle_event(&mut self, window: &Window, event: &WindowEvent) -> bool {
+        let response = self.state.on_window_event(window, event);
+        if response.repaint {
+            window.request_redraw();
+        }
+        response.consumed
+    }
+
+    pub fn toggle(&mut self) {
+        self.shown = !self.shown;
+    }
+
+    pub fn shown(&self) -> bool {
+        self.shown
+    }
+}
 
 #[derive(clap::Parser)]
 struct Cli {
@@ -74,6 +184,8 @@ struct App {
     ime_preedit: Option<String>,
     status_bar_hidden: bool,
 
+    proxy: EventLoopProxy<PtyEvent>,
+    state: Rc<RefCell<CmdState>>,
     ui_layer: Option<UiLayer>,
 }
 
@@ -124,7 +236,10 @@ fn main() -> Result<()> {
 }
 
 impl App {
-    const TITLE: &str = "Pyonji";
+    const TITLE: &str = cfg_select! {
+        feature = "install" => "Pyonji",
+        _ => formatcp!("Pyonji {}", git_version::git_version!()),
+    };
     const ICON: &[u8] = include_bytes!("../resources/icon.ico");
     const STATUS_BAR_ROWS: u16 = 1;
 }
@@ -137,7 +252,7 @@ impl App {
             config,
             renderer: None,
             window: None,
-            session_manager: SessionManager::new(proxy),
+            session_manager: SessionManager::new(proxy.clone()),
             modifiers: ModifiersState::default(),
             font_size: font_size as f32,
             line_height: (font_size * line_height) as f32,
@@ -155,6 +270,8 @@ impl App {
             ime_preedit: None,
             status_bar_hidden: false,
 
+            proxy,
+            state: Rc::new(RefCell::new(CmdState::default())),
             ui_layer: None,
         }
     }
@@ -169,13 +286,7 @@ impl App {
         };
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_font_metrics(self.font_size, self.line_height);
-            if let Some(font_family) = self
-                .config
-                .font_family
-                .as_ref()
-                .map(config::Value::value)
-                .as_deref()
-            {
+            if let Some(font_family) = self.config.font_family() {
                 renderer.set_font_family(font_family);
             }
             renderer.evict_glyphs();
@@ -187,22 +298,11 @@ impl App {
         self.request_redraw();
     }
 
-    fn open_ui(&mut self) {
-        let Some(ui) = self.ui_layer.as_mut() else {
-            return;
-        };
-        _ = ui.open(|_| Root {});
-    }
-}
-
-struct Root;
-
-impl Render for Root {
-    fn render(&mut self, _cx: &mut UiLayer) -> impl IntoElement {
-        div()
-            .style(Style::default().size(Size{ width: Sizing::Fract(1.0), height: Sizing::Fract(0.5) }).inset(Point::new(50.0, 0.0)).pos(Positioning::Absolute))
-            .child(div().style(Style::default().size(Size{ width: Sizing::Fract(0.5), height: Sizing::Fract(0.5) }).color(Color::rgb(0xFF, 0, 0))))
-            .child(div().style(Style::default().size(Size{ width: Sizing::Fract(0.5), height: Sizing::Fract(0.75) }).color(Color::rgb(0, 0xFF, 0))))
+    fn ui(&self) -> impl FnMut(&mut Ui) + '_ {
+        |ui: &mut Ui| {
+            let mut state = self.state.borrow_mut();
+            Palette::new(&mut state, &self.proxy).show(ui);
+        }
     }
 }
 
@@ -230,11 +330,7 @@ impl ApplicationHandler<PtyEvent> for App {
         let window = Arc::new(window);
         self.renderer = match Renderer::new(
             window.clone(),
-            self.config
-                .font_family
-                .as_ref()
-                .map(config::Value::value)
-                .as_deref(),
+            self.config.font_family(),
             self.font_size,
             self.line_height,
         ) {
@@ -245,8 +341,7 @@ impl ApplicationHandler<PtyEvent> for App {
             }
         };
         self.window = Some(window.clone());
-        self.ui_layer = UiLayer::new_init(window.clone()).ok();
-        self.open_ui();
+        self.ui_layer = Some(UiLayer::new(&event_loop, window.scale_factor() as f32));
 
         match self.session_manager.create_session(
             self.terminal_rows().max(1),
@@ -260,8 +355,8 @@ impl ApplicationHandler<PtyEvent> for App {
             }
             Err(error) => error!(error = ?error, "failed to create initial session"),
         }
-        window.request_redraw();
         self.update_ime_cursor_area();
+        window.request_redraw();
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: PtyEvent) {
@@ -292,13 +387,13 @@ impl ApplicationHandler<PtyEvent> for App {
                 } else {
                     self.resize_tab();
                 }
-                self.request_redraw();
                 self.update_ime_cursor_area();
+                self.request_redraw();
             }
             PtyEvent::Data(id, data) => {
                 self.session_manager.update_session(id, &data);
-                self.request_redraw();
                 self.update_ime_cursor_area();
+                self.request_redraw();
             }
             PtyEvent::ProgramChanged((id, title)) => {
                 let Some(session) = self.session_manager.session_mut(id) else {
@@ -309,6 +404,21 @@ impl ApplicationHandler<PtyEvent> for App {
             PtyEvent::ConfigChanged(config) => {
                 self.apply_config(config);
             }
+            PtyEvent::UiAction(action) => {
+                match action {
+                    UiAction::Close => {
+                        event_loop.exit();
+                    }
+                    UiAction::Next => {
+                        self.switch_tab(self.next_tab_index());
+                    }
+                    UiAction::Prev => {
+                        self.switch_tab(self.previous_tab_index());
+                    }
+                }
+                self.ui_layer.as_mut().map(|layer| layer.toggle());
+                self.request_redraw();
+            }
         }
     }
 
@@ -318,6 +428,12 @@ impl ApplicationHandler<PtyEvent> for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        if let Some((layer, window)) = self.ui_layer.as_mut().zip(self.window.as_ref()) {
+            if layer.shown() {
+                layer.handle_event(window, &event);
+            }
+        }
+
         match event {
             WindowEvent::RedrawRequested => {
                 let panes = self.tab_layouts();
@@ -325,7 +441,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 let dividers = self.tab_dividers();
                 let status_tabs = self.status_tabs();
                 let ime_preedit = self.ime_preedit();
-                let Some(renderer) = self.renderer.as_mut() else {
+                let Some(mut renderer) = self.renderer.take() else {
                     return;
                 };
 
@@ -341,19 +457,22 @@ impl ApplicationHandler<PtyEvent> for App {
                         is_active: Some(session_id) == active,
                     });
                 }
-                if let Some((ui_layer, window)) = self.ui_layer.as_mut().zip(self.window.as_ref()) {
-                    ui_layer.layout(window.inner_size());
-                    ui_layer.prepaint();
-                    _ = ui_layer.paint(&mut renderer.ui_renderer);
+                let mut ui_layer = self.ui_layer.take();
+                {
+                    let ui_builder = self.ui();
+                    if let Err(e) = renderer.render(
+                        &pane_data,
+                        &dividers,
+                        status_tabs.as_deref(),
+                        ime_preedit.as_ref(),
+                        &mut ui_layer,
+                        ui_builder,
+                    ) {
+                        error!(error = ?e, "failed to render");
+                    }
                 }
-                if let Err(e) = renderer.render(
-                    &pane_data,
-                    &dividers,
-                    status_tabs.as_deref(),
-                    ime_preedit.as_ref(),
-                ) {
-                    error!(error = ?e, "failed to render");
-                }
+                self.ui_layer = ui_layer;
+                self.renderer = Some(renderer);
             }
             WindowEvent::Resized(size) => {
                 if size.width == 0 || size.height == 0 {
@@ -604,6 +723,12 @@ impl ApplicationHandler<PtyEvent> for App {
                                 }
                                 return;
                             }
+                            KeyCode::KeyO => {
+                                if let Some(layer) = self.ui_layer.as_mut() {
+                                    layer.toggle();
+                                }
+                                return;
+                            }
                             _ => {}
                         }
                     }
@@ -631,10 +756,12 @@ impl ApplicationHandler<PtyEvent> for App {
 }
 
 impl App {
-    fn request_redraw(&self) {
+    fn request_redraw(&self) -> bool {
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
+            return true;
         }
+        false
     }
 
     fn next_tab_index(&self) -> usize {
@@ -687,7 +814,11 @@ impl App {
         if self.modifiers.control_key() {
             value += 4;
         }
-        if value == 1 { None } else { Some(value) }
+        if value == 1 {
+            None
+        } else {
+            Some(value)
+        }
     }
 
     fn take_wheel_steps(&mut self, delta_lines: f32) -> i32 {

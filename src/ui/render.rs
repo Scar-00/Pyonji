@@ -1,7 +1,7 @@
 use std::any::Any;
 
-use crate::ui::{ElementId, UiLayer, renderer::UiRenderer};
 use crate::ui::types::*;
+use crate::ui::{renderer::UiRenderer, ElementId, UiLayer};
 
 pub trait Render {
     fn render(&mut self, cx: &mut UiLayer) -> impl IntoElement;
@@ -107,10 +107,7 @@ impl IntoElement for () {
 
 impl Element for () {
     fn layout(&mut self, cx: &mut UiLayer) -> ElementId {
-        cx.layout_element(
-            &Style::default(),
-            &[],
-        )
+        cx.layout_element(&Style::default(), &[])
     }
 
     fn prepaint(&mut self, _: &mut UiLayer, _: ElementId, _: Rect) {}

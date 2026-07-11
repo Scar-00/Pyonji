@@ -3,11 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::{cmd::UiAction, config::Config, terminal::SessionId};
 use anyhow::{Context, Result};
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use winit::event_loop::EventLoopProxy;
-
-use crate::{config::Config, terminal::SessionId};
 
 pub struct Pty {
     master: Box<dyn MasterPty>,
@@ -20,6 +19,7 @@ pub enum Event {
     Data(SessionId, Vec<u8>),
     ProgramChanged((SessionId, String)),
     ConfigChanged(Config),
+    UiAction(UiAction),
 }
 
 impl Pty {
@@ -147,7 +147,7 @@ impl Pty {
         use ntapi::{
             ntpebteb::PEB,
             ntpsapi::{
-                NtQueryInformationProcess, PROCESS_BASIC_INFORMATION, ProcessBasicInformation,
+                NtQueryInformationProcess, ProcessBasicInformation, PROCESS_BASIC_INFORMATION,
             },
             ntrtl::RTL_USER_PROCESS_PARAMETERS,
         };
