@@ -12,7 +12,6 @@
 )]
 #![feature(path_absolute_method)]
 
-//mod cmd;
 mod config;
 #[cfg(feature = "install")]
 mod logging;
@@ -20,7 +19,6 @@ mod overlay;
 mod pty;
 mod renderer;
 mod terminal;
-//mod ui;
 
 use const_format::formatcp;
 #[cfg(not(feature = "install"))]
@@ -77,6 +75,7 @@ struct App {
     ime_enabled: bool,
     ime_preedit: Option<String>,
     status_bar_hidden: bool,
+    _proxy: EventLoopProxy<PtyEvent>,
 
     overlay: Option<Overlay>,
 }
@@ -95,14 +94,17 @@ struct DividerDrag {
 }
 
 fn main() -> Result<()> {
-    #[cfg(feature = "install")]
-    logging::init();
-    #[cfg(not(feature = "install"))]
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(tracing_subscriber::filter::LevelFilter::WARN)
-        .init();
-
+    cfg_select! {
+        feature = "install" => {
+            logging::init();
+        }
+        _ => {
+            tracing_subscriber::registry()
+                .with(tracing_subscriber::fmt::layer())
+                .with(tracing_subscriber::filter::LevelFilter::WARN)
+                .init();
+        }
+    };
     let cli = Cli::parse();
 
     let event_loop = EventLoop::<PtyEvent>::with_user_event()
@@ -161,6 +163,7 @@ impl App {
             ime_enabled: false,
             ime_preedit: None,
             status_bar_hidden: false,
+            _proxy: proxy,
 
             overlay: None,
         }
@@ -309,6 +312,7 @@ impl ApplicationHandler<PtyEvent> for App {
     ) {
         match event {
             WindowEvent::RedrawRequested => {
+                let start = std::time::Instant::now();
                 let panes = self.tab_layouts();
                 let active = self.active_session();
                 let dividers = self.tab_dividers();
@@ -336,10 +340,11 @@ impl ApplicationHandler<PtyEvent> for App {
                     &dividers,
                     status_tabs.as_deref(),
                     ime_preedit.as_ref(),
-                    &self.overlay,
+                    self.overlay.as_ref(),
                 ) {
                     error!(error = ?e, "failed to render");
                 }
+                println!("render = {:?}", start.elapsed());
             }
             WindowEvent::Resized(size) => {
                 if size.width == 0 || size.height == 0 {

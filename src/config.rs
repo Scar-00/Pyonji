@@ -90,6 +90,7 @@ impl Config {
         });
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     pub fn path() -> Option<PathBuf> {
         cfg_select! {
             feature = "install" => {
@@ -110,6 +111,6 @@ impl Config {
     }
 
     pub fn fullscreen(&self) -> bool {
-        self.fullscreen.as_ref().map(Value::value).unwrap_or(false)
+        self.fullscreen.as_ref().is_some_and(Value::value)
     }
 }

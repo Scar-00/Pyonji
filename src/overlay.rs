@@ -21,37 +21,47 @@ use ratatui::{
     backend::{ClearType, WindowSize},
     crossterm::{cursor::MoveTo, execute, queue},
     prelude::*,
-    text::ToText,
     widgets::*,
 };
 use ratatui_textarea::{CursorMove, Input, Key, TextArea};
 use unicode_segmentation::UnicodeSegmentation as _;
-use unicode_width::UnicodeWidthStr;
 use vt100::Parser;
 use wgpu::{Device, Queue, RenderPass, TextureFormat};
 use winit::{
     dpi::PhysicalSize,
-    event::{ElementState, KeyEvent},
-    keyboard::{KeyCode, PhysicalKey},
+    event::{ElementState, KeyEvent, Modifiers},
+    keyboard::{KeyCode, ModifiersState, PhysicalKey},
 };
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub enum Screen {
+    CmdPalette,
+    Sessions,
+}
 
 #[derive(Clone)]
 struct Arg {
     placeholder: &'static str,
 }
 
+impl Arg {
+    fn new(n: &'static str) -> Self {
+        Self { placeholder: n }
+    }
+}
+
 #[derive(Clone)]
 struct Cmd {
     name: String,
     args: Vec<Arg>,
-    action: Rc<dyn Fn(&mut Overlay, &mut App)>,
+    action: Rc<dyn Fn(&mut Overlay, &mut App, Vec<&str>)>,
 }
 
 impl Cmd {
     pub fn new(
         name: impl ToString,
         args: impl IntoIterator<Item = Arg>,
-        f: impl 'static + Fn(&mut Overlay, &mut App),
+        f: impl 'static + Fn(&mut Overlay, &mut App, Vec<&str>),
     ) -> Self {
         Self {
             name: name.to_string(),
@@ -65,17 +75,21 @@ pub struct Overlay {
     terminal: Terminal<VtBackend>,
     size: [f32; 2],
     shown: bool,
+    screen: Screen,
 
     commands: Vec<Cmd>,
     filtered: Vec<Cmd>,
     matcher: Matcher,
 
-    text_area: TextArea<'static>,
-    list_state: ListState,
+    cmd_text_area: TextArea<'static>,
+    cmd_list_state: ListState,
+
+    session_list_state: ListState,
 }
 
 impl Overlay {
     pub fn handle_input(&mut self, app: &mut App, event: &KeyEvent) -> bool {
+        let mods = &app.modifiers;
         let PhysicalKey::Code(code) = event.physical_key else {
             return false;
         };
@@ -83,41 +97,96 @@ impl Overlay {
             return false;
         }
         match code {
-            KeyCode::ArrowDown => self.list_state.select_next(),
-            KeyCode::ArrowUp => self.list_state.select_previous(),
+            KeyCode::ArrowDown => match self.screen {
+                Screen::CmdPalette => self.cmd_list_state.select_next(),
+                Screen::Sessions => self.session_list_state.select_next(),
+            },
+            KeyCode::ArrowUp => match self.screen {
+                Screen::CmdPalette => self.cmd_list_state.select_previous(),
+                Screen::Sessions => self.session_list_state.select_previous(),
+            },
+            KeyCode::Escape => {
+                self.toggle();
+                app.request_redraw();
+            }
             KeyCode::Enter => {
-                if let Some(selected) = self.list_state.selected() {
-                    let action = self.filtered[selected].action.clone();
-                    action(self, app);
+                match self.screen {
+                    Screen::CmdPalette => {
+                        if let Some(selected) = self.cmd_list_state.selected() {
+                            let action = self.filtered[selected].action.clone();
+                            let input = self.cmd_text_area.lines().join("\n");
+                            let mut split = input.split(' ');
+                            split.next();
+                            action(self, app, split.collect());
+                        }
+                        self.cmd_text_area.move_cursor(CursorMove::Head);
+                        self.cmd_text_area.delete_line_by_end();
+                        self.cmd_list_state.select(None);
+                    }
+                    Screen::Sessions => {
+                        if let Some(selected) = self.session_list_state.selected() {
+                            let sessions = app
+                                .tabs
+                                .iter()
+                                .flatten()
+                                .flat_map(|tab| tab.sessions())
+                                .collect::<Vec<_>>();
+                            let session = sessions[selected];
+                            if let Some(tab) = app.tabs.iter().position(|tab| {
+                                let Some(tab) = tab else {
+                                    return false;
+                                };
+                                tab.sessions().contains(&session)
+                            }) && tab != app.current_tab {
+                                app.switch_tab(tab);
+                            }
+                            app.set_active_session(session);
+                        }
+                    }
                 }
-                self.list_state.select(None);
                 self.toggle();
             }
             KeyCode::Backspace => {
-                self.text_area.input(Input {
-                    key: Key::Backspace,
-                    ..Default::default()
-                });
+                if self.screen == Screen::CmdPalette {
+                    self.cmd_text_area.input(Input {
+                        key: Key::Backspace,
+                        ..Default::default()
+                    });
+                }
             }
             KeyCode::Tab => {
-                let Some(selected) = self.list_state.selected() else {
-                    return true;
-                };
-                self.text_area.move_cursor(CursorMove::Head);
-                self.text_area.delete_line_by_end();
-                self.text_area.insert_str(&self.filtered[selected].name);
+                if self.screen == Screen::CmdPalette {
+                    let Some(selected) = self.cmd_list_state.selected() else {
+                        return true;
+                    };
+                    self.cmd_text_area.move_cursor(CursorMove::Head);
+                    self.cmd_text_area.delete_line_by_end();
+                    self.cmd_text_area.insert_str(&self.filtered[selected].name);
+                }
+            }
+            KeyCode::KeyS if mods.contains(ModifiersState::CONTROL) => {
+                self.screen = Screen::Sessions;
+                app.request_redraw();
+            }
+            KeyCode::KeyC if mods.contains(ModifiersState::CONTROL) => {
+                self.screen = Screen::CmdPalette;
+                app.request_redraw();
             }
             _ => {
-                if let Some(text) = &event.text {
-                    self.text_area.insert_str(text.as_str());
+                if self.screen == Screen::CmdPalette {
+                    if let Some(text) = &event.text {
+                        self.cmd_text_area.insert_str(text.as_str());
+                    }
                 }
             }
         }
-        self.filtered = self.filter_items();
+        if self.screen == Screen::CmdPalette {
+            self.filtered = self.filter_items();
+        }
         true
     }
 
-    pub fn draw(&mut self, _: &mut App) -> Result<()> {
+    pub fn draw(&mut self, app: &mut App) -> Result<()> {
         let layout =
             Layout::default().constraints([Constraint::Length(2), Constraint::Percentage(100)]);
 
@@ -126,24 +195,52 @@ impl Overlay {
             let block = Block::default()
                 .borders(Borders::all())
                 .border_type(BorderType::Rounded);
+            let block = if self.screen == Screen::Sessions {
+                block.title("Sessions")
+            } else {
+                block
+            };
             let inner = block.inner(area);
             frame.render_widget(block, area);
-            let [text, rest] = layout.areas(inner);
-            Self::render_text_area(&mut self.text_area, text, frame.buffer_mut());
-            let list = List::new(self.filtered.iter().map(|cmd| {
-                let mut line = Line::from(cmd.name.clone());
-                cmd.args.iter().for_each(|arg| {
-                    let span = Span::styled(
-                        format!("<{}>", arg.placeholder),
-                        Style::default().fg(Color::DarkGray),
-                    );
-                    line.push_span(" ");
-                    line.push_span(span);
-                });
-                line
-            }))
-            .highlight_style(Modifier::REVERSED);
-            frame.render_stateful_widget(list, rest, &mut self.list_state);
+
+            match self.screen {
+                Screen::CmdPalette => {
+                    let [text, rest] = layout.areas(inner);
+                    Self::render_text_area(&mut self.cmd_text_area, text, frame.buffer_mut());
+                    let list = List::new(self.filtered.iter().map(|cmd| {
+                        let mut line = Line::from(cmd.name.clone());
+                        cmd.args.iter().for_each(|arg| {
+                            let span = Span::styled(
+                                format!("<{}>", arg.placeholder),
+                                Style::default().fg(Color::DarkGray),
+                            );
+                            line.push_span(" ");
+                            line.push_span(span);
+                        });
+                        line
+                    }))
+                    .highlight_style(Modifier::REVERSED);
+                    frame.render_stateful_widget(list, rest, &mut self.cmd_list_state);
+                }
+                Screen::Sessions => {
+                    let list_items = app
+                        .tabs
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, tab)| tab.as_ref().map(|tab| (i, tab)))
+                        .flat_map(|(i, tab)| {
+                            tab.sessions()
+                                .iter()
+                                .filter_map(|id| {
+                                    let session = app.session_manager.session(*id)?;
+                                    Some(Line::from(format!("[{i}]-{id}    {}", session.title())))
+                                })
+                                .collect::<Vec<_>>()
+                        });
+                    let list = List::new(list_items).highlight_style(Modifier::REVERSED);
+                    frame.render_stateful_widget(list, inner, &mut self.session_list_state);
+                }
+            }
         })?;
         Ok(())
     }
@@ -178,16 +275,30 @@ impl Overlay {
         let cols = (size.width as f32 / (font_size / 2.0)) as u16;
         let terminal = Terminal::new(VtBackend::new(rows, cols))?;
         let commands = vec![
-            Cmd::new("close", [], |_, _| {}),
-            Cmd::new("next", [], |_, app| {
+            Cmd::new("close", [Arg::new("tab")], |_, _, _| {}),
+            Cmd::new("next", [], |_, app, _| {
                 app.switch_tab(app.next_tab_index());
                 app.request_redraw();
             }),
-            Cmd::new("prev", [], |_, app| {
+            Cmd::new("prev", [], |_, app, _| {
                 app.switch_tab(app.previous_tab_index());
                 app.request_redraw();
             }),
-            Cmd::new("switch", [Arg { placeholder: "tab" }], |_, _| {}),
+            Cmd::new("switch", [Arg::new("tab")], |_, app, args| {
+                let Some(Ok(tab)) = args.first().map(|tab| tab.parse::<usize>()) else {
+                    return;
+                };
+                if tab > 9 || tab == 0 {
+                    return;
+                }
+                app.switch_tab(tab - 1);
+                app.request_redraw();
+            }),
+            Cmd::new("sessions", [], |this, app, _| {
+                this.screen = Screen::Sessions;
+                this.toggle();
+                app.request_redraw();
+            }),
         ];
         let mut text_area = TextArea::default();
         text_area.set_placeholder_text("Search..");
@@ -195,13 +306,16 @@ impl Overlay {
             terminal,
             size: [size.width as f32, size.height as f32],
             shown: false,
+            screen: Screen::CmdPalette,
 
             commands: commands.clone(),
             filtered: commands,
             matcher: Matcher::default(),
 
-            text_area,
-            list_state: ListState::default(),
+            cmd_text_area: text_area,
+            cmd_list_state: ListState::default(),
+
+            session_list_state: ListState::default(),
         })
     }
 
@@ -231,7 +345,7 @@ impl Overlay {
     fn filter_items(&mut self) -> Vec<Cmd> {
         let mut buf_1 = vec![];
         let mut buf_2 = vec![];
-        let query = self.text_area.lines().join("\n");
+        let query = self.cmd_text_area.lines().join("\n");
         let (name, _) = query.split_once(' ').unwrap_or((query.as_ref(), ""));
         let mut scores = self
             .commands
@@ -241,7 +355,7 @@ impl Overlay {
                     cmd,
                     self.matcher.fuzzy_match(
                         Utf32Str::new(&cmd.name, &mut buf_1),
-                        Utf32Str::new(&name, &mut buf_2),
+                        Utf32Str::new(name, &mut buf_2),
                     )?,
                 ))
             })
@@ -307,7 +421,7 @@ impl OverlayRenderer {
                 let x = (self.font_size / 2.0 * f32::from(col)) + x_off;
                 let y = (self.line_height * f32::from(row) + 1.0) + y_off;
                 {
-                    let [x, y] = self.ndc(size, [x, y]);
+                    let [x, y] = Self::ndc(size, [x, y]);
                     let bg_color = if cell.inverse() { fg_color } else { bg_color };
                     self.background_renderer
                         .add_rect(x, y, w, h, bg_color.to_linear());
@@ -319,7 +433,7 @@ impl OverlayRenderer {
                 for cluster in contents.graphemes(true) {
                     if cluster.len() != 1 {
                         self.terminal_renderer.add_cluster(
-                            &queue,
+                            queue,
                             [x, y],
                             screen_size,
                             cluster,
@@ -329,7 +443,7 @@ impl OverlayRenderer {
                     } else {
                         for ch in cluster.chars() {
                             self.terminal_renderer.add_glyph(
-                                &queue,
+                                queue,
                                 [x, y],
                                 screen_size,
                                 ch,
@@ -375,7 +489,7 @@ impl OverlayRenderer {
         ]
     }
 
-    fn ndc(&self, size: PhysicalSize<u32>, pos: [f32; 2]) -> [f32; 2] {
+    fn ndc(size: PhysicalSize<u32>, pos: [f32; 2]) -> [f32; 2] {
         let [x, y] = pos;
         let nx = (x / size.width as f32) * 2.0 - 1.0;
         let ny = 1.0 - (y / size.height as f32) * 2.0;

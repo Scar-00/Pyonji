@@ -41,8 +41,8 @@ impl Color {
         Color([
             ((v << 24) & 0xFF) as u8,
             ((v << 16) & 0xFF) as u8,
-            ((v << 08) & 0xFF) as u8,
-            ((v << 00) & 0xFF) as u8,
+            ((v << 8) & 0xFF) as u8,
+            ((v) & 0xFF) as u8,
         ])
     }
 
@@ -251,7 +251,7 @@ impl Renderer {
         dividers: &[Divider],
         status_tabs: Option<&[StatusTab]>,
         ime_preedit: Option<&ImePreedit>,
-        overlay: &Option<Overlay>,
+        overlay: Option<&Overlay>,
     ) -> Result<()> {
         let size = self.window.inner_size();
         let screen_size = [size.width as f32, size.height as f32];
@@ -434,7 +434,7 @@ impl Renderer {
                 .render(&self.device, &self.queue, &mut pass);
             if let Some(overlay) = overlay && overlay.shown() {
                 self.overlay_renderer
-                    .render(size, &self.device, &self.queue, &mut pass, &overlay)
+                    .render(size, &self.device, &self.queue, &mut pass, overlay);
             }
         }
         self.queue.submit(Some(encoder.finish()));
