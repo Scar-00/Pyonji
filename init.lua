@@ -10,4 +10,5 @@
 return {
     font_size = 24.0,
     line_height = 28.0 / 24.0,
+    fullscreen = true,
 };

@@ -1,6 +1,7 @@
 mod background;
 mod glyph;
-use background::BackgroundRenderer;
+pub use background::BackgroundRenderer;
+pub use glyph::TerminalRenderer;
 
 use std::sync::Arc;
 
@@ -19,12 +20,9 @@ use wgpu::{
 use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::{
-    renderer::glyph::TerminalRenderer,
+    overlay::{Overlay, OverlayRenderer},
     terminal::{CursorState, Divider, PaneGeometry, SplitDirection},
-    UiLayer,
 };
-
-use egui_wgpu::{Renderer as UiRenderer, RendererOptions};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Color([u8; 4]);
@@ -102,7 +100,7 @@ pub struct Renderer {
     font_size: f32,
     line_height: f32,
 
-    pub ui_renderer: UiRenderer,
+    overlay_renderer: OverlayRenderer,
 }
 
 pub struct Pane<'a> {
@@ -184,7 +182,8 @@ impl Renderer {
         let background_renderer = BackgroundRenderer::new(&device, format);
         let terminal_renderer = TerminalRenderer::new(&device, font_family, font_size, format);
         let divider_renderer = BackgroundRenderer::new(&device, format);
-        let ui_renderer = UiRenderer::new(&device, format, RendererOptions::default());
+        let overlay_renderer =
+            OverlayRenderer::new(&device, font_family, font_size, line_height, format);
 
         Ok(Renderer {
             window,
@@ -201,7 +200,7 @@ impl Renderer {
             font_size,
             line_height,
 
-            ui_renderer,
+            overlay_renderer,
         })
     }
 
@@ -252,8 +251,7 @@ impl Renderer {
         dividers: &[Divider],
         status_tabs: Option<&[StatusTab]>,
         ime_preedit: Option<&ImePreedit>,
-        ui_layer: &mut Option<UiLayer>,
-        ui_builder: impl FnMut(&mut egui::Ui),
+        overlay: &Option<Overlay>,
     ) -> Result<()> {
         let size = self.window.inner_size();
         let screen_size = [size.width as f32, size.height as f32];
@@ -434,20 +432,9 @@ impl Renderer {
                 .render(&self.device, &self.queue, &mut pass);
             self.divider_renderer
                 .render(&self.device, &self.queue, &mut pass);
-        }
-        {
-            if let Some(layer) = ui_layer {
-                if layer.shown() {
-                    layer.render(
-                        &mut self.ui_renderer,
-                        &self.window,
-                        &self.device,
-                        &self.queue,
-                        &mut encoder,
-                        &view,
-                        ui_builder,
-                    );
-                }
+            if let Some(overlay) = overlay && overlay.shown() {
+                self.overlay_renderer
+                    .render(size, &self.device, &self.queue, &mut pass, &overlay)
             }
         }
         self.queue.submit(Some(encoder.finish()));

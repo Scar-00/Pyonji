@@ -34,6 +34,7 @@ pub struct Config {
     pub font_family: Option<Value<String>>,
     pub font_size: Option<Value<f64>>,
     pub line_height: Option<Value<f64>>,
+    pub fullscreen: Option<Value<bool>>,
 }
 
 impl FromLua for Config {
@@ -44,6 +45,7 @@ impl FromLua for Config {
             font_family: table.get("font_family")?,
             font_size: table.get("font_size")?,
             line_height: table.get("line_height")?,
+            fullscreen: table.get("fullscreen")?,
         })
     }
 }
@@ -71,7 +73,7 @@ impl Config {
                     .with_poll_interval(Duration::from_secs(1))
                     .with_compare_contents(true);
                 let mut watcher = RecommendedWatcher::new(tx, config)?;
-                watcher.watch(&dbg!(path.absolute()?), RecursiveMode::Recursive)?;
+                watcher.watch(&path.absolute()?, RecursiveMode::Recursive)?;
                 while let Ok(ev) = rx.recv() {
                     if let Ok(ev) = ev
                         && let EventKind::Modify(_) = ev.kind
@@ -105,5 +107,9 @@ impl Config {
 
     pub fn font_family(&self) -> Option<&str> {
         self.font_family.as_ref().map(|v| v.deref().as_str())
+    }
+
+    pub fn fullscreen(&self) -> bool {
+        self.fullscreen.as_ref().map(Value::value).unwrap_or(false)
     }
 }

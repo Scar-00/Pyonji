@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{cmd::UiAction, config::Config, terminal::SessionId};
+use crate::{config::Config, terminal::SessionId};
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use winit::event_loop::EventLoopProxy;
@@ -19,7 +19,6 @@ pub enum Event {
     Data(SessionId, Vec<u8>),
     ProgramChanged((SessionId, String)),
     ConfigChanged(Config),
-    UiAction(UiAction),
 }
 
 impl Pty {
