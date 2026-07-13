@@ -20,7 +20,6 @@ mod pty;
 mod renderer;
 mod terminal;
 
-use const_format::formatcp;
 #[cfg(not(feature = "install"))]
 use tracing_subscriber::prelude::*;
 
@@ -132,7 +131,9 @@ fn main() -> Result<()> {
 impl App {
     const TITLE: &str = cfg_select! {
         feature = "install" => "Pyonji",
-        _ => formatcp!("Pyonji {}", git_version::git_version!()),
+        _ => {
+            const_format::formatcp!("Pyonji {}", git_version::git_version!())
+        },
     };
     const ICON: &[u8] = include_bytes!("../resources/icon.ico");
     const STATUS_BAR_ROWS: u16 = 1;
@@ -196,7 +197,7 @@ impl App {
             return;
         };
         if overlay.shown() {
-            _ = overlay.draw(self);
+            overlay.draw(self).expect("drawing overlay");
         }
         self.overlay = Some(overlay);
     }
@@ -312,7 +313,6 @@ impl ApplicationHandler<PtyEvent> for App {
     ) {
         match event {
             WindowEvent::RedrawRequested => {
-                let start = std::time::Instant::now();
                 let panes = self.tab_layouts();
                 let active = self.active_session();
                 let dividers = self.tab_dividers();
@@ -344,7 +344,6 @@ impl ApplicationHandler<PtyEvent> for App {
                 ) {
                     error!(error = ?e, "failed to render");
                 }
-                println!("render = {:?}", start.elapsed());
             }
             WindowEvent::Resized(size) => {
                 if size.width == 0 || size.height == 0 {

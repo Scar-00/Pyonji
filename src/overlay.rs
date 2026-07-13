@@ -9,17 +9,15 @@ use crate::{
 };
 use anyhow::Result;
 use crossterm::{
-    cursor::{Hide, Show},
-    style::{
+    Command, cursor::{Hide, Show}, style::{
         Attribute as CrosstermAttribute, Color as CrosstermColor, Colors as CrosstermColors, Print,
         SetAttribute, SetBackgroundColor, SetColors, SetForegroundColor,
-    },
-    terminal,
+    }, terminal
 };
 use nucleo_matcher::{Matcher, Utf32Str};
 use ratatui::{
     backend::{ClearType, WindowSize},
-    crossterm::{cursor::MoveTo, execute, queue},
+    crossterm::{cursor::MoveTo},
     prelude::*,
     widgets::*,
 };
@@ -29,9 +27,26 @@ use vt100::Parser;
 use wgpu::{Device, Queue, RenderPass, TextureFormat};
 use winit::{
     dpi::PhysicalSize,
-    event::{ElementState, KeyEvent, Modifiers},
+    event::{ElementState, KeyEvent},
     keyboard::{KeyCode, ModifiersState, PhysicalKey},
 };
+
+macro_rules! queue {
+    ($writer:expr $(, $command:expr)* $(,)?) => {{
+        Ok($writer.by_ref())
+            $(.and_then(|writer| write_command_ansi(writer, $command)))*
+            .map(|_| ())
+    }}
+}
+
+macro_rules! execute {
+    ($writer:expr $(, $command:expr)* $(,)?) => {{
+        // This allows the macro to take both mut impl Write and &mut impl Write.
+        Ok($writer.by_ref())
+            $(.and_then(|writer| write_command_ansi(writer, $command)))*
+            .map(|_| ())
+    }}
+}
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub enum Screen {
@@ -565,9 +580,11 @@ impl Backend for VtBackend {
     }
 
     fn get_cursor_position(&mut self) -> io::Result<Position> {
-        crossterm::cursor::position()
+        let (row, col) = self.writer.screen().cursor_position();
+        Ok(Position { x: col, y: row })
+        /*crossterm::cursor::position()
             .map(|(x, y)| Position { x, y })
-            .map_err(io::Error::other)
+            .map_err(io::Error::other)*/
     }
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
@@ -608,15 +625,15 @@ impl Backend for VtBackend {
     }
 
     fn window_size(&mut self) -> io::Result<WindowSize> {
+        let (rows, cols) = self.writer.screen().size();
         let crossterm::terminal::WindowSize {
-            columns,
-            rows,
             width,
             height,
-        } = terminal::window_size()?;
+            ..
+        } = terminal::window_size().unwrap();
         Ok(WindowSize {
             columns_rows: Size {
-                width: columns,
+                width: cols,
                 height: rows,
             },
             pixels: Size { width, height },
@@ -736,4 +753,38 @@ impl IntoCrossterm<CrosstermColor> for Color {
             Self::Rgb(r, g, b) => CrosstermColor::Rgb { r, g, b },
         }
     }
+}
+
+fn write_command_ansi<W: std::io::Write, C: Command>(
+    io: &mut W,
+    command: C,
+) -> io::Result<&mut W> {
+    struct Adapter<T> {
+        inner: T,
+        res: io::Result<()>,
+    }
+
+    impl<T: Write> std::fmt::Write for Adapter<T> {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            self.inner.write_all(s.as_bytes()).map_err(|e| {
+                self.res = Err(e);
+                std::fmt::Error
+            })
+        }
+    }
+
+    let mut adapter = Adapter {
+        inner: io,
+        res: Ok(()),
+    };
+
+    command
+        .write_ansi(&mut adapter)
+        .map_err(|std::fmt::Error| match adapter.res {
+            Ok(()) => panic!(
+                "<{}>::write_ansi incorrectly errored",
+                std::any::type_name::<C>()
+            ),
+            Err(e) => e,
+        }).map(|_| adapter.inner)
 }
