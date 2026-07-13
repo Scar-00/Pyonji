@@ -4,8 +4,7 @@ use std::{
 };
 
 use crate::{
-    renderer::{BackgroundRenderer, TerminalRenderer},
-    App,
+    App, renderer::{BackgroundRenderer, TerminalRenderer}
 };
 use anyhow::Result;
 use crossterm::{
@@ -421,6 +420,7 @@ impl OverlayRenderer {
             self.font_size / size.width as f32,
             (self.line_height * 2.0) / size.height as f32,
         ];
+        let [x_off, y_off] = Self::offset(screen_size, overlay.size);
         let (rows, cols) = screen.size();
         for row in 0..rows {
             for col in 0..cols {
@@ -432,7 +432,6 @@ impl OverlayRenderer {
                     x => Color::from(x),
                 };
                 let bg_color = Color::from(cell.bgcolor());
-                let [x_off, y_off] = Self::offset(screen_size, overlay.size);
                 let x = (self.font_size / 2.0 * f32::from(col)) + x_off;
                 let y = (self.line_height * f32::from(row) + 1.0) + y_off;
                 {
@@ -470,29 +469,18 @@ impl OverlayRenderer {
                 }
             }
         }
-
-        /*if is_active && !screen.hide_cursor() && screen.scrollback() == 0 {
+        if !screen.hide_cursor() && screen.scrollback() == 0 {
             let (row, col) = screen.cursor_position();
-            let x = self.font_size / 2.0 * f32::from(col));
-            let y = self.line_height * f32::from(row) + 1.0);
-            let [x, y] = self.ndc([x, y]);
-            let [w, h] = match pane.cursor_style {
-                CursorState::Bar => [
-                    (self.font_size * 0.18) / size.width as f32,
-                    (self.line_height * 2.0) / size.height as f32,
-                ],
-                CursorState::Block => [
-                    (self.font_size) / size.width as f32,
-                    (self.line_height * 2.0) / size.height as f32,
-                ],
-                CursorState::Underline => [
-                    (self.font_size) / size.width as f32,
-                    (self.line_height * 0.1) / size.height as f32,
-                ],
-            };
+            let x = (self.font_size / 2.0 * f32::from(col)) + x_off;
+            let y = (self.line_height * f32::from(row) + 1.0) + y_off;
+            let [x, y] = Self::ndc(size, [x, y]);
+            let [w, h] = [
+                (self.font_size) / size.width as f32,
+                (self.line_height * 2.0) / size.height as f32,
+            ];
             self.background_renderer
                 .add_rect(x, y, w, h, [0.78, 0.82, 0.96, 0.45]);
-        }*/
+        }
         self.background_renderer.render(device, queue, pass);
         self.terminal_renderer.render(device, queue, pass);
     }
