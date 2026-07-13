@@ -119,6 +119,18 @@ fn main() -> Result<()> {
         Config::default()
     };
 
+    /*let list = self_update::backends::github::ReleaseList::configure()
+        .repo_owner("Scar-00")
+        .repo_name("Pyonji")
+        .build()?
+        .fetch()?;
+    let asset = &list
+        .first()
+        .and_then(|release| release.asset_for(self_update::get_target(), None));
+    println!("target = {}", self_update::get_target());
+    println!("assets = {asset:#?}");
+    println!("releases = {list:#?}");*/
+
     let mut app = App::new(cli, config, proxy);
 
     event_loop.set_control_flow(ControlFlow::Wait);

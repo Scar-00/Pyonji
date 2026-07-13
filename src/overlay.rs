@@ -4,24 +4,28 @@ use std::{
 };
 
 use crate::{
-    renderer::{BackgroundRenderer, TerminalRenderer},
     App,
+    renderer::{BackgroundRenderer, TerminalRenderer},
 };
 use anyhow::Result;
 use crossterm::{
-    Command, cursor::{Hide, Show}, style::{
+    Command,
+    cursor::{Hide, Show},
+    style::{
         Attribute as CrosstermAttribute, Color as CrosstermColor, Colors as CrosstermColors, Print,
         SetAttribute, SetBackgroundColor, SetColors, SetForegroundColor,
-    }, terminal
+    },
+    terminal,
 };
 use nucleo_matcher::{Matcher, Utf32Str};
 use ratatui::{
     backend::{ClearType, WindowSize},
-    crossterm::{cursor::MoveTo},
+    crossterm::cursor::MoveTo,
     prelude::*,
     widgets::*,
 };
 use ratatui_textarea::{CursorMove, Input, Key, TextArea};
+use self_update::{backends::github, update::Release};
 use unicode_segmentation::UnicodeSegmentation as _;
 use vt100::Parser;
 use wgpu::{Device, Queue, RenderPass, TextureFormat};
@@ -52,6 +56,9 @@ macro_rules! execute {
 pub enum Screen {
     CmdPalette,
     Sessions,
+    Releases,
+    ReleaseDownload { progress: u8 },
+    ReleaseDownloadResult,
 }
 
 #[derive(Clone)]
@@ -96,10 +103,14 @@ pub struct Overlay {
     filtered: Vec<Cmd>,
     matcher: Matcher,
 
+    releases: Vec<Release>,
+
     cmd_text_area: TextArea<'static>,
     cmd_list_state: ListState,
 
     session_list_state: ListState,
+
+    release_list_state: ListState,
 }
 
 impl Overlay {
@@ -115,10 +126,14 @@ impl Overlay {
             KeyCode::ArrowDown => match self.screen {
                 Screen::CmdPalette => self.cmd_list_state.select_next(),
                 Screen::Sessions => self.session_list_state.select_next(),
+                Screen::Releases => self.release_list_state.select_next(),
+                Screen::ReleaseDownload { .. } | Screen::ReleaseDownloadResult => {}
             },
             KeyCode::ArrowUp => match self.screen {
                 Screen::CmdPalette => self.cmd_list_state.select_previous(),
                 Screen::Sessions => self.session_list_state.select_previous(),
+                Screen::Releases => self.release_list_state.select_previous(),
+                Screen::ReleaseDownload { .. } | Screen::ReleaseDownloadResult => {}
             },
             KeyCode::Escape => {
                 self.toggle();
@@ -152,12 +167,16 @@ impl Overlay {
                                     return false;
                                 };
                                 tab.sessions().contains(&session)
-                            }) && tab != app.current_tab {
+                            }) && tab != app.current_tab
+                            {
                                 app.switch_tab(tab);
                             }
                             app.set_active_session(session);
                         }
                     }
+                    Screen::Releases
+                    | Screen::ReleaseDownload { .. }
+                    | Screen::ReleaseDownloadResult => {}
                 }
                 self.toggle();
             }
@@ -187,6 +206,10 @@ impl Overlay {
                 self.screen = Screen::CmdPalette;
                 app.request_redraw();
             }
+            KeyCode::KeyR if mods.contains(ModifiersState::CONTROL) => {
+                self.screen = Screen::Releases;
+                app.request_redraw();
+            }
             _ => {
                 if self.screen == Screen::CmdPalette {
                     if let Some(text) = &event.text {
@@ -210,10 +233,10 @@ impl Overlay {
             let block = Block::default()
                 .borders(Borders::all())
                 .border_type(BorderType::Rounded);
-            let block = if self.screen == Screen::Sessions {
-                block.title("Sessions")
-            } else {
-                block
+            let block = match self.screen {
+                Screen::Sessions => block.title("Sessions"),
+                Screen::Releases => block.title("Releases"),
+                _ => block,
             };
             let inner = block.inner(area);
             frame.render_widget(block, area);
@@ -255,6 +278,25 @@ impl Overlay {
                     let list = List::new(list_items).highlight_style(Modifier::REVERSED);
                     frame.render_stateful_widget(list, inner, &mut self.session_list_state);
                 }
+                Screen::Releases => {
+                    let list = List::new(self.releases.iter().map(|release| {
+                        Line::from_iter([release.name.as_str(), " - ", release.version.as_str()])
+                    }))
+                    .highlight_style(Modifier::REVERSED);
+                    frame.render_stateful_widget(list, inner, &mut self.release_list_state);
+                }
+                Screen::ReleaseDownload { progress } => {
+                    let layout = Layout::horizontal([Constraint::Length(1), Constraint::Percentage(100), Constraint::Length(1)]);
+                    let [start, bar, end] = layout.areas(inner);
+                    let progress = LineGauge::default()
+                        .ratio(f64::from(progress) / 100.0)
+                        .filled_symbol("#")
+                        .unfilled_symbol(" ");
+                    frame.render_widget("[", start);
+                    frame.render_widget(progress, bar);
+                    frame.render_widget("]", end);
+                }
+                Screen::ReleaseDownloadResult => {}
             }
         })?;
         Ok(())
@@ -317,20 +359,32 @@ impl Overlay {
         ];
         let mut text_area = TextArea::default();
         text_area.set_placeholder_text("Search..");
+
+        let releases = github::ReleaseList::configure()
+            .repo_owner("Scar-00")
+            .repo_name("Pyonji")
+            .build()?
+            .fetch()
+            .unwrap_or_default();
+
         Ok(Self {
             terminal,
             size: [size.width as f32, size.height as f32],
             shown: false,
-            screen: Screen::CmdPalette,
+            screen: Screen::ReleaseDownload { progress: 20 },
 
             commands: commands.clone(),
             filtered: commands,
             matcher: Matcher::default(),
 
+            releases,
+
             cmd_text_area: text_area,
             cmd_list_state: ListState::default(),
 
             session_list_state: ListState::default(),
+
+            release_list_state: ListState::default(),
         })
     }
 
@@ -583,8 +637,8 @@ impl Backend for VtBackend {
         let (row, col) = self.writer.screen().cursor_position();
         Ok(Position { x: col, y: row })
         /*crossterm::cursor::position()
-            .map(|(x, y)| Position { x, y })
-            .map_err(io::Error::other)*/
+        .map(|(x, y)| Position { x, y })
+        .map_err(io::Error::other)*/
     }
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
@@ -626,11 +680,8 @@ impl Backend for VtBackend {
 
     fn window_size(&mut self) -> io::Result<WindowSize> {
         let (rows, cols) = self.writer.screen().size();
-        let crossterm::terminal::WindowSize {
-            width,
-            height,
-            ..
-        } = terminal::window_size().unwrap();
+        let crossterm::terminal::WindowSize { width, height, .. } =
+            terminal::window_size().unwrap();
         Ok(WindowSize {
             columns_rows: Size {
                 width: cols,
@@ -755,10 +806,7 @@ impl IntoCrossterm<CrosstermColor> for Color {
     }
 }
 
-fn write_command_ansi<W: std::io::Write, C: Command>(
-    io: &mut W,
-    command: C,
-) -> io::Result<&mut W> {
+fn write_command_ansi<W: std::io::Write, C: Command>(io: &mut W, command: C) -> io::Result<&mut W> {
     struct Adapter<T> {
         inner: T,
         res: io::Result<()>,
@@ -786,5 +834,6 @@ fn write_command_ansi<W: std::io::Write, C: Command>(
                 std::any::type_name::<C>()
             ),
             Err(e) => e,
-        }).map(|_| adapter.inner)
+        })
+        .map(|_| adapter.inner)
 }
