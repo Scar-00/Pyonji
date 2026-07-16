@@ -20,6 +20,7 @@ mod pty;
 mod renderer;
 mod terminal;
 
+use smol::Task;
 #[cfg(not(feature = "install"))]
 use tracing_subscriber::prelude::*;
 
@@ -47,6 +48,40 @@ use crate::{
     },
 };
 
+struct LocalExecutor {
+    inner: smol::LocalExecutor<'static>,
+    window: Option<Arc<Window>>,
+}
+
+impl LocalExecutor {
+    pub fn new() -> Self {
+        Self {
+            inner: smol::LocalExecutor::new(),
+            window: None,
+        }
+    }
+
+    pub fn spawn<R: 'static>(&self, f: impl 'static + AsyncFn() -> R) -> Task<R> {
+        let task = self.inner.spawn(async move { f().await });
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        };
+        task
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    pub fn try_tick(&self) -> bool {
+        self.inner.try_tick()
+    }
+
+    fn set_window(&mut self, window: Arc<Window>) {
+        self.window = Some(window);
+    }
+}
+
 #[derive(clap::Parser)]
 struct Cli {
     path: Option<PathBuf>,
@@ -56,7 +91,7 @@ struct App {
     args: Cli,
     config: Config,
     renderer: Option<Renderer>,
-    window: Option<Arc<Window>>,
+    pub window: Option<Arc<Window>>,
     session_manager: SessionManager,
     modifiers: ModifiersState,
     line_height: f32,
@@ -75,6 +110,8 @@ struct App {
     ime_preedit: Option<String>,
     status_bar_hidden: bool,
     _proxy: EventLoopProxy<PtyEvent>,
+
+    pub local_executer: LocalExecutor,
 
     overlay: Option<Overlay>,
 }
@@ -118,6 +155,18 @@ fn main() -> Result<()> {
         tracing::warn!("failed to load config");
         Config::default()
     };
+
+    /*let list = self_update::backends::github::ReleaseList::configure()
+        .repo_owner("Scar-00")
+        .repo_name("Pyonji")
+        .build()?
+        .fetch()?;
+    let asset = &list
+        .first()
+        .and_then(|release| release.asset_for(self_update::get_target(), None));
+    println!("target = {}", self_update::get_target());
+    println!("assets = {asset:#?}");
+    println!("releases = {list:#?}");*/
 
     let mut app = App::new(cli, config, proxy);
 
@@ -165,6 +214,8 @@ impl App {
             ime_preedit: None,
             status_bar_hidden: false,
             _proxy: proxy,
+
+            local_executer: LocalExecutor::new(),
 
             overlay: None,
         }
@@ -239,12 +290,17 @@ impl ApplicationHandler<PtyEvent> for App {
             }
         };
         self.window = Some(window.clone());
-        self.overlay = Overlay::new(size, self.font_size, self.line_height).ok();
+        self.local_executer.set_window(window.clone());
+        self.overlay = Overlay::new(self, size, self.font_size, self.line_height).ok();
 
         match self.session_manager.create_session(
             self.terminal_rows().max(1),
             self.cols.max(1),
-            self.args.path.as_deref(),
+            self.args
+                .path
+                .clone()
+                .or(self.config.default_cwd.as_ref().map(config::Value::value))
+                .as_deref(),
         ) {
             Ok(session) => {
                 self.tabs[0] = Some(Tab::new(session));
@@ -343,6 +399,10 @@ impl ApplicationHandler<PtyEvent> for App {
                     self.overlay.as_ref(),
                 ) {
                     error!(error = ?e, "failed to render");
+                }
+                if !self.local_executer.is_empty() {
+                    self.local_executer.try_tick();
+                    self.request_redraw();
                 }
             }
             WindowEvent::Resized(size) => {
@@ -956,7 +1016,7 @@ impl App {
             let id = match self.session_manager.create_session(
                 self.terminal_rows().max(1),
                 self.cols.max(1),
-                None,
+                self.config.default_cwd.as_ref().map(|value| value.as_ref()),
             ) {
                 Ok(id) => id,
                 Err(error) => {

@@ -35,6 +35,7 @@ pub struct Config {
     pub font_size: Option<Value<f64>>,
     pub line_height: Option<Value<f64>>,
     pub fullscreen: Option<Value<bool>>,
+    pub default_cwd: Option<Value<PathBuf>>,
 }
 
 impl FromLua for Config {
@@ -46,6 +47,7 @@ impl FromLua for Config {
             font_size: table.get("font_size")?,
             line_height: table.get("line_height")?,
             fullscreen: table.get("fullscreen")?,
+            default_cwd: table.get("default_cwd")?,
         })
     }
 }

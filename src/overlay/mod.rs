@@ -1,26 +1,35 @@
-use std::{
-    io::{self, Write},
-    rc::Rc,
-};
+mod opener;
+mod palette;
+mod releases;
+mod sessions;
+
+use std::io::{self, Write};
 
 use crate::{
-    App, renderer::{BackgroundRenderer, TerminalRenderer}
+    overlay::{
+        opener::{OpenerState, OpenerView},
+        palette::{Arg, Cmd, CmdPalleteState, CmdPalleteView},
+        releases::{ReleasesState, ReleasesView},
+        sessions::{SessionsState, SessionsView},
+    },
+    renderer::{BackgroundRenderer, TerminalRenderer},
+    App,
 };
 use anyhow::Result;
 use crossterm::{
-    Command, cursor::{Hide, Show}, style::{
+    cursor::{Hide, Show},
+    style::{
         Attribute as CrosstermAttribute, Color as CrosstermColor, Colors as CrosstermColors, Print,
         SetAttribute, SetBackgroundColor, SetColors, SetForegroundColor,
-    }, terminal
+    },
+    terminal, Command,
 };
-use nucleo_matcher::{Matcher, Utf32Str};
 use ratatui::{
     backend::{ClearType, WindowSize},
-    crossterm::{cursor::MoveTo},
+    crossterm::cursor::MoveTo,
     prelude::*,
     widgets::*,
 };
-use ratatui_textarea::{CursorMove, Input, Key, TextArea};
 use unicode_segmentation::UnicodeSegmentation as _;
 use vt100::Parser;
 use wgpu::{Device, Queue, RenderPass, TextureFormat};
@@ -40,7 +49,6 @@ macro_rules! queue {
 
 macro_rules! execute {
     ($writer:expr $(, $command:expr)* $(,)?) => {{
-        // This allows the macro to take both mut impl Write and &mut impl Write.
         Ok($writer.by_ref())
             $(.and_then(|writer| write_command_ansi(writer, $command)))*
             .map(|_| ())
@@ -51,38 +59,8 @@ macro_rules! execute {
 pub enum Screen {
     CmdPalette,
     Sessions,
-}
-
-#[derive(Clone)]
-struct Arg {
-    placeholder: &'static str,
-}
-
-impl Arg {
-    fn new(n: &'static str) -> Self {
-        Self { placeholder: n }
-    }
-}
-
-#[derive(Clone)]
-struct Cmd {
-    name: String,
-    args: Vec<Arg>,
-    action: Rc<dyn Fn(&mut Overlay, &mut App, Vec<&str>)>,
-}
-
-impl Cmd {
-    pub fn new(
-        name: impl ToString,
-        args: impl IntoIterator<Item = Arg>,
-        f: impl 'static + Fn(&mut Overlay, &mut App, Vec<&str>),
-    ) -> Self {
-        Self {
-            name: name.to_string(),
-            args: args.into_iter().collect(),
-            action: Rc::new(f),
-        }
-    }
+    Releases,
+    Opener,
 }
 
 pub struct Overlay {
@@ -91,14 +69,13 @@ pub struct Overlay {
     shown: bool,
     screen: Screen,
 
-    commands: Vec<Cmd>,
-    filtered: Vec<Cmd>,
-    matcher: Matcher,
+    release_state: ReleasesState,
 
-    cmd_text_area: TextArea<'static>,
-    cmd_list_state: ListState,
+    cmd_palette_state: CmdPalleteState,
 
-    session_list_state: ListState,
+    session_state: SessionsState,
+
+    opener_state: OpenerState,
 }
 
 impl Overlay {
@@ -111,168 +88,101 @@ impl Overlay {
             return false;
         }
         match code {
-            KeyCode::ArrowDown => match self.screen {
-                Screen::CmdPalette => self.cmd_list_state.select_next(),
-                Screen::Sessions => self.session_list_state.select_next(),
-            },
-            KeyCode::ArrowUp => match self.screen {
-                Screen::CmdPalette => self.cmd_list_state.select_previous(),
-                Screen::Sessions => self.session_list_state.select_previous(),
-            },
             KeyCode::Escape => {
                 self.toggle();
                 app.request_redraw();
-            }
-            KeyCode::Enter => {
-                match self.screen {
-                    Screen::CmdPalette => {
-                        if let Some(selected) = self.cmd_list_state.selected() {
-                            let action = self.filtered[selected].action.clone();
-                            let input = self.cmd_text_area.lines().join("\n");
-                            let mut split = input.split(' ');
-                            split.next();
-                            action(self, app, split.collect());
-                        }
-                        self.cmd_text_area.move_cursor(CursorMove::Head);
-                        self.cmd_text_area.delete_line_by_end();
-                        self.cmd_list_state.select(None);
-                    }
-                    Screen::Sessions => {
-                        if let Some(selected) = self.session_list_state.selected() {
-                            let sessions = app
-                                .tabs
-                                .iter()
-                                .flatten()
-                                .flat_map(|tab| tab.sessions())
-                                .collect::<Vec<_>>();
-                            let session = sessions[selected];
-                            if let Some(tab) = app.tabs.iter().position(|tab| {
-                                let Some(tab) = tab else {
-                                    return false;
-                                };
-                                tab.sessions().contains(&session)
-                            }) && tab != app.current_tab {
-                                app.switch_tab(tab);
-                            }
-                            app.set_active_session(session);
-                        }
-                    }
-                }
-                self.toggle();
-            }
-            KeyCode::Backspace => {
-                if self.screen == Screen::CmdPalette {
-                    self.cmd_text_area.input(Input {
-                        key: Key::Backspace,
-                        ..Default::default()
-                    });
-                }
-            }
-            KeyCode::Tab => {
-                if self.screen == Screen::CmdPalette {
-                    let Some(selected) = self.cmd_list_state.selected() else {
-                        return true;
-                    };
-                    self.cmd_text_area.move_cursor(CursorMove::Head);
-                    self.cmd_text_area.delete_line_by_end();
-                    self.cmd_text_area.insert_str(&self.filtered[selected].name);
-                }
+                return true;
             }
             KeyCode::KeyS if mods.contains(ModifiersState::CONTROL) => {
                 self.screen = Screen::Sessions;
                 app.request_redraw();
+                return true;
             }
             KeyCode::KeyC if mods.contains(ModifiersState::CONTROL) => {
                 self.screen = Screen::CmdPalette;
                 app.request_redraw();
+                return true;
             }
-            _ => {
-                if self.screen == Screen::CmdPalette {
-                    if let Some(text) = &event.text {
-                        self.cmd_text_area.insert_str(text.as_str());
-                    }
+            KeyCode::KeyR if mods.contains(ModifiersState::CONTROL) => {
+                self.screen = Screen::Releases;
+                app.request_redraw();
+                return true;
+            }
+            KeyCode::KeyO if mods.contains(ModifiersState::CONTROL) => {
+                self.screen = Screen::Opener;
+                app.request_redraw();
+                return true;
+            }
+            _ => {}
+        }
+        match self.screen {
+            Screen::CmdPalette => {
+                if let Some(action) = self.cmd_palette_state.handle_events(app, code, event) {
+                    action(self, app);
+                    self.toggle();
                 }
             }
-        }
-        if self.screen == Screen::CmdPalette {
-            self.filtered = self.filter_items();
+            Screen::Sessions => {
+                if self.session_state.handle_events(app, code) {
+                    self.toggle();
+                }
+            }
+            Screen::Releases => self.release_state.handle_events(app, code),
+            Screen::Opener => self.opener_state.handle_events(app, code),
         }
         true
     }
 
     pub fn draw(&mut self, app: &mut App) -> Result<()> {
-        let layout =
-            Layout::default().constraints([Constraint::Length(2), Constraint::Percentage(100)]);
-
         self.terminal.draw(|frame| {
             let area = frame.area();
             let block = Block::default()
                 .borders(Borders::all())
                 .border_type(BorderType::Rounded);
-            let block = if self.screen == Screen::Sessions {
-                block.title("Sessions")
-            } else {
-                block
+            let block = match self.screen {
+                Screen::Sessions => block.title("Sessions"),
+                Screen::Releases => block.title("Releases"),
+                Screen::Opener => block.title(format!(
+                    "Opener - {}",
+                    self.opener_state.explorer.cwd().display()
+                )),
+                Screen::CmdPalette => block,
             };
             let inner = block.inner(area);
             frame.render_widget(block, area);
 
             match self.screen {
                 Screen::CmdPalette => {
-                    let [text, rest] = layout.areas(inner);
-                    Self::render_text_area(&mut self.cmd_text_area, text, frame.buffer_mut());
-                    let list = List::new(self.filtered.iter().map(|cmd| {
-                        let mut line = Line::from(cmd.name.clone());
-                        cmd.args.iter().for_each(|arg| {
-                            let span = Span::styled(
-                                format!("<{}>", arg.placeholder),
-                                Style::default().fg(Color::DarkGray),
-                            );
-                            line.push_span(" ");
-                            line.push_span(span);
-                        });
-                        line
-                    }))
-                    .highlight_style(Modifier::REVERSED);
-                    frame.render_stateful_widget(list, rest, &mut self.cmd_list_state);
+                    frame.render_stateful_widget(
+                        CmdPalleteView::default(),
+                        inner,
+                        &mut self.cmd_palette_state,
+                    );
                 }
                 Screen::Sessions => {
-                    let list_items = app
-                        .tabs
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, tab)| tab.as_ref().map(|tab| (i, tab)))
-                        .flat_map(|(i, tab)| {
-                            tab.sessions()
-                                .iter()
-                                .filter_map(|id| {
-                                    let session = app.session_manager.session(*id)?;
-                                    Some(Line::from(format!("[{i}]-{id}    {}", session.title())))
-                                })
-                                .collect::<Vec<_>>()
-                        });
-                    let list = List::new(list_items).highlight_style(Modifier::REVERSED);
-                    frame.render_stateful_widget(list, inner, &mut self.session_list_state);
+                    frame.render_stateful_widget(
+                        SessionsView::new(app),
+                        inner,
+                        &mut self.session_state,
+                    );
+                }
+                Screen::Releases => {
+                    frame.render_stateful_widget(
+                        ReleasesView::default(),
+                        inner,
+                        &mut self.release_state,
+                    );
+                }
+                Screen::Opener => {
+                    frame.render_stateful_widget(
+                        OpenerView::default(),
+                        inner,
+                        &mut self.opener_state,
+                    );
                 }
             }
         })?;
         Ok(())
-    }
-
-    fn render_text_area(text_area: &mut TextArea<'static>, area: Rect, buf: &mut Buffer) {
-        text_area.set_block(Block::default().borders(Borders::BOTTOM));
-        text_area.render(area, buf);
-        /*let query = text_area.lines().join("\n");
-        let width = query.width();
-        let ghost_start = area.x + width as u16 + 1;
-        let ghost_area = Rect {
-            x: ghost_start,
-            y: area.y,
-            width: area.width - ghost_start,
-            height: 1,
-        };
-        let ghost = Span::styled("test", Style::default().fg(Color::DarkGray));
-        ghost.render(ghost_area, buf);*/
     }
 }
 
@@ -280,7 +190,12 @@ impl Overlay {
     const OVERLAY_SIZE_RATIO: [u32; 2] = [3, 2];
     const RELATIVE_POSITION: [f32; 2] = [2.0, 2.5];
 
-    pub fn new(size: PhysicalSize<u32>, font_size: f32, line_height: f32) -> Result<Self> {
+    pub fn new(
+        app: &App,
+        size: PhysicalSize<u32>,
+        font_size: f32,
+        line_height: f32,
+    ) -> Result<Self> {
         let size = PhysicalSize::new(
             size.width / Self::OVERLAY_SIZE_RATIO[0],
             size.height / Self::OVERLAY_SIZE_RATIO[1],
@@ -288,7 +203,7 @@ impl Overlay {
         let rows = (size.height as f32 / line_height) as u16;
         let cols = (size.width as f32 / (font_size / 2.0)) as u16;
         let terminal = Terminal::new(VtBackend::new(rows, cols))?;
-        let commands = vec![
+        let commands = [
             Cmd::new("close", [Arg::new("tab")], |_, _, _| {}),
             Cmd::new("next", [], |_, app, _| {
                 app.switch_tab(app.next_tab_index());
@@ -298,8 +213,8 @@ impl Overlay {
                 app.switch_tab(app.previous_tab_index());
                 app.request_redraw();
             }),
-            Cmd::new("switch", [Arg::new("tab")], |_, app, args| {
-                let Some(Ok(tab)) = args.first().map(|tab| tab.parse::<usize>()) else {
+            Cmd::new("switch", [Arg::new("tab")], |_, app, [tab]| {
+                let Ok(tab) = tab.parse::<usize>() else {
                     return;
                 };
                 if tab > 9 || tab == 0 {
@@ -313,23 +228,26 @@ impl Overlay {
                 this.toggle();
                 app.request_redraw();
             }),
+            Cmd::new("releases", [], |this, app, _| {
+                this.screen = Screen::Releases;
+                this.toggle();
+                app.request_redraw();
+            }),
         ];
-        let mut text_area = TextArea::default();
-        text_area.set_placeholder_text("Search..");
+
         Ok(Self {
             terminal,
             size: [size.width as f32, size.height as f32],
             shown: false,
             screen: Screen::CmdPalette,
 
-            commands: commands.clone(),
-            filtered: commands,
-            matcher: Matcher::default(),
+            release_state: ReleasesState::new(app),
 
-            cmd_text_area: text_area,
-            cmd_list_state: ListState::default(),
+            cmd_palette_state: CmdPalleteState::new(commands),
 
-            session_list_state: ListState::default(),
+            session_state: SessionsState::new(),
+
+            opener_state: OpenerState::new(),
         })
     }
 
@@ -354,28 +272,6 @@ impl Overlay {
 
     pub fn shown(&self) -> bool {
         self.shown
-    }
-
-    fn filter_items(&mut self) -> Vec<Cmd> {
-        let mut buf_1 = vec![];
-        let mut buf_2 = vec![];
-        let query = self.cmd_text_area.lines().join("\n");
-        let (name, _) = query.split_once(' ').unwrap_or((query.as_ref(), ""));
-        let mut scores = self
-            .commands
-            .iter()
-            .filter_map(|cmd| {
-                Some((
-                    cmd,
-                    self.matcher.fuzzy_match(
-                        Utf32Str::new(&cmd.name, &mut buf_1),
-                        Utf32Str::new(name, &mut buf_2),
-                    )?,
-                ))
-            })
-            .collect::<Vec<_>>();
-        scores.sort_by_key(|entry| std::cmp::Reverse(entry.1));
-        scores.into_iter().map(|app| app.0).cloned().collect()
     }
 }
 
@@ -571,8 +467,8 @@ impl Backend for VtBackend {
         let (row, col) = self.writer.screen().cursor_position();
         Ok(Position { x: col, y: row })
         /*crossterm::cursor::position()
-            .map(|(x, y)| Position { x, y })
-            .map_err(io::Error::other)*/
+        .map(|(x, y)| Position { x, y })
+        .map_err(io::Error::other)*/
     }
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
@@ -614,11 +510,8 @@ impl Backend for VtBackend {
 
     fn window_size(&mut self) -> io::Result<WindowSize> {
         let (rows, cols) = self.writer.screen().size();
-        let crossterm::terminal::WindowSize {
-            width,
-            height,
-            ..
-        } = terminal::window_size().unwrap();
+        let crossterm::terminal::WindowSize { width, height, .. } =
+            terminal::window_size().unwrap();
         Ok(WindowSize {
             columns_rows: Size {
                 width: cols,
@@ -743,10 +636,7 @@ impl IntoCrossterm<CrosstermColor> for Color {
     }
 }
 
-fn write_command_ansi<W: std::io::Write, C: Command>(
-    io: &mut W,
-    command: C,
-) -> io::Result<&mut W> {
+fn write_command_ansi<W: std::io::Write, C: Command>(io: &mut W, command: C) -> io::Result<&mut W> {
     struct Adapter<T> {
         inner: T,
         res: io::Result<()>,
@@ -774,5 +664,6 @@ fn write_command_ansi<W: std::io::Write, C: Command>(
                 std::any::type_name::<C>()
             ),
             Err(e) => e,
-        }).map(|_| adapter.inner)
+        })
+        .map(|()| adapter.inner)
 }
