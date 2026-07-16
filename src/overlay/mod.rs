@@ -242,6 +242,13 @@ impl Overlay {
         self.shown = !self.shown;
     }
 
+    pub fn show(&mut self, screen: Option<Screen>) {
+        if let Some(screen) = screen {
+            self.screen = screen;
+        }
+        self.shown = true;
+    }
+
     pub fn shown(&self) -> bool {
         self.shown
     }

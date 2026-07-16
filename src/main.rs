@@ -41,7 +41,7 @@ use winit::{
 };
 
 use crate::{
-    overlay::Overlay,
+    overlay::{Overlay, Screen},
     pty::SshConnection,
     terminal::{
         Divider, PaneGeometry, PanePathStep, SessionId, SessionManager, SplitDirection, Tab,
@@ -617,11 +617,11 @@ impl ApplicationHandler<PtyEvent> for App {
                                 self.switch_tab(8);
                                 return;
                             }
-                            KeyCode::KeyN => {
+                            KeyCode::KeyK => {
                                 self.switch_tab(self.next_tab_index());
                                 return;
                             }
-                            KeyCode::KeyP => {
+                            KeyCode::KeyJ => {
                                 self.switch_tab(self.previous_tab_index());
                                 return;
                             }
@@ -637,21 +637,43 @@ impl ApplicationHandler<PtyEvent> for App {
                                 self.split_current_tab(SplitDirection::Horizontal);
                                 return;
                             }
-                            KeyCode::KeyS => {
-                                self.status_bar_hidden = !self.status_bar_hidden;
-                                self.resize_tab();
-                                self.request_redraw();
-                                return;
-                            }
                             KeyCode::KeyR => {
                                 if let Ok(config) = Config::load() {
                                     self.apply_config(config);
                                 }
                                 return;
                             }
-                            KeyCode::KeyO => {
+                            KeyCode::KeyS => {
+                                self.status_bar_hidden = !self.status_bar_hidden;
+                                self.resize_tab();
+                                self.request_redraw();
+                                return;
+                            }
+                            KeyCode::KeyP => {
                                 if let Some(overlay) = self.overlay.as_mut() {
-                                    overlay.toggle();
+                                    overlay.show(Some(Screen::CmdPalette));
+                                    self.request_redraw();
+                                }
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if self
+                        .modifiers
+                        .contains(ModifiersState::CONTROL | ModifiersState::SHIFT)
+                    {
+                        match code {
+                            KeyCode::KeyF => {
+                                if let Some(overlay) = self.overlay.as_mut() {
+                                    overlay.show(Some(Screen::CmdPalette));
+                                    self.request_redraw();
+                                }
+                                return;
+                            }
+                            KeyCode::KeyS => {
+                                if let Some(overlay) = self.overlay.as_mut() {
+                                    overlay.show(Some(Screen::Sessions));
                                     self.request_redraw();
                                 }
                                 return;

@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use derive_more::{Deref, DerefMut};
 use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
+use winit::keyboard::{KeyCode, ModifiersState};
 use std::fmt::Debug;
 use std::io::Write;
 use std::net::IpAddr;
@@ -43,6 +44,7 @@ pub struct Config {
     pub fullscreen: Option<Value<bool>>,
     pub default_cwd: Option<Value<PathBuf>>,
     ssh_sessions: Value<Vec<SshConnection>>,
+    open_palette: Option<KeyBinding>,
 }
 
 impl FromLua for Config {
@@ -66,6 +68,7 @@ impl FromLua for Config {
             fullscreen: table.get("fullscreen")?,
             default_cwd: table.get("default_cwd")?,
             ssh_sessions: Value(sessions),
+            open_palette: KeyBinding::new(table.get::<String>("open_palette")?).ok(),
         })
     }
 }
@@ -140,5 +143,92 @@ impl Config {
 
     pub fn ssh_sessions(&self) -> Vec<SshConnection> {
         self.ssh_sessions.value()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct KeyBinding {
+    mods: ModifiersState,
+    key: KeyCode,
+}
+
+impl KeyBinding {
+    pub fn new(binding: impl AsRef<str>) -> Result<Self> {
+        let binding = binding.as_ref();
+        let (binding, mods) = Self::parse_mods(binding)?;
+        let key = if !mods.is_empty() && let Some(delim) = binding.chars().position(|c| c == '-') {
+            &binding[delim + 1..]
+        }else {
+            binding
+        };
+        let key = Self::parse_key(key)?;
+
+        Ok(Self {
+            mods,
+            key
+        })
+    }
+
+    fn parse_mods(binding: &str) -> Result<(&str, ModifiersState)> {
+        fn parse_mod(m: &str) -> Result<ModifiersState> {
+            Ok(match m.trim() {
+                "ctrl" => ModifiersState::CONTROL,
+                "alt" => ModifiersState::ALT,
+                "shift" => ModifiersState::SHIFT,
+                "mod" => ModifiersState::SUPER,
+                x => {
+                    anyhow::bail!("`{x}` is not a valid modifier");
+                }
+            })
+        }
+
+        if !binding.starts_with('<') {
+            return Ok((binding, ModifiersState::default()));
+        }
+        let binding = &binding[1..];
+        let end = binding.chars().position(|c| c == '>').context("failed to find `>` while parsing keybinding modifiers")?;
+        let mut modifiers = &binding[..end];
+
+        let mut mods = ModifiersState::default();
+
+        while let Some(next) = modifiers.chars().position(|c| c == '+') {
+            let modifier = &modifiers[..next];
+            mods.extend(parse_mod(modifier)?);
+            modifiers = &modifiers[next + 1..];
+        }
+        mods.extend(parse_mod(modifiers)?);
+
+        let rest = &binding[end..];
+
+        Ok((rest, mods))
+    }
+
+    fn parse_key(key: &str) -> Result<KeyCode> {
+        let key = match key.to_lowercase().as_str() {
+            "a" => KeyCode::KeyA,
+            "b" => KeyCode::KeyB,
+            "c" => KeyCode::KeyC,
+            "d" => KeyCode::KeyD,
+            "e" => KeyCode::KeyE,
+            "f" => KeyCode::KeyF,
+            "g" => KeyCode::KeyG,
+            "h" => KeyCode::KeyH,
+            "i" => KeyCode::KeyI,
+            "j" => KeyCode::KeyJ,
+            "k" => KeyCode::KeyK,
+            "l" => KeyCode::KeyL,
+            "m" => KeyCode::KeyM,
+            "n" => KeyCode::KeyN,
+            "o" => KeyCode::KeyO,
+            "p" => KeyCode::KeyP,
+            "q" => KeyCode::KeyQ,
+            "r" => KeyCode::KeyR,
+            "s" => KeyCode::KeyS,
+            "x" => KeyCode::KeyX,
+            "y" => KeyCode::KeyY,
+            "z" => KeyCode::KeyZ,
+            x => anyhow::bail!("`{x}` is not a valid key"),
+        };
+        Ok(key)
     }
 }
