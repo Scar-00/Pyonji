@@ -4,11 +4,14 @@ use derive_more::{Deref, DerefMut};
 use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
 use std::fmt::Debug;
+use std::io::Write;
 use std::ops::Deref as _;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 use winit::event_loop::EventLoopProxy;
+
+const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
 
 #[derive(Debug, Default, Clone, Deref, DerefMut)]
 pub struct Value<T: Debug + Clone + Default>(T);
@@ -55,6 +58,10 @@ impl FromLua for Config {
 impl Config {
     pub fn load() -> Result<Self> {
         let path = Self::path().context("not config path")?;
+        if !path.exists() {
+            let mut file = std::fs::OpenOptions::new().write(true).create(true).open(&path)?;
+            file.write(DEFAULT_CONFIG.as_bytes())?;
+        }
         let lua = Lua::new();
         let chunk = lua.load(path);
         let chunk = chunk.into_function()?;
