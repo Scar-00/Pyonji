@@ -1,7 +1,7 @@
 use std::{
     io::{Read as _, Write},
     net::IpAddr,
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use crate::{config::Config, terminal::SessionId};
@@ -19,7 +19,6 @@ pub struct SshConnection {
 pub struct Pty {
     master: Box<dyn MasterPty>,
     writer: Box<dyn Write + Send>,
-    process_id: Option<u32>,
 }
 
 pub enum Event {
@@ -47,7 +46,7 @@ impl Pty {
             })
             .context("failed to open pty pair")?;
 
-        let program_name = String::from("cmd.exe");
+        let program_name = Self::get_shell();
         let mut cmd = CommandBuilder::new(&program_name);
         if let Some(path) = path {
             cmd.cwd(path);
@@ -71,7 +70,6 @@ impl Pty {
             .master
             .take_writer()
             .context("failed to take PTY writer")?;
-        let process_id = child.process_id();
 
         std::thread::spawn({
             let tx = tx.clone();
@@ -99,7 +97,6 @@ impl Pty {
         Ok(Self {
             master: pair.master,
             writer,
-            process_id,
         })
     }
 
@@ -142,7 +139,6 @@ impl Pty {
             .master
             .take_writer()
             .context("failed to take PTY writer")?;
-        let process_id = child.process_id();
 
         std::thread::spawn({
             let tx = tx.clone();
@@ -170,7 +166,6 @@ impl Pty {
         Ok(Self {
             master: pair.master,
             writer,
-            process_id,
         })
 
         /*const SSH_SOCKET: Token = Token(0);
@@ -281,115 +276,24 @@ impl Pty {
         });
     }
 
-    pub fn current_dir(&self) -> Option<PathBuf> {
-        self.live_current_dir()
-    }
+    fn get_shell() -> String {
+        fn from_env() -> Option<String> {
+            use std::env;
+            let shell = cfg_select! {
+                unix => env::var_os("SHELL")?,
+                windows => env::var_os("COMSPEC")?,
+            };
 
-    #[cfg(windows)]
-    fn live_current_dir(&self) -> Option<PathBuf> {
-        use std::{
-            mem::{size_of, zeroed},
-            ptr::null_mut,
-        };
-
-        use ntapi::{
-            ntpebteb::PEB,
-            ntpsapi::{
-                NtQueryInformationProcess, ProcessBasicInformation, PROCESS_BASIC_INFORMATION,
-            },
-            ntrtl::RTL_USER_PROCESS_PARAMETERS,
-        };
-        use winapi::um::{
-            handleapi::CloseHandle,
-            memoryapi::ReadProcessMemory,
-            processthreadsapi::OpenProcess,
-            winnt::{PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ},
-        };
-
-        let pid = self.process_id?;
-        unsafe {
-            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid);
-            if process.is_null() {
-                return None;
-            }
-
-            let mut basic_info: PROCESS_BASIC_INFORMATION = zeroed();
-            let status = NtQueryInformationProcess(
-                process,
-                ProcessBasicInformation,
-                &raw mut basic_info as *mut _,
-                size_of::<PROCESS_BASIC_INFORMATION>() as u32,
-                null_mut(),
-            );
-            if status < 0 {
-                CloseHandle(process);
-                return None;
-            }
-
-            let mut peb: PEB = zeroed();
-            let mut bytes_read = 0usize;
-            if ReadProcessMemory(
-                process,
-                basic_info.PebBaseAddress as *const _,
-                &raw mut peb as *mut _,
-                size_of::<PEB>(),
-                &raw mut bytes_read,
-            ) == 0
-            {
-                CloseHandle(process);
-                return None;
-            }
-
-            let mut params: RTL_USER_PROCESS_PARAMETERS = zeroed();
-            if ReadProcessMemory(
-                process,
-                peb.ProcessParameters as *const _,
-                &raw mut params as *mut _,
-                size_of::<RTL_USER_PROCESS_PARAMETERS>(),
-                &raw mut bytes_read,
-            ) == 0
-            {
-                CloseHandle(process);
-                return None;
-            }
-
-            let path = read_remote_unicode_string(process, params.CurrentDirectory.DosPath);
-            CloseHandle(process);
-            path
+            Path::new(&shell)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
         }
+        from_env().unwrap_or_else(|| {
+            cfg_select! {
+                unix => "bash",
+                windows => "cmd.exe",
+            }
+            .to_string()
+        })
     }
-
-    #[cfg(not(windows))]
-    fn live_current_dir(&self) -> Option<PathBuf> {
-        None
-    }
-}
-
-#[cfg(windows)]
-fn read_remote_unicode_string(
-    process: winapi::shared::ntdef::HANDLE,
-    value: winapi::shared::ntdef::UNICODE_STRING,
-) -> Option<PathBuf> {
-    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
-    use winapi::um::memoryapi::ReadProcessMemory;
-
-    if value.Buffer.is_null() || value.Length == 0 {
-        return None;
-    }
-
-    let mut bytes_read = 0usize;
-    let mut buffer = vec![0u16; (value.Length / 2) as usize];
-    unsafe {
-        if ReadProcessMemory(
-            process,
-            value.Buffer as *const _,
-            buffer.as_mut_ptr() as *mut _,
-            value.Length as usize,
-            &raw mut bytes_read,
-        ) == 0
-        {
-            return None;
-        }
-    }
-    Some(PathBuf::from(OsString::from_wide(&buffer)))
 }

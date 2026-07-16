@@ -978,14 +978,10 @@ impl App {
         }
         .max(1);
 
-        let session_id = match self.session_manager.create_session(
-            new_rows,
-            new_cols,
-            self.session_manager
-                .session(active_session)
-                .and_then(|session| session.pty.current_dir())
-                .as_deref(),
-        ) {
+        let session_id = match self
+            .session_manager
+            .create_session(new_rows, new_cols, None)
+        {
             Ok(session_id) => session_id,
             Err(error) => {
                 error!(error = ?error, "failed to split session");
