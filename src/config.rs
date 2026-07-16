@@ -1,12 +1,15 @@
 use crate::PtyEvent;
+use crate::pty::SshConnection;
 use anyhow::{Context, Result};
 use derive_more::{Deref, DerefMut};
 use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
 use std::fmt::Debug;
 use std::io::Write;
+use std::net::IpAddr;
 use std::ops::Deref as _;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 use winit::event_loop::EventLoopProxy;
@@ -16,7 +19,7 @@ const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
 #[derive(Debug, Default, Clone, Deref, DerefMut)]
 pub struct Value<T: Debug + Clone + Default>(T);
 
-impl<T: Debug + Clone + FromLua + Default> Value<T> {
+impl<T: Debug + Clone + Default> Value<T> {
     pub fn value(&self) -> T {
         self.0.clone()
     }
@@ -39,11 +42,22 @@ pub struct Config {
     pub line_height: Option<Value<f64>>,
     pub fullscreen: Option<Value<bool>>,
     pub default_cwd: Option<Value<PathBuf>>,
+    ssh_sessions: Value<Vec<SshConnection>>,
 }
 
 impl FromLua for Config {
     fn from_lua(value: LuaValue, _: &Lua) -> LuaResult<Self> {
         let table = value.as_table().context("failed to create table")?;
+
+        let sessions = table.get::<Vec<LuaValue>>("ssh_sessions")?;
+        let sessions = sessions.into_iter().map(|session| -> Result<SshConnection> {
+            let table = session.as_table().context("ssh_session entry is not a table")?;
+            Ok(SshConnection {
+                name: table.get("name")?,
+                user_name: table.get("user_name")?,
+                ip: table.get::<String>("ip").map(|ip| IpAddr::from_str(&ip))??,
+            })
+        }).collect::<Result<Vec<_>>>()?;
 
         Ok(Self {
             font_family: table.get("font_family")?,
@@ -51,6 +65,7 @@ impl FromLua for Config {
             line_height: table.get("line_height")?,
             fullscreen: table.get("fullscreen")?,
             default_cwd: table.get("default_cwd")?,
+            ssh_sessions: Value(sessions),
         })
     }
 }
@@ -121,5 +136,9 @@ impl Config {
 
     pub fn fullscreen(&self) -> bool {
         self.fullscreen.as_ref().is_some_and(Value::value)
+    }
+
+    pub fn ssh_sessions(&self) -> Vec<SshConnection> {
+        self.ssh_sessions.value()
     }
 }

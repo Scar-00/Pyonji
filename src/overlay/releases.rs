@@ -195,11 +195,25 @@ impl StatefulWidget for ReleasesView {
             _ => {}
         }
         let releases = state.releases.iter().map(|release| {
-            Line::from_iter([
+            let mut line = Line::from_iter([
                 release.name().to_string(),
                 " - ".to_string(),
                 release.version().to_string(),
-            ])
+            ]);
+            if release.version() == self_update::cargo_crate_version!() {
+                let text = "CURRENT".to_text();
+                let padding = {
+                    let total_width = area.width as usize;
+                    let total_text_length = line.width() + text.width();
+                    if total_text_length > total_width {
+                        0
+                    } else {
+                        total_width - total_text_length
+                    }
+                };
+                line.push_span(format!("{}{}", " ".repeat(padding), text));
+            }
+            line
         });
         let list = List::new(releases).highlight_style(Modifier::REVERSED);
         StatefulWidget::render(list, area, buf, &mut state.list_state);

@@ -42,6 +42,7 @@ use winit::{
 
 use crate::{
     overlay::Overlay,
+    pty::SshConnection,
     terminal::{
         Divider, PaneGeometry, PanePathStep, SessionId, SessionManager, SplitDirection, Tab,
         TerminalSession,
@@ -93,6 +94,7 @@ struct App {
     renderer: Option<Renderer>,
     pub window: Option<Arc<Window>>,
     session_manager: SessionManager,
+    pub ssh_sessions: Vec<SshConnection>,
     modifiers: ModifiersState,
     line_height: f32,
     font_size: f32,
@@ -156,18 +158,6 @@ fn main() -> Result<()> {
         Config::default()
     };
 
-    /*let list = self_update::backends::github::ReleaseList::configure()
-        .repo_owner("Scar-00")
-        .repo_name("Pyonji")
-        .build()?
-        .fetch()?;
-    let asset = &list
-        .first()
-        .and_then(|release| release.asset_for(self_update::get_target(), None));
-    println!("target = {}", self_update::get_target());
-    println!("assets = {asset:#?}");
-    println!("releases = {list:#?}");*/
-
     let mut app = App::new(cli, config, proxy);
 
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -191,12 +181,14 @@ impl App {
 impl App {
     pub fn new(cli: Cli, config: Config, proxy: EventLoopProxy<PtyEvent>) -> Self {
         let (font_size, line_height) = config.font_metrics();
+        let ssh_sessions = config.ssh_sessions();
         Self {
             args: cli,
             config,
             renderer: None,
             window: None,
             session_manager: SessionManager::new(proxy.clone()),
+            ssh_sessions,
             modifiers: ModifiersState::default(),
             font_size: font_size as f32,
             line_height: (font_size * line_height) as f32,
@@ -226,6 +218,7 @@ impl App {
         let (font_size, line_height) = self.config.font_metrics();
         self.font_size = font_size as f32;
         self.line_height = (font_size * line_height) as f32;
+        self.ssh_sessions = self.config.ssh_sessions();
         let Some(size) = self.window.as_ref().map(|window| window.inner_size()) else {
             return;
         };
@@ -1151,5 +1144,49 @@ impl App {
             row,
             col,
         })
+    }
+
+    pub fn create_remote_session(&mut self, session: &SshConnection) {
+        let next_free = self.tabs.iter().position(|tab| tab.is_none());
+        if let Some(free) = next_free {
+            let id = match self.session_manager.create_remote_session(
+                self.terminal_rows().max(1),
+                self.cols.max(1),
+                session,
+            ) {
+                Ok(id) => id,
+                Err(error) => {
+                    error!(error = ?error, "failed to create tab session");
+                    return;
+                }
+            };
+            self.tabs[free] = Some(Tab::new(id));
+            self.current_tab = free;
+            self.wheel_remainder = 0.0;
+            self.resize_tab();
+            self.update_ime_cursor_area();
+            self.request_redraw();
+            return;
+        }
+        if self.tabs[self.current_tab].is_some() {
+            let id = match self.session_manager.create_remote_session(
+                self.terminal_rows().max(1),
+                self.cols.max(1),
+                session,
+            ) {
+                Ok(id) => id,
+                Err(error) => {
+                    error!(error = ?error, "failed to create tab session");
+                    return;
+                }
+            };
+
+            let Some(tab) = &mut self.tabs[self.current_tab] else {
+                return;
+            };
+
+            tab.split_active(SplitDirection::Horizontal, id);
+            self.request_redraw();
+        }
     }
 }

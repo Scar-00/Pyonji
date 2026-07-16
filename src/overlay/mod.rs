@@ -12,6 +12,7 @@ use crate::{
         releases::{ReleasesState, ReleasesView},
         sessions::{SessionsState, SessionsView},
     },
+    pty::SshConnection,
     renderer::{BackgroundRenderer, TerminalRenderer},
     App,
 };
@@ -203,37 +204,8 @@ impl Overlay {
         let rows = (size.height as f32 / line_height) as u16;
         let cols = (size.width as f32 / (font_size / 2.0)) as u16;
         let terminal = Terminal::new(VtBackend::new(rows, cols))?;
-        let commands = [
-            Cmd::new("close", [Arg::new("tab")], |_, _, _| {}),
-            Cmd::new("next", [], |_, app, _| {
-                app.switch_tab(app.next_tab_index());
-                app.request_redraw();
-            }),
-            Cmd::new("prev", [], |_, app, _| {
-                app.switch_tab(app.previous_tab_index());
-                app.request_redraw();
-            }),
-            Cmd::new("switch", [Arg::new("tab")], |_, app, [tab]| {
-                let Ok(tab) = tab.parse::<usize>() else {
-                    return;
-                };
-                if tab > 9 || tab == 0 {
-                    return;
-                }
-                app.switch_tab(tab - 1);
-                app.request_redraw();
-            }),
-            Cmd::new("sessions", [], |this, app, _| {
-                this.screen = Screen::Sessions;
-                this.toggle();
-                app.request_redraw();
-            }),
-            Cmd::new("releases", [], |this, app, _| {
-                this.screen = Screen::Releases;
-                this.toggle();
-                app.request_redraw();
-            }),
-        ];
+        let mut commands = Self::builtin_commands();
+        commands.extend(Self::commands_from_ssh_sessions(&app.ssh_sessions));
 
         Ok(Self {
             terminal,
@@ -272,6 +244,59 @@ impl Overlay {
 
     pub fn shown(&self) -> bool {
         self.shown
+    }
+
+    fn builtin_commands() -> Vec<Cmd> {
+        vec![
+            Cmd::new("close", [Arg::new("tab")], |_, _, _| {}),
+            Cmd::new("next", [], |_, app, _| {
+                app.switch_tab(app.next_tab_index());
+                app.request_redraw();
+            }),
+            Cmd::new("prev", [], |_, app, _| {
+                app.switch_tab(app.previous_tab_index());
+                app.request_redraw();
+            }),
+            Cmd::new("switch", [Arg::new("tab")], |_, app, [tab]| {
+                let Ok(tab) = tab.parse::<usize>() else {
+                    return;
+                };
+                if tab > 9 || tab == 0 {
+                    return;
+                }
+                app.switch_tab(tab - 1);
+                app.request_redraw();
+            }),
+            Cmd::new("sessions", [], |this, app, _| {
+                this.screen = Screen::Sessions;
+                this.toggle();
+                app.request_redraw();
+            }),
+            Cmd::new("releases", [], |this, app, _| {
+                this.screen = Screen::Releases;
+                this.toggle();
+                app.request_redraw();
+            }),
+            Cmd::new("ssh", [Arg::new("session")], |_, app, [session]| {
+                let Some(connection) = app.ssh_sessions.iter().find(|s| s.name == session).cloned()
+                else {
+                    return;
+                };
+                app.create_remote_session(&connection);
+            }),
+        ]
+    }
+
+    fn commands_from_ssh_sessions(sessions: &Vec<SshConnection>) -> Vec<Cmd> {
+        sessions
+            .iter()
+            .map(|session| {
+                let session = session.clone();
+                Cmd::new(format!("ssh: {}", session.name), [], move |_, app, _| {
+                    app.create_remote_session(&session);
+                })
+            })
+            .collect()
     }
 }
 

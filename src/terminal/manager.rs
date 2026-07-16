@@ -3,7 +3,7 @@ use std::{collections::HashMap, path::Path};
 use winit::event_loop::EventLoopProxy;
 
 use crate::{
-    pty::{Event, Pty},
+    pty::{Event, Pty, SshConnection},
     terminal::{CursorState, TerminalSession},
 };
 use vt100::Callbacks;
@@ -115,7 +115,38 @@ impl SessionManager {
                     },
                 ),
                 cursor_style: CursorState::Bar,
-                title: "cmd.exe".into(),
+                title: "cmd".into(),
+                mouse_pressed_button: None,
+                last_mouse_cell: None,
+            },
+        );
+        Ok(id)
+    }
+
+    pub fn create_remote_session(
+        &mut self,
+        rows: u16,
+        cols: u16,
+        conn: &SshConnection,
+    ) -> Result<SessionId> {
+        let id = SessionId(self.current_id);
+        self.current_id += 1;
+        self.sessions.insert(
+            id,
+            TerminalSession {
+                _id: id,
+                pty: Pty::new_remote(rows, cols, self.proxy.clone(), id, conn)?,
+                vt: vt100::Parser::new_with_callbacks(
+                    rows,
+                    cols,
+                    2000,
+                    CB {
+                        id,
+                        proxy: self.proxy.clone(),
+                    },
+                ),
+                cursor_style: CursorState::Bar,
+                title: "ssh".into(),
                 mouse_pressed_button: None,
                 last_mouse_cell: None,
             },

@@ -73,6 +73,7 @@ impl CmdPalleteState {
                     self.text_area.move_cursor(CursorMove::Head);
                     self.text_area.delete_line_by_end();
                     self.list_state.select_first();
+                    self.filtered = self.filter_items();
                     return Some(Rc::new(move |overlay, app| {
                         action(overlay, app, args.clone());
                     }));
