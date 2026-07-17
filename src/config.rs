@@ -68,7 +68,7 @@ impl FromLua for Config {
             fullscreen: table.get("fullscreen")?,
             default_cwd: table.get("default_cwd")?,
             ssh_sessions: Value(sessions),
-            open_palette: KeyBinding::new(table.get::<String>("open_palette")?).ok(),
+            open_palette: table.get("open_palette")?,
         })
     }
 }
@@ -230,5 +230,12 @@ impl KeyBinding {
             x => anyhow::bail!("`{x}` is not a valid key"),
         };
         Ok(key)
+    }
+}
+
+impl FromLua for KeyBinding {
+    fn from_lua(value: LuaValue, _: &Lua) -> LuaResult<Self> {
+        let binding = value.as_string().context("not a string")?;
+        Ok(Self::new(binding.to_str()?)?)
     }
 }

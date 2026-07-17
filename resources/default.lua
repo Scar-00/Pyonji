@@ -13,6 +13,7 @@
 ---@field fullscreen ?Value<boolean>
 ---@field default_cwd ?Value<string>
 ---@field ssh_sessions ?SshSession[],
+---@field open_palette ?string,
 
 ---@type Config
 return {};
