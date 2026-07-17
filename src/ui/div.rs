@@ -51,7 +51,7 @@ impl Element for Div {
         let Point { x, y } = cx.ndc_pos(bounds.origin);
         let Size { width, height } = cx.ndc_size(bounds.size);
         if let Some(color) = &self.style.color {
-            renderer.add_rect(x, y, width, height, color.to_linear());
+            renderer.add_rect(x, y, width, height, color.inner());
         }
         self.children
             .iter_mut()

@@ -43,14 +43,14 @@ const SHADER_SRC: &str = r"
 struct VertexInput {
     @location(0) pos: vec2<f32>,
     @location(1) uv: vec2<f32>,
-    @location(2) color: vec4<f32>,
+    @location(2) color: vec4<u32>,
     @location(3) variant: u32,
 };
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) color: vec4<f32>,
+    @location(1) color: vec4<u32>,
     @location(2) variant: u32,
 };
 
@@ -62,6 +62,23 @@ var glyph_samp: sampler;
 var image_tex: texture_2d<f32>;
 @group(0) @binding(3)
 var image_samp: sampler;
+
+fn srgb_channel_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        return c / 12.92;
+    }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
+fn to_linear(srgba: vec4<u32>) -> vec4<f32> {
+    let c = vec4<f32>(srgba) / 255.0;
+    return vec4<f32>(
+        srgb_channel_to_linear(c.r),
+        srgb_channel_to_linear(c.g),
+        srgb_channel_to_linear(c.b),
+        c.a,
+    );
+}
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
@@ -84,7 +101,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let tex = textureSample(glyph_tex, glyph_samp, vec2<f32>(in.uv));
             var alpha = tex.r;
             alpha = sharpen_alpha(alpha, 1.2);
-            return vec4<f32>(in.color.xyz, alpha);
+            let color = to_linear(in.color);
+            return vec4<f32>(color.xyz, alpha);
         }
         case 1u: {
             return textureSample(image_tex, image_samp, vec2<f32>(in.uv));
@@ -104,13 +122,13 @@ const GLYPH_VARIANT_IMAGE: u32 = 1;
 struct Vertex {
     pos: [f32; 2],
     uv: [f32; 2],
-    color: [f32; 4],
+    color: [u8; 4],
     variant: u32,
 }
 
 impl VertexData for Vertex {
     const VERTEX_ATTRIBUTES: &[VertexAttribute] =
-        &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Uint32];
+        &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Uint8x4, 3 => Uint32];
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -735,7 +753,7 @@ impl TerminalRenderer {
         color: Color,
         bold: bool,
     ) {
-        let color = color.to_linear();
+        let color = color.inner(); //.to_linear();
 
         let variant = if bold {
             FontVariant::Bold
@@ -817,7 +835,7 @@ impl TerminalRenderer {
         variant: FontVariant,
         color: Color,
     ) {
-        let color = color.to_linear();
+        let color = color.inner(); //.to_linear();
 
         let Some(glyph) = self.get_or_create_glyph_id(queue, variant, glyph) else {
             return;

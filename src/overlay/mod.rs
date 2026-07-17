@@ -366,7 +366,7 @@ impl OverlayRenderer {
                     let [x, y] = Self::ndc(size, [x, y]);
                     let bg_color = if cell.inverse() { fg_color } else { bg_color };
                     self.background_renderer
-                        .add_rect(x, y, w, h, bg_color.to_linear());
+                        .add_rect(x, y, w, h, bg_color.inner());
                 }
                 let fg_color = if cell.inverse() { bg_color } else { fg_color };
                 let contents = cell.contents();
@@ -407,7 +407,7 @@ impl OverlayRenderer {
                 (self.line_height * 2.0) / size.height as f32,
             ];
             self.background_renderer
-                .add_rect(x, y, w, h, [0.78, 0.82, 0.96, 0.45]);
+                .add_rect(x, y, w, h, [229, 234, 250, 115]);
         }
         self.background_renderer.render(device, queue, pass);
         self.terminal_renderer.render(device, queue, pass);

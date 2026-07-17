@@ -12,12 +12,12 @@ use wgpu::{
 const SHADER_SRC: &str = r"
 struct VertexInput {
     @location(0) pos: vec2<f32>,
-    @location(1) color: vec4<f32>,
+    @location(1) color: vec4<u32>,
 };
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
+    @location(0) color: vec4<u32>,
 };
 
 @vertex
@@ -28,9 +28,26 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
+fn srgb_channel_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        return c / 12.92;
+    }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
+fn to_linear(srgba: vec4<u32>) -> vec4<f32> {
+    let c = vec4<f32>(srgba) / 255.0;
+    return vec4<f32>(
+        srgb_channel_to_linear(c.r),
+        srgb_channel_to_linear(c.g),
+        srgb_channel_to_linear(c.b),
+        c.a,
+    );
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return in.color;
+    return to_linear(in.color);
 }
 ";
 
@@ -38,7 +55,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Vertex {
     pos: [f32; 2],
-    color: [f32; 4],
+    color: [u8; 4],
 }
 
 pub struct BackgroundRenderer {
@@ -78,7 +95,7 @@ impl BackgroundRenderer {
                             shader_location: 0,
                         },
                         VertexAttribute {
-                            format: VertexFormat::Float32x4,
+                            format: VertexFormat::Uint8x4,
                             offset: std::mem::size_of::<[f32; 2]>() as BufferAddress,
                             shader_location: 1,
                         },
@@ -139,7 +156,7 @@ impl BackgroundRenderer {
         self.vertices.clear();
     }
 
-    pub fn add_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+    pub fn add_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [u8; 4]) {
         self.vertices.push(Vertex { pos: [x, y], color });
         self.vertices.push(Vertex {
             pos: [x + w, y],

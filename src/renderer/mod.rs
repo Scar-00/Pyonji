@@ -1,9 +1,10 @@
 mod background;
 mod glyph;
+use ahash::{HashMap, HashMapExt as _};
 pub use background::BackgroundRenderer;
 pub use glyph::TerminalRenderer;
 
-use std::sync::Arc;
+use std::{cell::RefCell, sync::Arc};
 
 use anyhow::{Context, Result};
 use bumpalo::Bump as Arena;
@@ -24,11 +25,19 @@ use crate::{
     terminal::{CursorState, Divider, PaneGeometry, SplitDirection},
 };
 
-#[derive(Debug, Clone, Copy)]
+thread_local! {
+    static COLOR_CACHE: RefCell<HashMap<Color, [f32; 4]>> = RefCell::new(HashMap::new());
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Color([u8; 4]);
 
 #[allow(unused)]
 impl Color {
+    pub fn inner(self) -> [u8; 4] {
+        self.0
+    }
+
     pub fn rgb(r: u8, g: u8, b: u8) -> Self {
         Self([r, g, b, 0xFF])
     }
@@ -62,6 +71,25 @@ impl Color {
             srgb_to_linear(b),
             f32::from(a) / 255.0,
         ]
+        /*COLOR_CACHE.with_borrow_mut(|this| {
+            this.entry(self).or_insert_with(|| {
+                fn srgb_to_linear(c: u8) -> f32 {
+                    let c = f32::from(c) / 255.0;
+                    if c <= 0.04045 {
+                        c / 12.92
+                    } else {
+                        ((c + 0.055) / 1.055).powf(2.4)
+                    }
+                }
+                let [r, g, b, a] = self.0;
+                [
+                    srgb_to_linear(r),
+                    srgb_to_linear(g),
+                    srgb_to_linear(b),
+                    f32::from(a) / 255.0,
+                ]
+            }).clone()
+        })*/
     }
 
     pub fn to_wgpu(self) -> wgpu::Color {
@@ -258,7 +286,7 @@ impl Renderer {
         let cell_width = self.font_size / 2.0;
         let grid_cols = (size.width as f32 / cell_width).floor().max(1.0) as usize;
         let grid_rows = (size.height as f32 / self.line_height).floor().max(1.0) as usize;
-        let divider_color = [0.56, 0.60, 0.72, 0.95];
+        let divider_color = [197, 203, 221, 242];//[0.56, 0.60, 0.72, 0.95];
         let divider_px = 1.0f32;
         let divider_width = (divider_px / size.width.max(1) as f32) * 2.0;
         let divider_height = (divider_px / size.height.max(1) as f32) * 2.0;
@@ -316,7 +344,7 @@ impl Renderer {
                         let [x, y] = self.ndc([x, y]);
                         let bg_color = if cell.inverse() { fg_color } else { bg_color };
                         self.background_renderer
-                            .add_rect(x, y, w, h, bg_color.to_linear());
+                            .add_rect(x, y, w, h, bg_color.inner());
                     }
                     let fg_color = if cell.inverse() { bg_color } else { fg_color };
                     let contents = cell.contents();
@@ -368,7 +396,7 @@ impl Renderer {
                     ],
                 };
                 self.background_renderer
-                    .add_rect(x, y, w, h, [0.78, 0.82, 0.96, 0.45]);
+                    .add_rect(x, y, w, h, [229, 234, 250, 115]); //[0.78, 0.82, 0.96, 0.45]
             }
         }
 
@@ -531,7 +559,7 @@ impl Renderer {
         let [x, y] = self.ndc([x, bottom_y]);
         let height = (self.line_height * 2.0) / self.window.inner_size().height.max(1) as f32;
         self.background_renderer
-            .add_rect(x, y, width, height, color.to_linear());
+            .add_rect(x, y, width, height, color.inner());
     }
 
     fn draw_status_text(
@@ -582,7 +610,7 @@ impl Renderer {
         let [bg_x, bg_y] = self.ndc([x, y]);
 
         self.background_renderer
-            .add_rect(bg_x, bg_y, width, height, [0.22, 0.24, 0.32, 0.92]);
+            .add_rect(bg_x, bg_y, width, height, [129, 134, 153, 235]); //[0.22, 0.24, 0.32, 0.92]
 
         for (col, cluster) in preedit.text.graphemes(true).enumerate() {
             let pos = [x + (self.font_size / 2.0) * col as f32, y];
