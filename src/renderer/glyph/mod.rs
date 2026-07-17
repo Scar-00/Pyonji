@@ -3,6 +3,7 @@ use std::{borrow::Cow, fs, mem, path::PathBuf};
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
 use etagere::{AtlasAllocator, BucketedAtlasAllocator};
+use smallvec::SmallVec;
 use swash::{
     scale::{
         image::{Content, Image},
@@ -721,7 +722,7 @@ impl TerminalRenderer {
     fn finalize(&mut self, device: &Device, queue: &Queue) {
         self.maybe_grow_buffer(device);
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
-        queue.submit([]);
+        //queue.submit([]);
     }
 
     fn maybe_grow_buffer(&mut self, device: &Device) {
@@ -769,7 +770,7 @@ impl TerminalRenderer {
             _ => GLYPH_VARIANT_GLYPH,
         };
 
-        let ydt = 24.0 / 4.0;
+        let ydt = self.font_size / 4.0;
 
         let x0 = pos[0] + glyph.placement.left as f32;
         let y0 = (pos[1] - ydt) - glyph.placement.top as f32;
@@ -846,7 +847,7 @@ impl TerminalRenderer {
             _ => GLYPH_VARIANT_GLYPH,
         };
 
-        let ydt = 24.0 / 4.0;
+        let ydt = self.font_size / 4.0;
 
         let x0 = pos[0] + glyph.placement.left as f32;
         let y0 = (pos[1] - ydt) - glyph.placement.top as f32;
@@ -924,12 +925,12 @@ impl TerminalRenderer {
             .shape_context
             .builder(font.as_ref())
             .direction(Direction::LeftToRight)
-            .size(24.0)
+            .size(self.font_size)
             .build();
 
         shaper.add_str(cluster);
 
-        let mut glyphs = Vec::new();
+        let mut glyphs = SmallVec::<[_; 16]>::new_const();
         shaper.shape_with(|cluster| {
             for glyph in cluster.glyphs {
                 glyphs.push((glyph.id, glyph.x, glyph.y));

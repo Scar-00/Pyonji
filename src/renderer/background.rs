@@ -148,7 +148,7 @@ impl BackgroundRenderer {
     pub fn render(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass) {
         self.maybe_grow_buffer(device);
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
-        queue.submit([]);
+        //queue.submit([]);
 
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));

@@ -350,26 +350,39 @@ impl Renderer {
                     let contents = cell.contents();
                     let bold = cell.bold();
                     #[allow(clippy::if_not_else)]
-                    for cluster in contents.graphemes(true) {
-                        if cluster.len() != 1 {
-                            self.terminal_renderer.add_cluster(
+                    if contents.is_ascii() {
+                        for ch in contents.chars() {
+                            self.terminal_renderer.add_glyph(
                                 &self.queue,
                                 [x, y],
                                 screen_size,
-                                cluster,
+                                ch,
                                 fg_color,
                                 bold,
                             );
-                        } else {
-                            for ch in cluster.chars() {
-                                self.terminal_renderer.add_glyph(
+                        }
+                    }else {
+                        for cluster in contents.graphemes(true) {
+                            if cluster.len() != 1 {
+                                self.terminal_renderer.add_cluster(
                                     &self.queue,
                                     [x, y],
                                     screen_size,
-                                    ch,
+                                    cluster,
                                     fg_color,
                                     bold,
                                 );
+                            } else {
+                                for ch in cluster.chars() {
+                                    self.terminal_renderer.add_glyph(
+                                        &self.queue,
+                                        [x, y],
+                                        screen_size,
+                                        ch,
+                                        fg_color,
+                                        bold,
+                                    );
+                                }
                             }
                         }
                     }
