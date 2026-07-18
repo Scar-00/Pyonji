@@ -77,6 +77,9 @@ impl Config {
     pub fn load() -> Result<Self> {
         let path = Self::path().context("not config path")?;
         if !path.exists() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
             let mut file = std::fs::OpenOptions::new().write(true).create(true).open(&path)?;
             file.write(DEFAULT_CONFIG.as_bytes())?;
         }
