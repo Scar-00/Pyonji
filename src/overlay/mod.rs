@@ -6,6 +6,7 @@ mod sessions;
 use std::io::{self, Write};
 
 use crate::{
+    config::Config,
     overlay::{
         opener::{OpenerState, OpenerView},
         palette::{Arg, Cmd, CmdPalleteState, CmdPalleteView},
@@ -253,6 +254,12 @@ impl Overlay {
         self.shown
     }
 
+    pub fn update_cmds(&mut self, sessions: &Vec<SshConnection>) {
+        let mut commands = Self::builtin_commands();
+        commands.extend(Self::commands_from_ssh_sessions(sessions));
+        self.cmd_palette_state.update(commands);
+    }
+
     fn builtin_commands() -> Vec<Cmd> {
         vec![
             Cmd::new("close", [Arg::new("tab")], |_, _, _| {}),
@@ -290,6 +297,11 @@ impl Overlay {
                     return;
                 };
                 app.create_remote_session(&connection);
+            }),
+            Cmd::new("reload-config", [], |_, app, _| {
+                if let Ok(config) = Config::load() {
+                    app.apply_config(config);
+                }
             }),
         ]
     }

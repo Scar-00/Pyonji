@@ -34,7 +34,7 @@ use tracing::error;
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
-    event::{ElementState, Ime, MouseScrollDelta, WindowEvent},
+    event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{KeyCode, ModifiersState, PhysicalKey},
     window::{Icon, Window, WindowId},
@@ -229,6 +229,9 @@ impl App {
             }
             renderer.evict_glyphs();
         }
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.update_cmds(&self.ssh_sessions);
+        }
         self.rows = (size.height as f32 / self.line_height) as u16;
         self.cols = (size.width as f32 / (self.font_size / 2.0)) as u16;
         self.resize_tab();
@@ -362,6 +365,7 @@ impl ApplicationHandler<PtyEvent> for App {
     ) {
         match event {
             WindowEvent::RedrawRequested => {
+                //let start = std::time::Instant::now();
                 let panes = self.tab_layouts();
                 let active = self.active_session();
                 let dividers = self.tab_dividers();
@@ -397,6 +401,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     self.local_executer.try_tick();
                     self.request_redraw();
                 }
+                //println!("render = {:?}", start.elapsed());
             }
             WindowEvent::Resized(size) => {
                 if size.width == 0 || size.height == 0 {
@@ -452,7 +457,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     return;
                 };
 
-                if button == winit::event::MouseButton::Left {
+                if button == MouseButton::Left {
                     match state {
                         ElementState::Pressed => {
                             if let Some(divider) = self.divider_hit_test(x, y) {

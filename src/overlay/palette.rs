@@ -50,6 +50,10 @@ impl CmdPalleteState {
         }
     }
 
+    pub fn update(&mut self, cmds: Vec<Cmd>) {
+        self.commands = cmds;
+    }
+
     pub fn handle_events(
         &mut self,
         _: &mut App,
