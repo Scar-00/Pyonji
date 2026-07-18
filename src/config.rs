@@ -14,6 +14,7 @@ use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 use winit::event_loop::EventLoopProxy;
+use path_absolutize::*;
 
 const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
 
@@ -103,7 +104,7 @@ impl Config {
                     .with_poll_interval(Duration::from_secs(1))
                     .with_compare_contents(true);
                 let mut watcher = RecommendedWatcher::new(tx, config)?;
-                watcher.watch(&path.absolute()?, RecursiveMode::Recursive)?;
+                watcher.watch(&path.absolutize()?, RecursiveMode::Recursive)?;
                 while let Ok(ev) = rx.recv() {
                     if let Ok(ev) = ev
                         && let EventKind::Modify(_) = ev.kind

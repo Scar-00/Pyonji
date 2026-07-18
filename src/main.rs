@@ -10,7 +10,6 @@
     clippy::struct_excessive_bools,
     clippy::type_complexity
 )]
-#![feature(path_absolute_method)]
 
 mod config;
 #[cfg(feature = "install")]
