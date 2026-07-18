@@ -1,5 +1,4 @@
 #![cfg_attr(all(windows, feature = "install"), windows_subsystem = "windows")]
-#![warn(clippy::pedantic)]
 #![allow(
     clippy::similar_names,
     clippy::ptr_as_ptr,
@@ -8,7 +7,8 @@
     clippy::struct_field_names,
     clippy::too_many_lines,
     clippy::cast_sign_loss,
-    clippy::struct_excessive_bools
+    clippy::struct_excessive_bools,
+    clippy::type_complexity
 )]
 #![feature(path_absolute_method)]
 

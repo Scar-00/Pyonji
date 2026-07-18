@@ -47,7 +47,7 @@ impl Pty {
             .context("failed to open pty pair")?;
 
         let program_name = Self::get_shell();
-        let mut cmd = CommandBuilder::new(&program_name);
+        let mut cmd = CommandBuilder::new(program_name);
         if let Some(path) = path {
             cmd.cwd(path);
         }
@@ -118,7 +118,7 @@ impl Pty {
             .context("failed to open pty pair")?;
 
         let program_name = "ssh";
-        let mut cmd = CommandBuilder::new(&program_name);
+        let mut cmd = CommandBuilder::new(program_name);
         cmd.arg(format!("{}@{}", ssh.user_name, ssh.ip));
         cmd.env("TERM", "xterm-256color");
         std::env::vars_os().for_each(|var| {

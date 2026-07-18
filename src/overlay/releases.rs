@@ -205,11 +205,7 @@ impl StatefulWidget for ReleasesView {
                 let padding = {
                     let total_width = area.width as usize;
                     let total_text_length = line.width() + text.width();
-                    if total_text_length > total_width {
-                        0
-                    } else {
-                        total_width - total_text_length
-                    }
+                    total_width.saturating_sub(total_text_length)
                 };
                 line.push_span(format!("{}{}", " ".repeat(padding), text));
             }

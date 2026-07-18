@@ -164,7 +164,7 @@ impl Overlay {
             match self.screen {
                 Screen::CmdPalette => {
                     frame.render_stateful_widget(
-                        CmdPalleteView::default(),
+                        CmdPalleteView,
                         inner,
                         &mut self.cmd_palette_state,
                     );
@@ -177,18 +177,10 @@ impl Overlay {
                     );
                 }
                 Screen::Releases => {
-                    frame.render_stateful_widget(
-                        ReleasesView::default(),
-                        inner,
-                        &mut self.release_state,
-                    );
+                    frame.render_stateful_widget(ReleasesView, inner, &mut self.release_state);
                 }
                 Screen::Opener => {
-                    frame.render_stateful_widget(
-                        OpenerView::default(),
-                        inner,
-                        &mut self.opener_state,
-                    );
+                    frame.render_stateful_widget(OpenerView, inner, &mut self.opener_state);
                 }
             }
         })?;
@@ -262,7 +254,7 @@ impl Overlay {
         self.shown
     }
 
-    pub fn update_cmds(&mut self, sessions: &Vec<SshConnection>) {
+    pub fn update_cmds(&mut self, sessions: &[SshConnection]) {
         let mut commands = Self::builtin_commands();
         commands.extend(Self::commands_from_ssh_sessions(sessions));
         self.cmd_palette_state.update(commands);
@@ -319,7 +311,7 @@ impl Overlay {
         ]
     }
 
-    fn commands_from_ssh_sessions(sessions: &Vec<SshConnection>) -> Vec<Cmd> {
+    fn commands_from_ssh_sessions(sessions: &[SshConnection]) -> Vec<Cmd> {
         sessions
             .iter()
             .map(|session| {

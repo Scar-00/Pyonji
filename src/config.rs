@@ -44,7 +44,7 @@ pub struct Config {
     pub fullscreen: Option<Value<bool>>,
     pub default_cwd: Option<Value<PathBuf>>,
     ssh_sessions: Value<Vec<SshConnection>>,
-    open_palette: Option<KeyBinding>,
+    _open_palette: Option<KeyBinding>,
 }
 
 impl FromLua for Config {
@@ -68,7 +68,7 @@ impl FromLua for Config {
             fullscreen: table.get("fullscreen")?,
             default_cwd: table.get("default_cwd")?,
             ssh_sessions: Value(sessions),
-            open_palette: table.get("open_palette")?,
+            _open_palette: table.get("open_palette")?,
         })
     }
 }
@@ -80,8 +80,8 @@ impl Config {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let mut file = std::fs::OpenOptions::new().write(true).create(true).open(&path)?;
-            file.write(DEFAULT_CONFIG.as_bytes())?;
+            let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&path)?;
+            file.write_all(DEFAULT_CONFIG.as_bytes())?;
         }
         let lua = Lua::new();
         let chunk = lua.load(path);
@@ -151,8 +151,8 @@ impl Config {
 
 #[derive(Debug, Clone)]
 pub struct KeyBinding {
-    mods: ModifiersState,
-    key: KeyCode,
+    _mods: ModifiersState,
+    _key: KeyCode,
 }
 
 impl KeyBinding {
@@ -167,8 +167,8 @@ impl KeyBinding {
         let key = Self::parse_key(key)?;
 
         Ok(Self {
-            mods,
-            key
+            _mods: mods,
+            _key: key
         })
     }
 
