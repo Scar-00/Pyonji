@@ -130,7 +130,15 @@ impl Overlay {
                 }
             }
             Screen::Releases => self.release_state.handle_events(app, code),
-            Screen::Opener => self.opener_state.handle_events(app, code),
+            Screen::Opener => {
+                if self.opener_state.handle_events(app, code) {
+                    if let Some(path) = self.opener_state.selected_path.take() {
+                        app.open_session_in_dir(&path);
+                    }
+                    self.screen = Screen::CmdPalette;
+                    self.toggle();
+                }
+            }
         }
         true
     }
@@ -303,7 +311,11 @@ impl Overlay {
                     app.apply_config(config);
                 }
             }),
-            Cmd::new("open-in", [], |_, _, _| {}),
+            Cmd::new("open-in", [], |this, app, _| {
+                this.screen = Screen::Opener;
+                this.toggle();
+                app.request_redraw();
+            }),
         ]
     }
 

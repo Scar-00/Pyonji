@@ -29,7 +29,7 @@ use clap::Parser;
 use config::Config;
 use pty::Event as PtyEvent;
 use renderer::{ImePreedit, Pane, Renderer, StatusTab};
-use std::{array, path::PathBuf, sync::Arc};
+use std::{array, path::Path, path::PathBuf, sync::Arc};
 use tracing::error;
 use winit::{
     application::ApplicationHandler,
@@ -1167,6 +1167,48 @@ impl App {
             row,
             col,
         })
+    }
+
+    pub fn open_session_in_dir(&mut self, path: &Path) {
+        let next_free = self.tabs.iter().position(|tab| tab.is_none());
+        if let Some(free) = next_free {
+            let id = match self.session_manager.create_session(
+                self.terminal_rows().max(1),
+                self.cols.max(1),
+                Some(path),
+            ) {
+                Ok(id) => id,
+                Err(error) => {
+                    error!(error = ?error, "failed to create session in dir");
+                    return;
+                }
+            };
+            self.tabs[free] = Some(Tab::new(id));
+            self.current_tab = free;
+            self.wheel_remainder = 0.0;
+            self.resize_tab();
+            self.update_ime_cursor_area();
+            self.request_redraw();
+            return;
+        }
+        if self.tabs[self.current_tab].is_some() {
+            let id = match self.session_manager.create_session(
+                self.terminal_rows().max(1),
+                self.cols.max(1),
+                Some(path),
+            ) {
+                Ok(id) => id,
+                Err(error) => {
+                    error!(error = ?error, "failed to create session in dir");
+                    return;
+                }
+            };
+            let Some(tab) = &mut self.tabs[self.current_tab] else {
+                return;
+            };
+            tab.split_active(SplitDirection::Horizontal, id);
+            self.request_redraw();
+        }
     }
 
     pub fn create_remote_session(&mut self, session: &SshConnection) {
