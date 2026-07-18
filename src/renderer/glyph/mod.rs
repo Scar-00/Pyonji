@@ -17,7 +17,7 @@ use wgpu::{
     AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer, BufferAddress,
     BufferUsages, ColorTargetState, ColorWrites, Device, Extent3d, FilterMode, FragmentState,
-    MipmapFilterMode, MultisampleState, Origin3d, PipelineCompilationOptions,
+    IndexFormat, MipmapFilterMode, MultisampleState, Origin3d, PipelineCompilationOptions,
     PipelineLayoutDescriptor, PrimitiveState, Queue, RenderPass, RenderPipeline,
     RenderPipelineDescriptor, SamplerBindingType, SamplerDescriptor, ShaderModule,
     ShaderModuleDescriptor, ShaderSource, ShaderStages, TexelCopyBufferLayout,
@@ -190,7 +190,9 @@ pub struct TerminalRenderer {
     _shader: ShaderModule,
     pipeline: RenderPipeline,
     vertex_buffer: Buffer,
+    index_buffer: Buffer,
     vertices: Vec<Vertex>,
+    indices: Vec<u16>,
     glyph_atlas_texture: Texture,
     image_atlas_texture: Texture,
 
@@ -572,9 +574,16 @@ impl TerminalRenderer {
         });
 
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("background vertices"),
+            label: Some("glyph vertices"),
             size: Self::DEFAULT_BUFFER_SIZE,
             usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glyph indices"),
+            size: Self::DEFAULT_BUFFER_SIZE,
+            usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -618,7 +627,9 @@ impl TerminalRenderer {
             _shader: shader,
             pipeline,
             vertex_buffer,
+            index_buffer,
             vertices: Vec::new(),
+            indices: Vec::new(),
             uniform_bind_group,
             glyph_atlas_texture: glyph_texture,
             image_atlas_texture: image_texture,
@@ -722,15 +733,24 @@ impl TerminalRenderer {
     fn finalize(&mut self, device: &Device, queue: &Queue) {
         self.maybe_grow_buffer(device);
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
-        //queue.submit([]);
+        queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(&self.indices));
     }
 
     fn maybe_grow_buffer(&mut self, device: &Device) {
         if self.vertices.len() * mem::size_of::<Vertex>() >= self.vertex_buffer.size() as usize {
             self.vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("background vertices"),
+                label: Some("glyph vertices"),
                 size: (self.vertices.len() * mem::size_of::<Vertex>()) as u64,
                 usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        let index_size = self.indices.len() * mem::size_of::<u16>();
+        if index_size >= self.index_buffer.size() as usize {
+            self.index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("glyph indices"),
+                size: index_size as u64,
+                usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
         }
@@ -741,8 +761,10 @@ impl TerminalRenderer {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.draw(0..(self.vertices.len() as u32), 0..1);
+        pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
+        pass.draw_indexed(0..self.indices.len() as u32, 0, 0..1);
         self.vertices.clear();
+        self.indices.clear();
     }
 
     pub fn add_glyph(
@@ -789,21 +811,10 @@ impl TerminalRenderer {
         let bl = to_ndc(x0, y1);
         let br = to_ndc(x1, y1);
 
+        let idx = self.vertices.len() as u16;
         self.vertices.push(Vertex {
             pos: tl,
             uv: [glyph.uv_min[0], glyph.uv_min[1]],
-            color,
-            variant,
-        });
-        self.vertices.push(Vertex {
-            pos: tr,
-            uv: [glyph.uv_max[0], glyph.uv_min[1]],
-            color,
-            variant,
-        });
-        self.vertices.push(Vertex {
-            pos: bl,
-            uv: [glyph.uv_min[0], glyph.uv_max[1]],
             color,
             variant,
         });
@@ -825,6 +836,14 @@ impl TerminalRenderer {
             color,
             variant,
         });
+        self.indices.extend_from_slice(&[
+            idx,
+            idx + 1,
+            idx + 2,
+            idx + 1,
+            idx + 2,
+            idx + 3,
+        ]);
     }
 
     fn add_glyph_id(
@@ -866,21 +885,10 @@ impl TerminalRenderer {
         let bl = to_ndc(x0, y1);
         let br = to_ndc(x1, y1);
 
+        let idx = self.vertices.len() as u16;
         self.vertices.push(Vertex {
             pos: tl,
             uv: [glyph.uv_min[0], glyph.uv_min[1]],
-            color,
-            variant,
-        });
-        self.vertices.push(Vertex {
-            pos: tr,
-            uv: [glyph.uv_max[0], glyph.uv_min[1]],
-            color,
-            variant,
-        });
-        self.vertices.push(Vertex {
-            pos: bl,
-            uv: [glyph.uv_min[0], glyph.uv_max[1]],
             color,
             variant,
         });
@@ -902,6 +910,14 @@ impl TerminalRenderer {
             color,
             variant,
         });
+        self.indices.extend_from_slice(&[
+            idx,
+            idx + 1,
+            idx + 2,
+            idx + 1,
+            idx + 2,
+            idx + 3,
+        ]);
     }
 
     pub fn add_cluster(

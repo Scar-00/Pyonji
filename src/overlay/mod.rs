@@ -303,6 +303,7 @@ impl Overlay {
                     app.apply_config(config);
                 }
             }),
+            Cmd::new("open-in", [], |_, _, _| {}),
         ]
     }
 

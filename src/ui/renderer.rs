@@ -4,10 +4,10 @@ use std::{borrow::Cow, mem};
 use bytemuck::{Pod, Zeroable};
 use wgpu::{
     BlendState, Buffer, BufferAddress, BufferUsages, ColorTargetState, ColorWrites, Device,
-    FragmentState, MultisampleState, PipelineCompilationOptions, PipelineLayoutDescriptor,
-    PrimitiveState, Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor, ShaderModule,
-    ShaderModuleDescriptor, ShaderSource, TextureFormat, VertexAttribute, VertexBufferLayout,
-    VertexFormat, VertexState, VertexStepMode,
+    FragmentState, IndexFormat, MultisampleState, PipelineCompilationOptions,
+    PipelineLayoutDescriptor, PrimitiveState, Queue, RenderPass, RenderPipeline,
+    RenderPipelineDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, TextureFormat,
+    VertexAttribute, VertexBufferLayout, VertexFormat, VertexState, VertexStepMode,
 };
 
 use crate::renderer::VertexData;
@@ -29,7 +29,9 @@ impl VertexData for Vertex {
 pub struct UiRenderer {
     pipeline: RenderPipeline,
     vertex_buffer: Buffer,
+    index_buffer: Buffer,
     vertices: Vec<Vertex>,
+    indices: Vec<u16>,
 }
 
 impl UiRenderer {
@@ -70,24 +72,41 @@ impl UiRenderer {
         });
 
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("background vertices"),
+            label: Some("ui vertices"),
             size: 1024,
             usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ui indices"),
+            size: 1024,
+            usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         Self {
             pipeline,
             vertex_buffer,
+            index_buffer,
             vertices: Vec::new(),
+            indices: Vec::new(),
         }
     }
 
     fn maybe_grow_buffer(&mut self, device: &Device) {
         if self.vertices.len() * mem::size_of::<Vertex>() >= self.vertex_buffer.size() as usize {
             self.vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("background vertices"),
+                label: Some("ui vertices"),
                 size: (self.vertices.len() * mem::size_of::<Vertex>()) as u64,
                 usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        let index_size = self.indices.len() * mem::size_of::<u16>();
+        if index_size >= self.index_buffer.size() as usize {
+            self.index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("ui indices"),
+                size: index_size as u64,
+                usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
         }
@@ -96,24 +115,19 @@ impl UiRenderer {
     pub fn render(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass) {
         self.maybe_grow_buffer(device);
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
-        queue.submit([]);
+        queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(&self.indices));
 
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.draw(0..self.vertices.len() as u32, 0..1);
+        pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
+        pass.draw_indexed(0..self.indices.len() as u32, 0, 0..1);
         self.vertices.clear();
+        self.indices.clear();
     }
 
     pub fn add_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+        let idx = self.vertices.len() as u16;
         self.vertices.push(Vertex { pos: [x, y], color });
-        self.vertices.push(Vertex {
-            pos: [x + w, y],
-            color,
-        });
-        self.vertices.push(Vertex {
-            pos: [x, y + h],
-            color,
-        });
         self.vertices.push(Vertex {
             pos: [x + w, y],
             color,
@@ -126,5 +140,13 @@ impl UiRenderer {
             pos: [x + w, y + h],
             color,
         });
+        self.indices.extend_from_slice(&[
+            idx,
+            idx + 1,
+            idx + 2,
+            idx + 1,
+            idx + 2,
+            idx + 3,
+        ]);
     }
 }
