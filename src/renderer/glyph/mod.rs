@@ -91,17 +91,12 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-fn sharpen_alpha(a: f32, amount: f32) -> f32 {
-    return clamp((a - 0.5) * amount + 0.5, 0.0, 1.0);
-}
-
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     switch in.variant {
         case 0u: {
             let tex = textureSample(glyph_tex, glyph_samp, vec2<f32>(in.uv));
-            var alpha = tex.r;
-            alpha = sharpen_alpha(alpha, 1.2);
+            var alpha = pow(tex.r, 1.43);
             let color = to_linear(in.color);
             return vec4<f32>(color.xyz, alpha);
         }
@@ -600,10 +595,11 @@ impl TerminalRenderer {
                 &mut font_db,
                 &Query {
                     families: &[Family::Name(font_family)],
-                    weight: Weight::LIGHT,
+                    weight: Weight::MEDIUM,
                     ..Default::default()
                 },
             )
+            .inspect_err(|e| tracing::error!(?e, "failed to load font {font_family}"))
             .unwrap_or(normal_font);
 
             let bold_font = Self::load_font(
@@ -614,6 +610,7 @@ impl TerminalRenderer {
                     ..Default::default()
                 },
             )
+            .inspect_err(|e| tracing::error!(?e, "failed to load font {font_family}"))
             .unwrap_or(bold_font);
             (normal_font, bold_font)
         } else {
@@ -672,10 +669,12 @@ impl TerminalRenderer {
             &mut self.font_db,
             &Query {
                 families: &[Family::Name(font_family)],
-                weight: Weight::LIGHT,
+                weight: Weight::MEDIUM,
                 ..Default::default()
             },
-        ) {
+        )
+        .inspect_err(|e| tracing::error!(?e, "failed to load font {font_family}"))
+        {
             self.normal_font = normal_font;
         }
 
@@ -686,7 +685,9 @@ impl TerminalRenderer {
                 weight: Weight::SEMIBOLD,
                 ..Default::default()
             },
-        ) {
+        )
+        .inspect_err(|e| tracing::error!(?e, "failed to load font {font_family}"))
+        {
             self.bold_font = bold_font;
         }
     }
@@ -794,8 +795,8 @@ impl TerminalRenderer {
 
         let ydt = self.font_size / 4.0;
 
-        let x0 = pos[0] + glyph.placement.left as f32;
-        let y0 = (pos[1] - ydt) - glyph.placement.top as f32;
+        let x0 = (pos[0] + glyph.placement.left as f32).round();
+        let y0 = ((pos[1] - ydt) - glyph.placement.top as f32).round();
         let x1 = x0 + glyph.placement.width as f32;
         let y1 = y0 + glyph.placement.height as f32;
 
@@ -836,14 +837,8 @@ impl TerminalRenderer {
             color,
             variant,
         });
-        self.indices.extend_from_slice(&[
-            idx,
-            idx + 1,
-            idx + 2,
-            idx + 1,
-            idx + 2,
-            idx + 3,
-        ]);
+        self.indices
+            .extend_from_slice(&[idx, idx + 1, idx + 2, idx + 1, idx + 2, idx + 3]);
     }
 
     fn add_glyph_id(
@@ -868,8 +863,8 @@ impl TerminalRenderer {
 
         let ydt = self.font_size / 4.0;
 
-        let x0 = pos[0] + glyph.placement.left as f32;
-        let y0 = (pos[1] - ydt) - glyph.placement.top as f32;
+        let x0 = (pos[0] + glyph.placement.left as f32).round();
+        let y0 = ((pos[1] - ydt) - glyph.placement.top as f32).round();
         let x1 = x0 + glyph.placement.width as f32;
         let y1 = y0 + glyph.placement.height as f32;
 
@@ -910,14 +905,8 @@ impl TerminalRenderer {
             color,
             variant,
         });
-        self.indices.extend_from_slice(&[
-            idx,
-            idx + 1,
-            idx + 2,
-            idx + 1,
-            idx + 2,
-            idx + 3,
-        ]);
+        self.indices
+            .extend_from_slice(&[idx, idx + 1, idx + 2, idx + 1, idx + 2, idx + 3]);
     }
 
     pub fn add_cluster(
