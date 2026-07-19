@@ -595,7 +595,7 @@ impl TerminalRenderer {
                 &mut font_db,
                 &Query {
                     families: &[Family::Name(font_family)],
-                    weight: Weight::MEDIUM,
+                    weight: Weight::NORMAL,
                     ..Default::default()
                 },
             )
@@ -669,7 +669,7 @@ impl TerminalRenderer {
             &mut self.font_db,
             &Query {
                 families: &[Family::Name(font_family)],
-                weight: Weight::MEDIUM,
+                weight: Weight::NORMAL,
                 ..Default::default()
             },
         )

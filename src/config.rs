@@ -1,75 +1,61 @@
 use crate::PtyEvent;
 use crate::pty::SshConnection;
 use anyhow::{Context, Result};
-use derive_more::{Deref, DerefMut};
 use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
-use winit::keyboard::{KeyCode, ModifiersState};
+use path_absolutize::*;
 use std::fmt::Debug;
 use std::io::Write;
 use std::net::IpAddr;
-use std::ops::Deref as _;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 use winit::event_loop::EventLoopProxy;
-use path_absolutize::*;
+use winit::keyboard::{KeyCode, ModifiersState};
 
 const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
 
-#[derive(Debug, Default, Clone, Deref, DerefMut)]
-pub struct Value<T: Debug + Clone + Default>(T);
-
-impl<T: Debug + Clone + Default> Value<T> {
-    pub fn value(&self) -> T {
-        self.0.clone()
-    }
-}
-
-impl<T: Debug + Clone + FromLua + Default> FromLua for Value<T> {
-    fn from_lua(value: LuaValue, lua: &Lua) -> LuaResult<Self> {
-        if let Some(v) = value.as_function() {
-            v.call::<T>(()).map(|v| Self(v))
-        } else {
-            T::from_lua(value, lua).map(|v| Self(v))
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Config {
-    pub font_family: Option<Value<String>>,
-    pub font_size: Option<Value<f64>>,
-    pub line_height: Option<Value<f64>>,
-    pub fullscreen: Option<Value<bool>>,
-    pub default_cwd: Option<Value<PathBuf>>,
-    ssh_sessions: Value<Vec<SshConnection>>,
-    _open_palette: Option<KeyBinding>,
+    pub font_family: Option<String>,
+    pub font_size: f64,
+    pub line_height: f64,
+    pub fullscreen: bool,
+    pub default_cwd: Option<PathBuf>,
+    ssh_sessions: Vec<SshConnection>,
+    _open_palette: KeyBinding,
 }
 
 impl FromLua for Config {
-    fn from_lua(value: LuaValue, _: &Lua) -> LuaResult<Self> {
+    fn from_lua(value: LuaValue, lua: &Lua) -> LuaResult<Self> {
         let table = value.as_table().context("failed to create table")?;
 
         let sessions = table.get::<Vec<LuaValue>>("ssh_sessions")?;
-        let sessions = sessions.into_iter().map(|session| -> Result<SshConnection> {
-            let table = session.as_table().context("ssh_session entry is not a table")?;
-            Ok(SshConnection {
-                name: table.get("name")?,
-                user_name: table.get("user_name")?,
-                ip: table.get::<String>("ip").map(|ip| IpAddr::from_str(&ip))??,
+        let sessions = sessions
+            .into_iter()
+            .map(|session| -> Result<SshConnection> {
+                let table = session
+                    .as_table()
+                    .context("ssh_session entry is not a table")?;
+                Ok(SshConnection {
+                    name: table.get("name").and_then(|v| Self::from_value(v, lua))?,
+                    user_name: table.get("user_name").and_then(|v| Self::from_value(v, lua))?,
+                    ip: table
+                        .get::<LuaValue>("ip")
+                        .and_then(|v| Self::from_value(v, lua))
+                        .map(|ip: String| IpAddr::from_str(&ip))??,
+                })
             })
-        }).collect::<Result<Vec<_>>>()?;
-
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
-            font_family: table.get("font_family")?,
-            font_size: table.get("font_size")?,
-            line_height: table.get("line_height")?,
-            fullscreen: table.get("fullscreen")?,
-            default_cwd: table.get("default_cwd")?,
-            ssh_sessions: Value(sessions),
-            _open_palette: table.get("open_palette")?,
+            font_family: table.get("font_family").and_then(|v| Self::from_value(v, lua))?,
+            font_size: table.get("font_size").and_then(|v| Self::from_value(v, lua)).unwrap_or(24.0),
+            line_height: table.get("line_height").and_then(|v| Self::from_value(v, lua)).unwrap_or(28.0 / 24.0),
+            fullscreen: table.get("fullscreen").and_then(|v| Self::from_value(v, lua))?,
+            default_cwd: table.get("default_cwd").and_then(|v| Self::from_value(v, lua))?,
+            ssh_sessions: sessions,
+            _open_palette: table.get("open_palette").and_then(|v| Self::from_value(v, lua)).unwrap_or(KeyBinding::OPEN_PALETTE),
         })
     }
 }
@@ -81,7 +67,11 @@ impl Config {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&path)?;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)?;
             file.write_all(DEFAULT_CONFIG.as_bytes())?;
         }
         let lua = Lua::new();
@@ -89,6 +79,18 @@ impl Config {
         let chunk = chunk.into_function()?;
         let res = chunk.call::<Self>(())?;
         Ok(res)
+    }
+
+    pub fn new() -> Self {
+        Self {
+            font_family: None,
+            font_size: 24.0,
+            line_height: 28.0 / 24.0,
+            fullscreen: false,
+            default_cwd: None,
+            ssh_sessions: vec![],
+            _open_palette: KeyBinding::OPEN_PALETTE,
+        }
     }
 
     pub fn watch(proxy: EventLoopProxy<PtyEvent>) {
@@ -132,21 +134,27 @@ impl Config {
     }
 
     pub fn font_metrics(&self) -> (f64, f64) {
-        let font_size = self.font_size.as_ref().map_or(24.0, Value::value);
-        let line_height = self.line_height.as_ref().map_or(28.0 / 24.0, Value::value);
-        (font_size, line_height)
+        (self.font_size, self.line_height)
     }
 
     pub fn font_family(&self) -> Option<&str> {
-        self.font_family.as_ref().map(|v| v.deref().as_str())
+        self.font_family.as_deref()
     }
 
     pub fn fullscreen(&self) -> bool {
-        self.fullscreen.as_ref().is_some_and(Value::value)
+        self.fullscreen
     }
 
     pub fn ssh_sessions(&self) -> Vec<SshConnection> {
-        self.ssh_sessions.value()
+        self.ssh_sessions.clone()
+    }
+
+    fn from_value<T: FromLua>(value: LuaValue, lua: &Lua) -> LuaResult<T> {
+        if let Some(v) = value.as_function() {
+            v.call::<T>(())
+        } else {
+            T::from_lua(value, lua)
+        }
     }
 }
 
@@ -157,20 +165,37 @@ pub struct KeyBinding {
 }
 
 impl KeyBinding {
+    //keybinding!(OPEN_PALETTE, "<ctrl+shift>-F");
+    const OPEN_PALETTE: Self =  Self::new_const(
+        ModifiersState::from_bits_retain(ModifiersState::CONTROL.bits() | ModifiersState::SHIFT.bits()),
+        KeyCode::KeyF,
+    );
+}
+
+impl KeyBinding {
     pub fn new(binding: impl AsRef<str>) -> Result<Self> {
         let binding = binding.as_ref();
         let (binding, mods) = Self::parse_mods(binding)?;
-        let key = if !mods.is_empty() && let Some(delim) = binding.chars().position(|c| c == '-') {
+        let key = if !mods.is_empty()
+            && let Some(delim) = binding.chars().position(|c| c == '-')
+        {
             &binding[delim + 1..]
-        }else {
+        } else {
             binding
         };
         let key = Self::parse_key(key)?;
 
         Ok(Self {
             _mods: mods,
-            _key: key
+            _key: key,
         })
+    }
+
+    const fn new_const(mods: ModifiersState, key: KeyCode) -> Self {
+        Self {
+            _mods: mods,
+            _key: key,
+        }
     }
 
     fn parse_mods(binding: &str) -> Result<(&str, ModifiersState)> {
@@ -190,7 +215,10 @@ impl KeyBinding {
             return Ok((binding, ModifiersState::default()));
         }
         let binding = &binding[1..];
-        let end = binding.chars().position(|c| c == '>').context("failed to find `>` while parsing keybinding modifiers")?;
+        let end = binding
+            .chars()
+            .position(|c| c == '>')
+            .context("failed to find `>` while parsing keybinding modifiers")?;
         let mut modifiers = &binding[..end];
 
         let mut mods = ModifiersState::default();

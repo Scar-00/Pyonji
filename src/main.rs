@@ -154,7 +154,7 @@ fn main() -> Result<()> {
         dir
     } else {
         tracing::warn!("failed to load config");
-        Config::default()
+        Config::new()
     };
 
     let mut app = App::new(cli, config, proxy);
@@ -294,7 +294,7 @@ impl ApplicationHandler<PtyEvent> for App {
             self.args
                 .path
                 .clone()
-                .or(self.config.default_cwd.as_ref().map(config::Value::value))
+                .or(self.config.default_cwd.clone())
                 .as_deref(),
         ) {
             Ok(session) => {
