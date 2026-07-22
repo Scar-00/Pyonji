@@ -401,7 +401,7 @@ impl TerminalRenderer {
         font_size: f32,
         format: TextureFormat,
     ) -> Self {
-        use fontdb::{Database, Family, Query, Weight};
+        use fontdb::{Database, Family, Query, Stretch, Weight};
         let tex_limits = device.limits().max_texture_dimension_2d;
 
         let glyph_atlas_allocator = BucketedAtlasAllocator::new(etagere::size2(
@@ -596,6 +596,7 @@ impl TerminalRenderer {
                 &Query {
                     families: &[Family::Name(font_family)],
                     weight: Weight::NORMAL,
+                    stretch: Stretch::UltraExpanded,
                     ..Default::default()
                 },
             )
@@ -606,7 +607,8 @@ impl TerminalRenderer {
                 &mut font_db,
                 &Query {
                     families: &[Family::Name(font_family)],
-                    weight: Weight::SEMIBOLD,
+                    weight: Weight::BOLD,
+                    stretch: Stretch::UltraExpanded,
                     ..Default::default()
                 },
             )
@@ -664,12 +666,13 @@ impl TerminalRenderer {
     }
 
     pub fn set_font_family(&mut self, font_family: &str) {
-        use fontdb::{Family, Query, Weight};
+        use fontdb::{Family, Query, Stretch, Weight};
         if let Ok(normal_font) = Self::load_font(
             &mut self.font_db,
             &Query {
                 families: &[Family::Name(font_family)],
                 weight: Weight::NORMAL,
+                stretch: Stretch::UltraExpanded,
                 ..Default::default()
             },
         )
@@ -682,7 +685,8 @@ impl TerminalRenderer {
             &mut self.font_db,
             &Query {
                 families: &[Family::Name(font_family)],
-                weight: Weight::SEMIBOLD,
+                weight: Weight::BOLD,
+                stretch: Stretch::UltraExpanded,
                 ..Default::default()
             },
         )

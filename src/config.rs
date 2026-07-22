@@ -30,32 +30,53 @@ pub struct Config {
 impl FromLua for Config {
     fn from_lua(value: LuaValue, lua: &Lua) -> LuaResult<Self> {
         let table = value.as_table().context("failed to create table")?;
-
-        let sessions = table.get::<Vec<LuaValue>>("ssh_sessions")?;
-        let sessions = sessions
-            .into_iter()
-            .map(|session| -> Result<SshConnection> {
-                let table = session
-                    .as_table()
-                    .context("ssh_session entry is not a table")?;
-                Ok(SshConnection {
-                    name: table.get("name").and_then(|v| Self::from_value(v, lua))?,
-                    user_name: table.get("user_name").and_then(|v| Self::from_value(v, lua))?,
-                    ip: table
-                        .get::<LuaValue>("ip")
-                        .and_then(|v| Self::from_value(v, lua))
-                        .map(|ip: String| IpAddr::from_str(&ip))??,
-                })
+        let sessions = table
+            .get::<Vec<LuaValue>>("ssh_sessions")
+            .and_then(|sessions| {
+                sessions
+                    .into_iter()
+                    .map(|session| -> LuaResult<SshConnection> {
+                        let table = session
+                            .as_table()
+                            .context("ssh_session entry is not a table")?;
+                        Ok(SshConnection {
+                            name: table.get("name").and_then(|v| Self::from_value(v, lua))?,
+                            user_name: table
+                                .get("user_name")
+                                .and_then(|v| Self::from_value(v, lua))?,
+                            ip: table
+                                .get::<LuaValue>("ip")
+                                .and_then(|v| Self::from_value(v, lua))
+                                .map(|ip: String| IpAddr::from_str(&ip))??,
+                        })
+                    })
+                    .collect::<LuaResult<Vec<_>>>()
             })
-            .collect::<Result<Vec<_>>>()?;
+            .unwrap_or_default();
+
         Ok(Self {
-            font_family: table.get("font_family").and_then(|v| Self::from_value(v, lua))?,
-            font_size: table.get("font_size").and_then(|v| Self::from_value(v, lua)).unwrap_or(24.0),
-            line_height: table.get("line_height").and_then(|v| Self::from_value(v, lua)).unwrap_or(28.0 / 24.0),
-            fullscreen: table.get("fullscreen").and_then(|v| Self::from_value(v, lua))?,
-            default_cwd: table.get("default_cwd").and_then(|v| Self::from_value(v, lua))?,
+            font_family: table
+                .get("font_family")
+                .and_then(|v| Self::from_value(v, lua))?,
+            font_size: table
+                .get("font_size")
+                .and_then(|v| Self::from_value(v, lua))
+                .unwrap_or(24.0),
+            line_height: table
+                .get("line_height")
+                .and_then(|v| Self::from_value(v, lua))
+                .unwrap_or(28.0 / 24.0),
+            fullscreen: table
+                .get("fullscreen")
+                .and_then(|v| Self::from_value(v, lua))?,
+            default_cwd: table
+                .get("default_cwd")
+                .and_then(|v| Self::from_value(v, lua))?,
             ssh_sessions: sessions,
-            _open_palette: table.get("open_palette").and_then(|v| Self::from_value(v, lua)).unwrap_or(KeyBinding::OPEN_PALETTE),
+            _open_palette: table
+                .get("open_palette")
+                .and_then(|v| Self::from_value(v, lua))
+                .unwrap_or(KeyBinding::OPEN_PALETTE),
         })
     }
 }
@@ -166,8 +187,10 @@ pub struct KeyBinding {
 
 impl KeyBinding {
     //keybinding!(OPEN_PALETTE, "<ctrl+shift>-F");
-    const OPEN_PALETTE: Self =  Self::new_const(
-        ModifiersState::from_bits_retain(ModifiersState::CONTROL.bits() | ModifiersState::SHIFT.bits()),
+    const OPEN_PALETTE: Self = Self::new_const(
+        ModifiersState::from_bits_retain(
+            ModifiersState::CONTROL.bits() | ModifiersState::SHIFT.bits(),
+        ),
         KeyCode::KeyF,
     );
 }
