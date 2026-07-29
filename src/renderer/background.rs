@@ -12,7 +12,9 @@ use wgpu::{
 const SHADER_SRC: &str = r"
 struct VertexInput {
     @location(0) pos: vec2<f32>,
-    @location(1) color: vec4<u32>,
+    @location(1) origin: vec2<f32>,
+    @location(2) size: vec2<f32>,
+    @location(3) color: vec4<u32>,
 };
 
 struct VertexOutput {
@@ -23,7 +25,7 @@ struct VertexOutput {
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.position = vec4<f32>(in.pos, 0.0, 1.0);
+    out.position = vec4<f32>(in.origin + in.pos * in.size, 0.0, 1.0);
     out.color = in.color;
     return out;
 }
@@ -51,10 +53,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 ";
 
+const QUAD_VERTS: &[f32; 8] = &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+const QUAD_INDICES: &[u16; 6] = &[0, 1, 2, 1, 2, 3];
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Vertex {
-    pos: [f32; 2],
+struct Instance {
+    origin: [f32; 2],
+    size: [f32; 2],
     color: [u8; 4],
 }
 
@@ -63,8 +69,8 @@ pub struct BackgroundRenderer {
     pipeline: RenderPipeline,
     vertex_buffer: Buffer,
     index_buffer: Buffer,
-    vertices: Vec<Vertex>,
-    indices: Vec<u16>,
+    instance_buffer: Buffer,
+    instances: Vec<Instance>,
 }
 
 impl BackgroundRenderer {
@@ -80,6 +86,28 @@ impl BackgroundRenderer {
             bind_group_layouts: &[],
             immediate_size: 0,
         });
+
+        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("background quad vertices"),
+            size: mem::size_of_val(QUAD_VERTS) as u64,
+            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("background quad indices"),
+            size: mem::size_of_val(QUAD_INDICES) as u64,
+            usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("background instances"),
+            size: Self::DEFAULT_BUFFER_SIZE,
+            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("selection pipeline"),
             layout: Some(&pipeline_layout),
@@ -87,22 +115,38 @@ impl BackgroundRenderer {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: PipelineCompilationOptions::default(),
-                buffers: &[VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as BufferAddress,
-                    step_mode: VertexStepMode::Vertex,
-                    attributes: &[
-                        VertexAttribute {
+                buffers: &[
+                    VertexBufferLayout {
+                        array_stride: mem::size_of::<[f32; 2]>() as BufferAddress,
+                        step_mode: VertexStepMode::Vertex,
+                        attributes: &[VertexAttribute {
                             format: VertexFormat::Float32x2,
                             offset: 0,
                             shader_location: 0,
-                        },
-                        VertexAttribute {
-                            format: VertexFormat::Uint8x4,
-                            offset: std::mem::size_of::<[f32; 2]>() as BufferAddress,
-                            shader_location: 1,
-                        },
-                    ],
-                }],
+                        }],
+                    },
+                    VertexBufferLayout {
+                        array_stride: mem::size_of::<Instance>() as BufferAddress,
+                        step_mode: VertexStepMode::Instance,
+                        attributes: &[
+                            VertexAttribute {
+                                format: VertexFormat::Float32x2,
+                                offset: 0,
+                                shader_location: 1,
+                            },
+                            VertexAttribute {
+                                format: VertexFormat::Float32x2,
+                                offset: mem::size_of::<[f32; 2]>() as BufferAddress,
+                                shader_location: 2,
+                            },
+                            VertexAttribute {
+                                format: VertexFormat::Uint8x4,
+                                offset: mem::size_of::<[f32; 4]>() as BufferAddress,
+                                shader_location: 3,
+                            },
+                        ],
+                    },
+                ],
             },
             primitive: PrimitiveState::default(),
             depth_stencil: None,
@@ -121,85 +165,55 @@ impl BackgroundRenderer {
             cache: None,
         });
 
-        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("background vertices"),
-            size: Self::DEFAULT_BUFFER_SIZE,
-            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("background indices"),
-            size: Self::DEFAULT_BUFFER_SIZE,
-            usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         Self {
             _shader: shader,
             pipeline,
             vertex_buffer,
             index_buffer,
-            vertices: Vec::new(),
-            indices: Vec::new(),
+            instance_buffer,
+            instances: Vec::new(),
         }
     }
 
     fn maybe_grow_buffer(&mut self, device: &Device) {
-        if self.vertices.len() * mem::size_of::<Vertex>() >= self.vertex_buffer.size() as usize {
-            self.vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("background vertices"),
-                size: (self.vertices.len() * mem::size_of::<Vertex>()) as u64,
+        let needed = (self.instances.len() * mem::size_of::<Instance>()) as u64;
+        if needed >= self.instance_buffer.size() {
+            self.instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("background instances"),
+                size: needed.max(Self::DEFAULT_BUFFER_SIZE),
                 usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
-        let index_size = self.indices.len() * mem::size_of::<u16>();
-        if index_size >= self.index_buffer.size() as usize {
-            self.index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("background indices"),
-                size: index_size as u64,
-                usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
         }
     }
 
     pub fn render(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass) {
+        if self.instances.is_empty() {
+            return;
+        }
+
         self.maybe_grow_buffer(device);
-        queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
-        queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(&self.indices));
+        queue.write_buffer(
+            &self.instance_buffer,
+            0,
+            bytemuck::cast_slice(&self.instances),
+        );
+        queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(QUAD_VERTS));
+        queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(QUAD_INDICES));
 
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
         pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
-        pass.draw_indexed(0..self.indices.len() as u32, 0, 0..1);
-        self.vertices.clear();
-        self.indices.clear();
+        pass.draw_indexed(0..6, 0, 0..self.instances.len() as u32);
+        self.instances.clear();
     }
 
     pub fn add_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [u8; 4]) {
-        let idx = self.vertices.len() as u16;
-        self.vertices.push(Vertex { pos: [x, y], color });
-        self.vertices.push(Vertex {
-            pos: [x + w, y],
+        self.instances.push(Instance {
+            origin: [x, y],
+            size: [w, h],
             color,
         });
-        self.vertices.push(Vertex {
-            pos: [x, y + h],
-            color,
-        });
-        self.vertices.push(Vertex {
-            pos: [x + w, y + h],
-            color,
-        });
-        self.indices.extend_from_slice(&[
-            idx,
-            idx + 1,
-            idx + 2,
-            idx + 1,
-            idx + 2,
-            idx + 3,
-        ]);
     }
 }

@@ -149,8 +149,8 @@ fn main() -> Result<()> {
         .context("failed to create event loop")?;
     let proxy = event_loop.create_proxy();
 
+    Config::watch(proxy.clone());
     let config = if let Ok(dir) = Config::load() {
-        Config::watch(proxy.clone());
         dir
     } else {
         tracing::warn!("failed to load config");
@@ -364,7 +364,7 @@ impl ApplicationHandler<PtyEvent> for App {
     ) {
         match event {
             WindowEvent::RedrawRequested => {
-                //let start = std::time::Instant::now();
+                let start = std::time::Instant::now();
                 let panes = self.tab_layouts();
                 let active = self.active_session();
                 let dividers = self.tab_dividers();
@@ -400,7 +400,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     self.local_executer.try_tick();
                     self.request_redraw();
                 }
-                //println!("render = {:?}", start.elapsed());
+                println!("render = {:?}", start.elapsed());
             }
             WindowEvent::Resized(size) => {
                 if size.width == 0 || size.height == 0 {

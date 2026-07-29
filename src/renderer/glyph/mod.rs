@@ -23,29 +23,20 @@ use wgpu::{
     ShaderModuleDescriptor, ShaderSource, ShaderStages, TexelCopyBufferLayout,
     TexelCopyTextureInfo, Texture, TextureAspect, TextureDescriptor, TextureDimension,
     TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor, TextureViewDimension,
-    VertexAttribute, VertexBufferLayout, VertexState, VertexStepMode,
+    VertexAttribute, VertexBufferLayout, VertexFormat, VertexState, VertexStepMode,
 };
 
 use crate::renderer::Color;
 
-pub trait VertexData: Sized {
-    const VERTEX_ATTRIBUTES: &[VertexAttribute];
-
-    fn descriptor() -> VertexBufferLayout<'static> {
-        VertexBufferLayout {
-            array_stride: std::mem::size_of::<Self>() as BufferAddress,
-            step_mode: VertexStepMode::Vertex,
-            attributes: Self::VERTEX_ATTRIBUTES,
-        }
-    }
-}
-
 const SHADER_SRC: &str = r"
 struct VertexInput {
     @location(0) pos: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) color: vec4<u32>,
-    @location(3) variant: u32,
+    @location(1) origin: vec2<f32>,
+    @location(2) size: vec2<f32>,
+    @location(3) uv_min: vec2<f32>,
+    @location(4) uv_max: vec2<f32>,
+    @location(5) color: vec4<u32>,
+    @location(6) variant: u32,
 };
 
 struct VertexOutput {
@@ -84,8 +75,8 @@ fn to_linear(srgba: vec4<u32>) -> vec4<f32> {
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.position = vec4<f32>(in.pos, 0.0, 1.0);
-    out.uv = in.uv;
+    out.position = vec4<f32>(in.origin + in.pos * in.size, 0.0, 1.0);
+    out.uv = mix(in.uv_min, in.uv_max, in.pos);
     out.color = in.color;
     out.variant = in.variant;
     return out;
@@ -113,18 +104,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 const GLYPH_VARIANT_GLYPH: u32 = 0;
 const GLYPH_VARIANT_IMAGE: u32 = 1;
 
+const QUAD_VERTS: &[f32; 8] = &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+const QUAD_INDICES: &[u16; 6] = &[0, 1, 2, 1, 2, 3];
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Vertex {
-    pos: [f32; 2],
-    uv: [f32; 2],
+struct Instance {
+    origin: [f32; 2],
+    size: [f32; 2],
+    uv_min: [f32; 2],
+    uv_max: [f32; 2],
     color: [u8; 4],
     variant: u32,
-}
-
-impl VertexData for Vertex {
-    const VERTEX_ATTRIBUTES: &[VertexAttribute] =
-        &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Uint8x4, 3 => Uint32];
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -186,8 +177,8 @@ pub struct TerminalRenderer {
     pipeline: RenderPipeline,
     vertex_buffer: Buffer,
     index_buffer: Buffer,
-    vertices: Vec<Vertex>,
-    indices: Vec<u16>,
+    instance_buffer: Buffer,
+    instances: Vec<Instance>,
     glyph_atlas_texture: Texture,
     image_atlas_texture: Texture,
 
@@ -542,6 +533,28 @@ impl TerminalRenderer {
             bind_group_layouts: &[Some(&uniform_bind_group_layout)],
             immediate_size: 0,
         });
+
+        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glyph quad vertices"),
+            size: mem::size_of_val(QUAD_VERTS) as u64,
+            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glyph quad indices"),
+            size: mem::size_of_val(QUAD_INDICES) as u64,
+            usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glyph instances"),
+            size: Self::DEFAULT_BUFFER_SIZE,
+            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("selection pipeline"),
             layout: Some(&pipeline_layout),
@@ -549,7 +562,54 @@ impl TerminalRenderer {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: PipelineCompilationOptions::default(),
-                buffers: &[Vertex::descriptor()],
+                buffers: &[
+                    VertexBufferLayout {
+                        array_stride: mem::size_of::<[f32; 2]>() as BufferAddress,
+                        step_mode: VertexStepMode::Vertex,
+                        attributes: &[VertexAttribute {
+                            format: VertexFormat::Float32x2,
+                            offset: 0,
+                            shader_location: 0,
+                        }],
+                    },
+                    VertexBufferLayout {
+                        array_stride: mem::size_of::<Instance>() as BufferAddress,
+                        step_mode: VertexStepMode::Instance,
+                        attributes: &[
+                            VertexAttribute {
+                                format: VertexFormat::Float32x2,
+                                offset: 0,
+                                shader_location: 1,
+                            },
+                            VertexAttribute {
+                                format: VertexFormat::Float32x2,
+                                offset: mem::size_of::<[f32; 2]>() as BufferAddress,
+                                shader_location: 2,
+                            },
+                            VertexAttribute {
+                                format: VertexFormat::Float32x2,
+                                offset: mem::size_of::<[f32; 4]>() as BufferAddress,
+                                shader_location: 3,
+                            },
+                            VertexAttribute {
+                                format: VertexFormat::Float32x2,
+                                offset: mem::size_of::<[f32; 6]>() as BufferAddress,
+                                shader_location: 4,
+                            },
+                            VertexAttribute {
+                                format: VertexFormat::Uint8x4,
+                                offset: mem::size_of::<[f32; 8]>() as BufferAddress,
+                                shader_location: 5,
+                            },
+                            VertexAttribute {
+                                format: VertexFormat::Uint32,
+                                offset: mem::size_of::<[f32; 8]>() as BufferAddress
+                                    + mem::size_of::<[u8; 4]>() as BufferAddress,
+                                shader_location: 6,
+                            },
+                        ],
+                    },
+                ],
             },
             primitive: PrimitiveState::default(),
             depth_stencil: None,
@@ -566,20 +626,6 @@ impl TerminalRenderer {
             }),
             multiview_mask: None,
             cache: None,
-        });
-
-        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("glyph vertices"),
-            size: Self::DEFAULT_BUFFER_SIZE,
-            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("glyph indices"),
-            size: Self::DEFAULT_BUFFER_SIZE,
-            usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
 
         let mut font_db = Database::new();
@@ -627,8 +673,8 @@ impl TerminalRenderer {
             pipeline,
             vertex_buffer,
             index_buffer,
-            vertices: Vec::new(),
-            indices: Vec::new(),
+            instance_buffer,
+            instances: Vec::new(),
             uniform_bind_group,
             glyph_atlas_texture: glyph_texture,
             image_atlas_texture: image_texture,
@@ -736,40 +782,37 @@ impl TerminalRenderer {
     }
 
     fn finalize(&mut self, device: &Device, queue: &Queue) {
-        self.maybe_grow_buffer(device);
-        queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
-        queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(&self.indices));
-    }
-
-    fn maybe_grow_buffer(&mut self, device: &Device) {
-        if self.vertices.len() * mem::size_of::<Vertex>() >= self.vertex_buffer.size() as usize {
-            self.vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("glyph vertices"),
-                size: (self.vertices.len() * mem::size_of::<Vertex>()) as u64,
+        let needed = (self.instances.len() * mem::size_of::<Instance>()) as u64;
+        if needed >= self.instance_buffer.size() {
+            self.instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("glyph instances"),
+                size: needed.max(Self::DEFAULT_BUFFER_SIZE),
                 usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
         }
-        let index_size = self.indices.len() * mem::size_of::<u16>();
-        if index_size >= self.index_buffer.size() as usize {
-            self.index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("glyph indices"),
-                size: index_size as u64,
-                usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
+        queue.write_buffer(
+            &self.instance_buffer,
+            0,
+            bytemuck::cast_slice(&self.instances),
+        );
+        queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(QUAD_VERTS));
+        queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(QUAD_INDICES));
     }
 
     pub fn render(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass) {
+        if self.instances.is_empty() {
+            return;
+        }
+
         self.finalize(device, queue);
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
         pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
-        pass.draw_indexed(0..self.indices.len() as u32, 0, 0..1);
-        self.vertices.clear();
-        self.indices.clear();
+        pass.draw_indexed(0..6, 0, 0..self.instances.len() as u32);
+        self.instances.clear();
     }
 
     pub fn add_glyph(
@@ -781,7 +824,7 @@ impl TerminalRenderer {
         color: Color,
         bold: bool,
     ) {
-        let color = color.inner(); //.to_linear();
+        let color = color.inner();
 
         let variant = if bold {
             FontVariant::Bold
@@ -811,38 +854,17 @@ impl TerminalRenderer {
             ]
         };
 
-        let tl = to_ndc(x0, y0);
-        let tr = to_ndc(x1, y0);
-        let bl = to_ndc(x0, y1);
+        let origin = to_ndc(x0, y0);
         let br = to_ndc(x1, y1);
 
-        let idx = self.vertices.len() as u16;
-        self.vertices.push(Vertex {
-            pos: tl,
-            uv: [glyph.uv_min[0], glyph.uv_min[1]],
+        self.instances.push(Instance {
+            origin,
+            size: [br[0] - origin[0], br[1] - origin[1]],
+            uv_min: glyph.uv_min,
+            uv_max: glyph.uv_max,
             color,
             variant,
         });
-        self.vertices.push(Vertex {
-            pos: tr,
-            uv: [glyph.uv_max[0], glyph.uv_min[1]],
-            color,
-            variant,
-        });
-        self.vertices.push(Vertex {
-            pos: bl,
-            uv: [glyph.uv_min[0], glyph.uv_max[1]],
-            color,
-            variant,
-        });
-        self.vertices.push(Vertex {
-            pos: br,
-            uv: [glyph.uv_max[0], glyph.uv_max[1]],
-            color,
-            variant,
-        });
-        self.indices
-            .extend_from_slice(&[idx, idx + 1, idx + 2, idx + 1, idx + 2, idx + 3]);
     }
 
     fn add_glyph_id(
@@ -854,7 +876,7 @@ impl TerminalRenderer {
         variant: FontVariant,
         color: Color,
     ) {
-        let color = color.inner(); //.to_linear();
+        let color = color.inner();
 
         let Some(glyph) = self.get_or_create_glyph_id(queue, variant, glyph) else {
             return;
@@ -879,38 +901,17 @@ impl TerminalRenderer {
             ]
         };
 
-        let tl = to_ndc(x0, y0);
-        let tr = to_ndc(x1, y0);
-        let bl = to_ndc(x0, y1);
+        let origin = to_ndc(x0, y0);
         let br = to_ndc(x1, y1);
 
-        let idx = self.vertices.len() as u16;
-        self.vertices.push(Vertex {
-            pos: tl,
-            uv: [glyph.uv_min[0], glyph.uv_min[1]],
+        self.instances.push(Instance {
+            origin,
+            size: [br[0] - origin[0], br[1] - origin[1]],
+            uv_min: glyph.uv_min,
+            uv_max: glyph.uv_max,
             color,
             variant,
         });
-        self.vertices.push(Vertex {
-            pos: tr,
-            uv: [glyph.uv_max[0], glyph.uv_min[1]],
-            color,
-            variant,
-        });
-        self.vertices.push(Vertex {
-            pos: bl,
-            uv: [glyph.uv_min[0], glyph.uv_max[1]],
-            color,
-            variant,
-        });
-        self.vertices.push(Vertex {
-            pos: br,
-            uv: [glyph.uv_max[0], glyph.uv_max[1]],
-            color,
-            variant,
-        });
-        self.indices
-            .extend_from_slice(&[idx, idx + 1, idx + 2, idx + 1, idx + 2, idx + 3]);
     }
 
     pub fn add_cluster(
