@@ -149,8 +149,8 @@ fn main() -> Result<()> {
         .context("failed to create event loop")?;
     let proxy = event_loop.create_proxy();
 
+    Config::watch(proxy.clone());
     let config = if let Ok(dir) = Config::load() {
-        Config::watch(proxy.clone());
         dir
     } else {
         tracing::warn!("failed to load config");
