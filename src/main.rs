@@ -115,6 +115,7 @@ struct App {
     pub local_executer: LocalExecutor,
 
     overlay: Option<Overlay>,
+    render_times: Vec<f32>,
 }
 
 #[derive(Clone, Copy)]
@@ -163,6 +164,8 @@ fn main() -> Result<()> {
     event_loop.run_app(&mut app).map_err(|error| {
         error!(%error, "event loop failed");
         error.into()
+    }).inspect(|_| {
+        println!("avg-render = {}", app.render_times.iter().cloned().sum::<f32>() / app.render_times.len() as f32);
     })
 }
 
@@ -209,6 +212,7 @@ impl App {
             local_executer: LocalExecutor::new(),
 
             overlay: None,
+            render_times: vec![],
         }
     }
 
@@ -400,7 +404,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     self.local_executer.try_tick();
                     self.request_redraw();
                 }
-                println!("render = {:?}", start.elapsed());
+                self.render_times.push(start.elapsed().as_secs_f32());
             }
             WindowEvent::Resized(size) => {
                 if size.width == 0 || size.height == 0 {

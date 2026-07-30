@@ -90,16 +90,20 @@ impl BackgroundRenderer {
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("background quad vertices"),
             size: mem::size_of_val(QUAD_VERTS) as u64,
-            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+            usage: BufferUsages::VERTEX,
+            mapped_at_creation: true,
         });
+        vertex_buffer.slice(..).get_mapped_range_mut().copy_from_slice(bytemuck::cast_slice(QUAD_VERTS));
+        vertex_buffer.unmap();
 
         let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("background quad indices"),
             size: mem::size_of_val(QUAD_INDICES) as u64,
-            usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+            usage: BufferUsages::INDEX,
+            mapped_at_creation: true,
         });
+        index_buffer.slice(..).get_mapped_range_mut().copy_from_slice(bytemuck::cast_slice(QUAD_INDICES));
+        index_buffer.unmap();
 
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("background instances"),
@@ -198,8 +202,6 @@ impl BackgroundRenderer {
             0,
             bytemuck::cast_slice(&self.instances),
         );
-        queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(QUAD_VERTS));
-        queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(QUAD_INDICES));
 
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));

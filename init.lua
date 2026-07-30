@@ -15,4 +15,7 @@
 ---@field ssh_sessions ?SshSession[],
 
 ---@type Config
-return {};
+return {
+    font_family = "Iosevka",
+    font_size = 32,
+};

@@ -319,16 +319,21 @@ impl Renderer {
             CurrentSurfaceTexture::Validation => anyhow::bail!("surface out of memory"),
         };
 
-        let [w, h] = [
-            self.font_size / size.width as f32,
-            (self.line_height * 2.0) / size.height as f32,
-        ];
+        let ndc_scale_x = 2.0 / size.width as f32;
+        let ndc_scale_y = 2.0 / size.height as f32;
+        let clear_color = [0x18, 0x18, 0x18, 0xFF];
+        let bg_w = self.font_size * ndc_scale_x;
+        let bg_h = self.line_height * 2.0 * ndc_scale_y;
         for pane in panes {
             if pane.geometry.cols == 0 || pane.geometry.rows == 0 {
                 continue;
             }
             let (rows, cols) = pane.screen.size();
+            let pane_x = self.font_size / 2.0 * f32::from(pane.geometry.x);
+            let pane_y = self.line_height * (f32::from(pane.geometry.y) + 1.0);
             for row in 0..rows {
+                let cell_y = pane_y + self.line_height * f32::from(row);
+                let ndc_y = 1.0 - cell_y * ndc_scale_y;
                 for col in 0..cols {
                     let Some(cell) = pane.screen.cell(row, col) else {
                         continue;
@@ -338,13 +343,14 @@ impl Renderer {
                         x => Color::from(x),
                     };
                     let bg_color = Color::from(cell.bgcolor());
-                    let x = self.font_size / 2.0 * (f32::from(pane.geometry.x) + f32::from(col));
-                    let y = self.line_height * (f32::from(pane.geometry.y) + f32::from(row) + 1.0);
+                    let cell_x = pane_x + self.font_size / 2.0 * f32::from(col);
                     {
-                        let [x, y] = self.ndc([x, y]);
-                        let bg_color = if cell.inverse() { fg_color } else { bg_color };
-                        self.background_renderer
-                            .add_rect(x, y, w, h, bg_color.inner());
+                        let bg_effective = if cell.inverse() { fg_color } else { bg_color };
+                        if cell.inverse() || bg_color.inner() != clear_color {
+                            let ndc_x = cell_x * ndc_scale_x - 1.0;
+                            self.background_renderer
+                                .add_rect(ndc_x, ndc_y, bg_w, bg_h, bg_effective.inner());
+                        }
                     }
                     let fg_color = if cell.inverse() { bg_color } else { fg_color };
                     let contents = cell.contents();
@@ -352,9 +358,12 @@ impl Renderer {
                     #[allow(clippy::if_not_else)]
                     if contents.is_ascii() {
                         for ch in contents.chars() {
+                            if ch == ' ' {
+                                continue;
+                            }
                             self.terminal_renderer.add_glyph(
                                 &self.queue,
-                                [x, y],
+                                [cell_x, cell_y],
                                 screen_size,
                                 ch,
                                 fg_color,
@@ -366,7 +375,7 @@ impl Renderer {
                             if cluster.len() != 1 {
                                 self.terminal_renderer.add_cluster(
                                     &self.queue,
-                                    [x, y],
+                                    [cell_x, cell_y],
                                     screen_size,
                                     cluster,
                                     fg_color,
@@ -374,9 +383,12 @@ impl Renderer {
                                 );
                             } else {
                                 for ch in cluster.chars() {
+                                    if ch == ' ' {
+                                        continue;
+                                    }
                                     self.terminal_renderer.add_glyph(
                                         &self.queue,
-                                        [x, y],
+                                        [cell_x, cell_y],
                                         screen_size,
                                         ch,
                                         fg_color,
