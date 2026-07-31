@@ -596,7 +596,7 @@ impl TerminalRenderer {
                 &Query {
                     families: &[Family::Name(font_family)],
                     weight: Weight::NORMAL,
-                    stretch: Stretch::UltraExpanded,
+                    stretch: Stretch::Expanded,
                     ..Default::default()
                 },
             )
@@ -608,7 +608,7 @@ impl TerminalRenderer {
                 &Query {
                     families: &[Family::Name(font_family)],
                     weight: Weight::BOLD,
-                    stretch: Stretch::UltraExpanded,
+                    stretch: Stretch::Expanded,
                     ..Default::default()
                 },
             )
@@ -672,7 +672,7 @@ impl TerminalRenderer {
             &Query {
                 families: &[Family::Name(font_family)],
                 weight: Weight::NORMAL,
-                stretch: Stretch::UltraExpanded,
+                stretch: Stretch::Expanded,
                 ..Default::default()
             },
         )
@@ -686,7 +686,7 @@ impl TerminalRenderer {
             &Query {
                 families: &[Family::Name(font_family)],
                 weight: Weight::BOLD,
-                stretch: Stretch::UltraExpanded,
+                stretch: Stretch::Expanded,
                 ..Default::default()
             },
         )
