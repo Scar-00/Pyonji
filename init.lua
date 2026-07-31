@@ -1,4 +1,6 @@
-py:bind("<ctrl + shift>-W", py:open_palette());
+py:bind("<ctrl + shift>-W", py.open_palette());
+
+--print(KeyBind('A', { "ctrl" }));
 
 py:config({
     font_family = "Iosevka",

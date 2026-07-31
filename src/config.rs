@@ -1,4 +1,4 @@
-use crate::overlay::Screen;
+use crate::overlay::{LuaAction, Screen};
 use crate::pty::SshConnection;
 use crate::{App, PtyEvent};
 use anyhow::{Context, Result};
@@ -16,6 +16,9 @@ use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{KeyCode, ModifiersState};
 
 const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
+pub const LUA_MODULES: &[&str] = &[
+    include_str!("../resources/lua/keybind.lua"),
+];
 
 macro_rules! apply {
     ($this: ident.$field: ident, $table: expr) => {
@@ -43,7 +46,7 @@ impl App {
             renderer.evict_glyphs();
         }
         if let Some(overlay) = self.overlay.as_mut() {
-            overlay.update_cmds(&self.ssh_sessions);
+            overlay.update_cmds(&self.ssh_sessions, &self.registered_callbacks);
         }
         self.rows = (size.height as f32 / self.line_height) as u16;
         self.cols = (size.width as f32 / (self.font_size / 2.0)) as u16;
@@ -62,6 +65,20 @@ impl LuaUserData for App {
                 Ok(())
             },
         );
+        methods.add_method_mut("register", |lua, this, (name, func): (String, LuaFunction)| {
+            let (args, is_var_arg) = lua.globals().get::<LuaFunction>("__HOST_INSPECT_FUNC").and_then(|f| {
+                f.call::<(LuaTable, bool)>(func.clone())
+            }).and_then(|(names, var_arg)| {
+                names.sequence_values::<String>().collect::<LuaResult<Vec<_>>>().map(|names| (names, var_arg))
+            })?;
+            this.registered_callbacks.push(LuaAction {
+               args,
+               is_var_arg,
+               name,
+               callback: func,
+            });
+            Ok(())
+        });
         methods.add_method_mut("config", |lua, this, table: LuaTable| {
             apply!(this.font_size, table, |font_size: f32| {
                 this.line_height = font_size * 1.1;
@@ -93,6 +110,12 @@ impl LuaUserData for App {
                     }
                 })
             })
+        });
+    }
+
+    fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("current_tab", |_, this| {
+            Ok(this.current_tab)
         });
     }
 }
@@ -135,6 +158,7 @@ pub fn load(this: &mut App) {
 
     this.ssh_sessions.clear();
     this.key_bindings.clear();
+    this.registered_callbacks.clear();
     let lua = this.lua.clone();
     _ = with_env(this, |_| {
         let chunk = lua.load(path);
@@ -151,6 +175,16 @@ pub fn with_env<R>(this: &mut App, f: impl FnOnce(LuaAnyUserData) -> LuaResult<R
         lua.globals().remove("py")?;
         ret
     })?;
+    Ok(())
+}
+
+pub fn install_inspect(lua: &Lua) -> Result<()> {
+    lua.load_std_libs(mlua::StdLib::DEBUG)?;
+    {
+        let chunk = lua.load(include_str!("../resources/lua/inspect.lua"));
+        lua.globals()
+            .set("__HOST_INSPECT_FUNC", chunk.call::<LuaFunction>(())?)?;
+    }
     Ok(())
 }
 

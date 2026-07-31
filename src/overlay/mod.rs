@@ -207,6 +207,7 @@ impl Overlay {
         let terminal = Terminal::new(VtBackend::new(rows, cols))?;
         let mut commands = Self::builtin_commands();
         commands.extend(Self::commands_from_ssh_sessions(&app.ssh_sessions));
+        commands.extend(Self::commands_from_lua_actions(&app.registered_callbacks));
 
         Ok(Self {
             terminal,
@@ -254,9 +255,10 @@ impl Overlay {
         self.shown
     }
 
-    pub fn update_cmds(&mut self, sessions: &[SshConnection]) {
+    pub fn update_cmds(&mut self, sessions: &[SshConnection], actions: &[LuaAction]) {
         let mut commands = Self::builtin_commands();
         commands.extend(Self::commands_from_ssh_sessions(sessions));
+        commands.extend(Self::commands_from_lua_actions(actions));
         self.cmd_palette_state.update(commands);
     }
 
@@ -271,7 +273,10 @@ impl Overlay {
                 app.switch_tab(app.previous_tab_index());
                 app.request_redraw();
             }),
-            Cmd::new("switch", [Arg::new("tab")], |_, app, [tab]| {
+            Cmd::new("switch", [Arg::new("tab")], |_, app, args| {
+                let Some(tab) = args.first() else {
+                    return;
+                };
                 let Ok(tab) = tab.parse::<usize>() else {
                     return;
                 };
@@ -291,8 +296,15 @@ impl Overlay {
                 this.toggle();
                 app.request_redraw();
             }),
-            Cmd::new("ssh", [Arg::new("session")], |_, app, [session]| {
-                let Some(connection) = app.ssh_sessions.iter().find(|s| s.name == session).cloned()
+            Cmd::new("ssh", [Arg::new("session")], |_, app, args| {
+                let Some(session) = args.first() else {
+                    return;
+                };
+                let Some(connection) = app
+                    .ssh_sessions
+                    .iter()
+                    .find(|s| s.name == *session)
+                    .cloned()
                 else {
                     return;
                 };
@@ -316,6 +328,32 @@ impl Overlay {
                 let session = session.clone();
                 Cmd::new(format!("ssh: {}", session.name), [], move |_, app, _| {
                     app.create_remote_session(&session);
+                })
+            })
+            .collect()
+    }
+
+    fn commands_from_lua_actions(actions: &[LuaAction]) -> Vec<Cmd> {
+        use mlua::prelude::*;
+        actions
+            .iter()
+            .map(|action| {
+                let args = action
+                    .args
+                    .iter()
+                    .map(|name| Arg::new(name))
+                    .collect::<Vec<_>>();
+                let func = action.callback.clone();
+                Cmd::new(action.name.clone(), args, move |_, app, args| {
+                    let Ok(args) = args
+                        .iter()
+                        .cloned()
+                        .map(|arg| arg.into_lua(&app.lua))
+                        .collect::<LuaResult<Vec<_>>>()
+                    else {
+                        return;
+                    };
+                    _ = func.call::<LuaValue>(LuaMultiValue::from_vec(args));
                 })
             })
             .collect()
@@ -713,4 +751,11 @@ fn write_command_ansi<W: std::io::Write, C: Command>(io: &mut W, command: C) -> 
             Err(e) => e,
         })
         .map(|()| adapter.inner)
+}
+
+pub struct LuaAction {
+    pub args: Vec<String>,
+    pub is_var_arg: bool,
+    pub name: String,
+    pub callback: mlua::Function,
 }

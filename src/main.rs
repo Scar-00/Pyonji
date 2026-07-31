@@ -19,7 +19,7 @@ mod pty;
 mod renderer;
 mod terminal;
 
-use mlua::{prelude::LuaFunction, Lua};
+use mlua::{prelude::LuaFunction, Lua, LuaOptions, StdLib};
 use smol::Task;
 #[cfg(not(feature = "install"))]
 use tracing_subscriber::prelude::*;
@@ -45,7 +45,7 @@ use winit::{
 
 use crate::{
     config::KeyBinding,
-    overlay::{Overlay, Screen},
+    overlay::{LuaAction, Overlay, Screen},
     pty::SshConnection,
     terminal::{
         Divider, PaneGeometry, PanePathStep, SessionId, SessionManager, SplitDirection, Tab,
@@ -123,6 +123,7 @@ struct App {
 
     //leader: KeyBinding,
     key_bindings: Vec<(KeyBinding, LuaFunction)>,
+    registered_callbacks: Vec<LuaAction>,
     fullscreen: bool,
     default_cwd: Option<PathBuf>,
 
@@ -163,7 +164,11 @@ fn main() -> Result<()> {
 
     config::watch(proxy.clone());
 
-    let lua = Lua::new();
+    let lua = unsafe { Lua::unsafe_new_with(StdLib::ALL_SAFE, LuaOptions::new()) };
+    config::install_inspect(&lua)?;
+    for module in config::LUA_MODULES {
+        lua.load(*module).exec()?;
+    }
     let mut app = App::new(cli, lua.clone(), proxy);
 
     config::load(&mut app);
@@ -218,6 +223,7 @@ impl App {
             overlay: None,
 
             key_bindings: vec![],
+            registered_callbacks: vec![],
             fullscreen: false,
             default_cwd: None,
 

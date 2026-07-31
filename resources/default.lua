@@ -1,3 +1,5 @@
+require('lua.keybind');
+
 ---@class SshSession
 ---@field name string
 ---@field user_name string
@@ -15,7 +17,9 @@
 ---@field ssh_sessions ?SshSession[],
 
 ---@class Pyonji
+---@field current_tab integer
 ---@field bind fun(self: Pyonji, binding: string, action: function)
+---@field register fun(self: Pyonji, name: string, action: function)
 ---@field config fun(self: Pyonji, config: Config)
 ---@field open_palette fun(self: Pyonji?): function
-py = {}
+py = {};

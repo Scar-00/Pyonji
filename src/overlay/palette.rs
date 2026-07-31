@@ -158,12 +158,14 @@ impl StatefulWidget for CmdPalleteView {
 
 #[derive(Clone)]
 pub struct Arg {
-    placeholder: &'static str,
+    placeholder: String,
 }
 
 impl Arg {
-    pub fn new(n: &'static str) -> Self {
-        Self { placeholder: n }
+    pub fn new(n: impl ToString) -> Self {
+        Self {
+            placeholder: n.to_string(),
+        }
     }
 }
 
@@ -175,19 +177,16 @@ pub struct Cmd {
 }
 
 impl Cmd {
-    pub fn new<const N: usize>(
+    pub fn new(
         name: impl ToString,
-        args: [Arg; N],
-        f: impl 'static + Fn(&mut Overlay, &mut App, [String; N]),
+        args: impl IntoIterator<Item = Arg>,
+        f: impl 'static + Fn(&mut Overlay, &mut App, &[String]),
     ) -> Self {
         Self {
             name: name.to_string(),
             args: args.into_iter().collect(),
             action: Rc::new(move |overlay, app, args| {
-                let Ok(args) = args.try_into() else {
-                    return;
-                };
-                f(overlay, app, args);
+                f(overlay, app, &args);
             }),
         }
     }
