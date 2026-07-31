@@ -31,7 +31,6 @@ use renderer::{ImePreedit, Pane, Renderer, StatusTab};
 use std::{
     array,
     path::{Path, PathBuf},
-    process::abort,
     sync::Arc,
 };
 use tracing::error;
@@ -122,7 +121,10 @@ struct App {
 
     overlay: Option<Overlay>,
 
+    //leader: KeyBinding,
     key_bindings: Vec<(KeyBinding, LuaFunction)>,
+    fullscreen: bool,
+    default_cwd: Option<PathBuf>,
 
     lua: Lua,
 }
@@ -159,22 +161,12 @@ fn main() -> Result<()> {
         .context("failed to create event loop")?;
     let proxy = event_loop.create_proxy();
 
-    /*Config::watch(proxy.clone());
-    let config = if let Ok(dir) = Config::load() {
-        dir
-    } else {
-        tracing::warn!("failed to load config");
-        Config::new()
-    };*/
+    config::watch(proxy.clone());
 
     let lua = Lua::new();
     let mut app = App::new(cli, lua.clone(), proxy);
 
-    config::with_env(&mut app, |_| {
-        let chunk = lua.load(PathBuf::from("init.lua"));
-        chunk.exec()?;
-        Ok(())
-    })?;
+    config::load(&mut app);
 
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut app).map_err(|error| {
@@ -226,36 +218,12 @@ impl App {
             overlay: None,
 
             key_bindings: vec![],
+            fullscreen: false,
+            default_cwd: None,
 
             lua,
         }
     }
-
-    /*pub fn apply_config(&mut self, config: Config) {
-        self.config = config;
-        let (font_size, line_height) = self.config.font_metrics();
-        self.font_size = font_size as f32;
-        self.line_height = (font_size * line_height) as f32;
-        self.ssh_sessions = self.config.ssh_sessions();
-        let Some(size) = self.window.as_ref().map(|window| window.inner_size()) else {
-            return;
-        };
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_font_metrics(self.font_size, self.line_height);
-            if let Some(font_family) = self.config.font_family() {
-                renderer.set_font_family(font_family);
-            }
-            renderer.evict_glyphs();
-        }
-        if let Some(overlay) = self.overlay.as_mut() {
-            overlay.update_cmds(&self.ssh_sessions);
-        }
-        self.rows = (size.height as f32 / self.line_height) as u16;
-        self.cols = (size.width as f32 / (self.font_size / 2.0)) as u16;
-        self.resize_tab();
-
-        self.request_redraw();
-    }*/
 
     fn ui(&mut self) {
         let Some(mut overlay) = self.overlay.take() else {
@@ -279,7 +247,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 .with_inner_size(PhysicalSize::new(1280, 720))
                 .with_active(true)
                 .with_window_icon(icon)
-                //.with_maximized(self.config.fullscreen())
+                .with_maximized(self.fullscreen)
                 .with_title(Self::TITLE),
         ) else {
             event_loop.exit();
@@ -310,7 +278,7 @@ impl ApplicationHandler<PtyEvent> for App {
         match self.session_manager.create_session(
             self.terminal_rows().max(1),
             self.cols.max(1),
-            self.args.path.clone().or(None).as_deref(),
+            self.args.path.as_deref().or(self.default_cwd.as_deref()),
         ) {
             Ok(session) => {
                 self.tabs[0] = Some(Tab::new(session));
@@ -364,9 +332,10 @@ impl ApplicationHandler<PtyEvent> for App {
                     return;
                 };
                 session.set_title(title);
-            } /*PtyEvent::ConfigChanged(config) => {
-                  self.apply_config(config);
-              }*/
+            }
+            PtyEvent::ConfigChanged => {
+                config::load(self);
+            }
         }
     }
 
@@ -710,6 +679,7 @@ impl ApplicationHandler<PtyEvent> for App {
                                 Ok(())
                             })
                             .unwrap();
+                            self.request_redraw();
                             return;
                         }
                     }
@@ -1032,10 +1002,11 @@ impl App {
         }
         .max(1);
 
-        let session_id = match self
-            .session_manager
-            .create_session(new_rows, new_cols, None)
-        {
+        let session_id = match self.session_manager.create_session(
+            new_rows,
+            new_cols,
+            self.default_cwd.as_deref(),
+        ) {
             Ok(session_id) => session_id,
             Err(error) => {
                 error!(error = ?error, "failed to split session");
@@ -1059,7 +1030,7 @@ impl App {
             let id = match self.session_manager.create_session(
                 self.terminal_rows().max(1),
                 self.cols.max(1),
-                None,
+                self.default_cwd.as_deref(),
             ) {
                 Ok(id) => id,
                 Err(error) => {

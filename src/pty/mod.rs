@@ -25,6 +25,7 @@ pub enum Event {
     Closed(SessionId),
     Data(SessionId, Vec<u8>),
     ProgramChanged((SessionId, String)),
+    ConfigChanged,
 }
 
 impl Pty {

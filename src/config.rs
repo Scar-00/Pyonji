@@ -1,6 +1,6 @@
 use crate::overlay::Screen;
-use crate::{App, PtyEvent};
 use crate::pty::SshConnection;
+use crate::{App, PtyEvent};
 use anyhow::{Context, Result};
 use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
@@ -14,6 +14,8 @@ use std::thread;
 use std::time::Duration;
 use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{KeyCode, ModifiersState};
+
+const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
 
 macro_rules! apply {
     ($this: ident.$field: ident, $table: expr) => {
@@ -51,15 +53,16 @@ impl App {
     }
 }
 
-//const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
-
 impl LuaUserData for App {
     fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method_mut("bind", |_, this, (binding, func): (KeyBinding, LuaFunction)| {
-            this.key_bindings.push((binding, func));
-            Ok(())
-        });
-        methods.add_method_mut("config", |_, this, table: LuaTable| {
+        methods.add_method_mut(
+            "bind",
+            |_, this, (binding, func): (KeyBinding, LuaFunction)| {
+                this.key_bindings.push((binding, func));
+                Ok(())
+            },
+        );
+        methods.add_method_mut("config", |lua, this, table: LuaTable| {
             apply!(this.font_size, table, |font_size: f32| {
                 this.line_height = font_size * 1.1;
                 font_size
@@ -68,30 +71,75 @@ impl LuaUserData for App {
                 line_height * this.font_size
             });
             apply!(this.font_family, table);
+            apply!(this.fullscreen, table);
+            apply!(this.default_cwd, table);
+            this.ssh_sessions = util::collect_ssh_sessions(lua, &table);
+
             this.apply_config();
             Ok(())
         });
-    }
-
-    fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
-        fields.add_field("disp", Dispatcher{});
+        methods.add_function("open_palette", |lua, this: Option<LuaAnyUserData>| {
+            if let Some(this) = this {
+                this.borrow_mut_scoped(|this: &mut App| {
+                    if let Some(overlay) = this.overlay.as_mut() {
+                        overlay.show(Some(Screen::CmdPalette));
+                    }
+                })?;
+            }
+            lua.create_function(move |_, this: LuaAnyUserData| {
+                this.borrow_mut_scoped(|this: &mut App| {
+                    if let Some(overlay) = this.overlay.as_mut() {
+                        overlay.show(Some(Screen::CmdPalette));
+                    }
+                })
+            })
+        });
     }
 }
 
-#[derive(LuaUserData)]
-struct Dispatcher;
-
-#[mlua::userdata_impl]
-impl Dispatcher {
-    fn open_palette(lua: &Lua) -> LuaResult<LuaFunction> {
-        lua.create_function(move |_, this: LuaAnyUserData| {
-            this.borrow_mut_scoped(|this: &mut App| {
-                if let Some(overlay) = this.overlay.as_mut() {
-                    overlay.show(Some(Screen::CmdPalette));
+pub fn watch(proxy: EventLoopProxy<PtyEvent>) {
+    let Some(path) = util::config_path() else {
+        return;
+    };
+    thread::spawn(move || {
+        let func = move || -> Result<()> {
+            use notify::{EventKind, RecommendedWatcher, Watcher};
+            use std::sync::mpsc;
+            let (tx, rx) = mpsc::channel();
+            let config = notify::Config::default()
+                .with_poll_interval(Duration::from_secs(1))
+                .with_compare_contents(true);
+            let mut watcher = RecommendedWatcher::new(tx, config)?;
+            watcher.watch(&path.absolutize()?, RecursiveMode::Recursive)?;
+            while let Ok(ev) = rx.recv() {
+                if let Ok(ev) = ev
+                    && let EventKind::Modify(_) = ev.kind
+                {
+                    _ = proxy.send_event(PtyEvent::ConfigChanged);
                 }
-            })
-        })
-    }
+            }
+            Ok(())
+        };
+        if let Err(e) = func() {
+            tracing::error!(?e, "watcher thread error");
+        }
+    });
+}
+
+pub fn load(this: &mut App) {
+    let Some(path) = util::config_path() else {
+        return;
+    };
+
+    _ = util::create_config_if_missing(&path).inspect_err(|e| tracing::error!(%e, "failed to create default config"));
+
+    this.ssh_sessions.clear();
+    this.key_bindings.clear();
+    let lua = this.lua.clone();
+    _ = with_env(this, |_| {
+        let chunk = lua.load(path);
+        chunk.exec()
+    });
 }
 
 pub fn with_env<R>(this: &mut App, f: impl FnOnce(LuaAnyUserData) -> LuaResult<R>) -> Result<()> {
@@ -104,6 +152,67 @@ pub fn with_env<R>(this: &mut App, f: impl FnOnce(LuaAnyUserData) -> LuaResult<R
         ret
     })?;
     Ok(())
+}
+
+mod util {
+    use std::path::Path;
+
+    use super::*;
+    pub fn collect_ssh_sessions(lua: &Lua, table: &LuaTable) -> Vec<SshConnection> {
+        let Ok(sessions) = table.get::<Vec<LuaValue>>("ssh_sessions") else {
+            return vec![];
+        };
+        sessions
+            .into_iter()
+            .map(|session| -> LuaResult<SshConnection> {
+                let table = session
+                    .as_table()
+                    .context("ssh_session entry is not a table")?;
+                Ok(SshConnection {
+                    name: table.get("name").and_then(|v| from_value(v, lua))?,
+                    user_name: table.get("user_name").and_then(|v| from_value(v, lua))?,
+                    ip: table
+                        .get::<LuaValue>("ip")
+                        .and_then(|v| from_value(v, lua))
+                        .map(|ip: String| IpAddr::from_str(&ip))??,
+                })
+            })
+            .collect::<LuaResult<Vec<_>>>()
+            .unwrap_or_default()
+    }
+
+    pub fn from_value<T: FromLua>(value: LuaValue, lua: &Lua) -> LuaResult<T> {
+        if let Some(v) = value.as_function() {
+            v.call::<T>(())
+        } else {
+            T::from_lua(value, lua)
+        }
+    }
+
+    #[allow(clippy::unnecessary_wraps)]
+    pub fn config_path() -> Option<PathBuf> {
+        cfg_select! {
+            feature = "install" => {
+                dirs::config_local_dir().map(|dir| dir.join("pyonji").join("init.lua"))
+            }
+            _ => Some("init.lua".into())
+        }
+    }
+
+    pub fn create_config_if_missing(path: &Path) -> Result<()> {
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(path)?;
+            file.write_all(DEFAULT_CONFIG.as_bytes())?;
+        }
+        Ok(())
+    }
 }
 
 /*#[derive(Debug, Clone)]
@@ -260,13 +369,7 @@ impl Config {
         self.ssh_sessions.clone()
     }
 
-    fn from_value<T: FromLua>(value: LuaValue, lua: &Lua) -> LuaResult<T> {
-        if let Some(v) = value.as_function() {
-            v.call::<T>(())
-        } else {
-            T::from_lua(value, lua)
-        }
-    }
+
 }*/
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -288,18 +391,12 @@ impl KeyBinding {
         };
         let key = Self::parse_key(key)?;
 
-        Ok(Self {
-            mods,
-            key,
-        })
+        Ok(Self { mods, key })
     }
 
-    const fn new_const(mods: ModifiersState, key: KeyCode) -> Self {
-        Self {
-            mods,
-            key,
-        }
-    }
+    /*const fn new_const(mods: ModifiersState, key: KeyCode) -> Self {
+        Self { mods, key }
+    }*/
 
     fn parse_mods(binding: &str) -> Result<(&str, ModifiersState)> {
         fn parse_mod(m: &str) -> Result<ModifiersState> {
