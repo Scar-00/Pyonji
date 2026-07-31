@@ -28,7 +28,7 @@ clap = { version = "4.6.0", features = ["derive"] }
 vswhom = "0.1.0"
 clipboard = "0.5.0"
 dirs = "6.0.0"
-mlua = { version = "0.11.6", features = ["anyhow", "lua55", "macros", "mlua_derive", "send", "userdata-wrappers", "vendored"] }
+mlua = { version = "0.12.0", features = ["anyhow", "lua55", "macros", "mlua_derive", "send", "userdata-wrappers", "vendored"] }
 serde = { version = "1.0.228", features = ["derive"] }
 notify = "8.2.0"
 derive_more = { version = "2.1.1", features = ["deref", "deref_mut"] }

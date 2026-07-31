@@ -19,16 +19,21 @@ mod pty;
 mod renderer;
 mod terminal;
 
+use mlua::{prelude::LuaFunction, Lua};
 use smol::Task;
 #[cfg(not(feature = "install"))]
 use tracing_subscriber::prelude::*;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use config::Config;
 use pty::Event as PtyEvent;
 use renderer::{ImePreedit, Pane, Renderer, StatusTab};
-use std::{array, path::Path, path::PathBuf, sync::Arc};
+use std::{
+    array,
+    path::{Path, PathBuf},
+    process::abort,
+    sync::Arc,
+};
 use tracing::error;
 use winit::{
     application::ApplicationHandler,
@@ -40,6 +45,7 @@ use winit::{
 };
 
 use crate::{
+    config::KeyBinding,
     overlay::{Overlay, Screen},
     pty::SshConnection,
     terminal::{
@@ -89,7 +95,6 @@ struct Cli {
 
 struct App {
     args: Cli,
-    config: Config,
     renderer: Option<Renderer>,
     pub window: Option<Arc<Window>>,
     session_manager: SessionManager,
@@ -97,6 +102,7 @@ struct App {
     modifiers: ModifiersState,
     line_height: f32,
     font_size: f32,
+    font_family: Option<String>,
     rows: u16,
     cols: u16,
     tabs: [Option<Tab>; 9],
@@ -115,6 +121,10 @@ struct App {
     pub local_executer: LocalExecutor,
 
     overlay: Option<Overlay>,
+
+    key_bindings: Vec<(KeyBinding, LuaFunction)>,
+
+    lua: Lua,
 }
 
 #[derive(Clone, Copy)]
@@ -149,15 +159,22 @@ fn main() -> Result<()> {
         .context("failed to create event loop")?;
     let proxy = event_loop.create_proxy();
 
-    Config::watch(proxy.clone());
+    /*Config::watch(proxy.clone());
     let config = if let Ok(dir) = Config::load() {
         dir
     } else {
         tracing::warn!("failed to load config");
         Config::new()
-    };
+    };*/
 
-    let mut app = App::new(cli, config, proxy);
+    let lua = Lua::new();
+    let mut app = App::new(cli, lua.clone(), proxy);
+
+    config::with_env(&mut app, |_| {
+        let chunk = lua.load(PathBuf::from("init.lua"));
+        chunk.exec()?;
+        Ok(())
+    })?;
 
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut app).map_err(|error| {
@@ -178,19 +195,17 @@ impl App {
 }
 
 impl App {
-    pub fn new(cli: Cli, config: Config, proxy: EventLoopProxy<PtyEvent>) -> Self {
-        let (font_size, line_height) = config.font_metrics();
-        let ssh_sessions = config.ssh_sessions();
+    pub fn new(cli: Cli, lua: Lua, proxy: EventLoopProxy<PtyEvent>) -> Self {
         Self {
             args: cli,
-            config,
             renderer: None,
             window: None,
             session_manager: SessionManager::new(proxy.clone()),
-            ssh_sessions,
+            ssh_sessions: vec![],
             modifiers: ModifiersState::default(),
-            font_size: font_size as f32,
-            line_height: (font_size * line_height) as f32,
+            font_size: 24.0,
+            line_height: 28.0,
+            font_family: None,
             rows: 20,
             cols: 80,
             tabs: array::from_fn(|_| None),
@@ -209,10 +224,14 @@ impl App {
             local_executer: LocalExecutor::new(),
 
             overlay: None,
+
+            key_bindings: vec![],
+
+            lua,
         }
     }
 
-    pub fn apply_config(&mut self, config: Config) {
+    /*pub fn apply_config(&mut self, config: Config) {
         self.config = config;
         let (font_size, line_height) = self.config.font_metrics();
         self.font_size = font_size as f32;
@@ -236,7 +255,7 @@ impl App {
         self.resize_tab();
 
         self.request_redraw();
-    }
+    }*/
 
     fn ui(&mut self) {
         let Some(mut overlay) = self.overlay.take() else {
@@ -260,7 +279,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 .with_inner_size(PhysicalSize::new(1280, 720))
                 .with_active(true)
                 .with_window_icon(icon)
-                .with_maximized(self.config.fullscreen())
+                //.with_maximized(self.config.fullscreen())
                 .with_title(Self::TITLE),
         ) else {
             event_loop.exit();
@@ -274,7 +293,7 @@ impl ApplicationHandler<PtyEvent> for App {
         let window = Arc::new(window);
         self.renderer = match Renderer::new(
             window.clone(),
-            self.config.font_family(),
+            self.font_family.as_deref(),
             self.font_size,
             self.line_height,
         ) {
@@ -291,11 +310,7 @@ impl ApplicationHandler<PtyEvent> for App {
         match self.session_manager.create_session(
             self.terminal_rows().max(1),
             self.cols.max(1),
-            self.args
-                .path
-                .clone()
-                .or(self.config.default_cwd.clone())
-                .as_deref(),
+            self.args.path.clone().or(None).as_deref(),
         ) {
             Ok(session) => {
                 self.tabs[0] = Some(Tab::new(session));
@@ -349,10 +364,9 @@ impl ApplicationHandler<PtyEvent> for App {
                     return;
                 };
                 session.set_title(title);
-            }
-            PtyEvent::ConfigChanged(config) => {
-                self.apply_config(config);
-            }
+            } /*PtyEvent::ConfigChanged(config) => {
+                  self.apply_config(config);
+              }*/
         }
     }
 
@@ -641,12 +655,12 @@ impl ApplicationHandler<PtyEvent> for App {
                                 self.split_current_tab(SplitDirection::Horizontal);
                                 return;
                             }
-                            KeyCode::KeyR => {
+                            /*KeyCode::KeyR => {
                                 if let Ok(config) = Config::load() {
                                     self.apply_config(config);
                                 }
                                 return;
-                            }
+                            }*/
                             KeyCode::KeyS => {
                                 self.status_bar_hidden = !self.status_bar_hidden;
                                 self.resize_tab();
@@ -683,6 +697,20 @@ impl ApplicationHandler<PtyEvent> for App {
                                 return;
                             }
                             _ => {}
+                        }
+                    }
+                    for (bind, func) in self.key_bindings.clone() {
+                        let pressed = KeyBinding {
+                            mods: self.modifiers,
+                            key: code,
+                        };
+                        if bind == pressed {
+                            config::with_env(self, |this| {
+                                func.call::<()>(this)?;
+                                Ok(())
+                            })
+                            .unwrap();
+                            return;
                         }
                     }
                 }
@@ -1031,7 +1059,7 @@ impl App {
             let id = match self.session_manager.create_session(
                 self.terminal_rows().max(1),
                 self.cols.max(1),
-                self.config.default_cwd.as_ref().map(|value| value.as_ref()),
+                None,
             ) {
                 Ok(id) => id,
                 Err(error) => {

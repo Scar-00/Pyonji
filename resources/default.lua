@@ -15,8 +15,11 @@
 ---@field ssh_sessions ?SshSession[],
 ---@field open_palette ?string,
 
----@type Config
-return {
-    --font_family = "Iosevka",
-    --font_size = 32.0,
-};
+---@class Dispatcher
+---@field open_palette fun(): function
+
+---@class Pyonji
+---@field disp Dispatcher
+---@field bind fun(self: Pyonji, binding: string, action: function)
+---@field config fun(self: Pyonji, config: Config)
+py = {}

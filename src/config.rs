@@ -1,4 +1,5 @@
-use crate::PtyEvent;
+use crate::overlay::Screen;
+use crate::{App, PtyEvent};
 use crate::pty::SshConnection;
 use anyhow::{Context, Result};
 use mlua::{FromLua, prelude::*};
@@ -14,9 +15,98 @@ use std::time::Duration;
 use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{KeyCode, ModifiersState};
 
-const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
+macro_rules! apply {
+    ($this: ident.$field: ident, $table: expr) => {
+        if let Ok(value) = $table.get(stringify!($field)).inspect_err(|e| tracing::error!(%e, "failed to get field")) {
+            $this.$field = value;
+        }
+    };
+    ($this: ident.$field: ident, $table: expr, $transformer: expr) => {
+        if let Ok(value) = $table.get(stringify!($field)).map($transformer).inspect_err(|e| tracing::error!(%e, "failed to get field")) {
+            $this.$field = value;
+        }
+    };
+}
 
-#[derive(Debug, Clone)]
+impl App {
+    pub fn apply_config(&mut self) {
+        let Some(size) = self.window.as_ref().map(|window| window.inner_size()) else {
+            return;
+        };
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_font_metrics(self.font_size, self.line_height);
+            if let Some(font_family) = self.font_family.as_deref() {
+                renderer.set_font_family(font_family);
+            }
+            renderer.evict_glyphs();
+        }
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.update_cmds(&self.ssh_sessions);
+        }
+        self.rows = (size.height as f32 / self.line_height) as u16;
+        self.cols = (size.width as f32 / (self.font_size / 2.0)) as u16;
+        self.resize_tab();
+
+        self.request_redraw();
+    }
+}
+
+//const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
+
+impl LuaUserData for App {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("bind", |_, this, (binding, func): (KeyBinding, LuaFunction)| {
+            this.key_bindings.push((binding, func));
+            Ok(())
+        });
+        methods.add_method_mut("config", |_, this, table: LuaTable| {
+            apply!(this.font_size, table, |font_size: f32| {
+                this.line_height = font_size * 1.1;
+                font_size
+            });
+            apply!(this.line_height, table, |line_height: f32| {
+                line_height * this.font_size
+            });
+            apply!(this.font_family, table);
+            this.apply_config();
+            Ok(())
+        });
+    }
+
+    fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
+        fields.add_field("disp", Dispatcher{});
+    }
+}
+
+#[derive(LuaUserData)]
+struct Dispatcher;
+
+#[mlua::userdata_impl]
+impl Dispatcher {
+    fn open_palette(lua: &Lua) -> LuaResult<LuaFunction> {
+        lua.create_function(move |_, this: LuaAnyUserData| {
+            this.borrow_mut_scoped(|this: &mut App| {
+                if let Some(overlay) = this.overlay.as_mut() {
+                    overlay.show(Some(Screen::CmdPalette));
+                }
+            })
+        })
+    }
+}
+
+pub fn with_env<R>(this: &mut App, f: impl FnOnce(LuaAnyUserData) -> LuaResult<R>) -> Result<()> {
+    let lua = this.lua.clone();
+    lua.scope(|scope| {
+        let app = scope.create_userdata_ref_mut(this)?;
+        lua.globals().set("py", app.clone())?;
+        let ret = f(app);
+        lua.globals().remove("py")?;
+        ret
+    })?;
+    Ok(())
+}
+
+/*#[derive(Debug, Clone)]
 pub struct Config {
     pub font_family: Option<String>,
     pub font_size: f64,
@@ -177,22 +267,12 @@ impl Config {
             T::from_lua(value, lua)
         }
     }
-}
+}*/
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct KeyBinding {
-    _mods: ModifiersState,
-    _key: KeyCode,
-}
-
-impl KeyBinding {
-    //keybinding!(OPEN_PALETTE, "<ctrl+shift>-F");
-    const OPEN_PALETTE: Self = Self::new_const(
-        ModifiersState::from_bits_retain(
-            ModifiersState::CONTROL.bits() | ModifiersState::SHIFT.bits(),
-        ),
-        KeyCode::KeyF,
-    );
+    pub mods: ModifiersState,
+    pub key: KeyCode,
 }
 
 impl KeyBinding {
@@ -209,15 +289,15 @@ impl KeyBinding {
         let key = Self::parse_key(key)?;
 
         Ok(Self {
-            _mods: mods,
-            _key: key,
+            mods,
+            key,
         })
     }
 
     const fn new_const(mods: ModifiersState, key: KeyCode) -> Self {
         Self {
-            _mods: mods,
-            _key: key,
+            mods,
+            key,
         }
     }
 
@@ -279,6 +359,10 @@ impl KeyBinding {
             "q" => KeyCode::KeyQ,
             "r" => KeyCode::KeyR,
             "s" => KeyCode::KeyS,
+            "t" => KeyCode::KeyT,
+            "u" => KeyCode::KeyU,
+            "v" => KeyCode::KeyV,
+            "w" => KeyCode::KeyW,
             "x" => KeyCode::KeyX,
             "y" => KeyCode::KeyY,
             "z" => KeyCode::KeyZ,

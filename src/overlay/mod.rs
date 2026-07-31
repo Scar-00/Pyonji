@@ -6,7 +6,6 @@ mod sessions;
 use std::io::{self, Write};
 
 use crate::{
-    config::Config,
     overlay::{
         opener::{OpenerState, OpenerView},
         palette::{Arg, Cmd, CmdPalleteState, CmdPalleteView},
@@ -299,9 +298,9 @@ impl Overlay {
                 app.create_remote_session(&connection);
             }),
             Cmd::new("reload-config", [], |_, app, _| {
-                if let Ok(config) = Config::load() {
+                /*if let Ok(config) = Config::load() {
                     app.apply_config(config);
-                }
+                }*/
             }),
             Cmd::new("open-in", [], |this, app, _| {
                 this.screen = Screen::Opener;
