@@ -3839,7 +3839,6 @@ dependencies = [
  "crossterm",
  "derive_more",
  "dirs",
- "either",
  "etagere",
  "fontdb",
  "futures",

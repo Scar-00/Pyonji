@@ -18,6 +18,7 @@ mod overlay;
 mod pty;
 mod renderer;
 mod terminal;
+mod util;
 
 use mlua::{prelude::LuaFunction, Lua, LuaOptions, StdLib};
 use smol::Task;
@@ -30,6 +31,8 @@ use pty::Event as PtyEvent;
 use renderer::{ImePreedit, Pane, Renderer, StatusTab};
 use std::{
     array,
+    fmt::Display,
+    panic::Location,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -121,7 +124,7 @@ struct App {
 
     overlay: Option<Overlay>,
 
-    //leader: KeyBinding,
+    action: KeyBinding,
     key_bindings: Vec<(KeyBinding, LuaFunction)>,
     registered_callbacks: Vec<LuaAction>,
     fullscreen: bool,
@@ -222,6 +225,10 @@ impl App {
 
             overlay: None,
 
+            action: KeyBinding {
+                mods: ModifiersState::CONTROL,
+                key: KeyCode::KeyB,
+            },
             key_bindings: vec![],
             registered_callbacks: vec![],
             fullscreen: false,
@@ -530,163 +537,203 @@ impl ApplicationHandler<PtyEvent> for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
-                    if code == KeyCode::KeyB && event.state == ElementState::Released {
-                        self.resize_mode_held = false;
-                        if self.resize_mode_used {
+                    if self.key_bindings.is_empty() {
+                        if code == KeyCode::KeyB && event.state == ElementState::Released {
+                            self.resize_mode_held = false;
+                            if self.resize_mode_used {
+                                self.action_mode = false;
+                            }
+                            self.resize_mode_used = false;
+                            return;
+                        }
+                        if event.state != ElementState::Pressed {
+                            return;
+                        }
+                        if self.resize_mode_held {
+                            match code {
+                                KeyCode::ArrowLeft => {
+                                    self.resize_mode_used = true;
+                                    self.resize_active_pane(SplitDirection::Vertical, -1);
+                                    return;
+                                }
+                                KeyCode::ArrowRight => {
+                                    self.resize_mode_used = true;
+                                    self.resize_active_pane(SplitDirection::Vertical, 1);
+                                    return;
+                                }
+                                KeyCode::ArrowUp => {
+                                    self.resize_mode_used = true;
+                                    self.resize_active_pane(SplitDirection::Horizontal, -1);
+                                    return;
+                                }
+                                KeyCode::ArrowDown => {
+                                    self.resize_mode_used = true;
+                                    self.resize_active_pane(SplitDirection::Horizontal, 1);
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if self.modifiers.control_key() && matches!(code, KeyCode::KeyB) {
+                            self.resize_mode_held = true;
+                            self.resize_mode_used = false;
+                            self.action_mode = true;
+                            return;
+                        } else if self.action_mode {
                             self.action_mode = false;
-                        }
-                        self.resize_mode_used = false;
-                        return;
-                    }
-                    if event.state != ElementState::Pressed {
-                        return;
-                    }
-                    if self.resize_mode_held {
-                        match code {
-                            KeyCode::ArrowLeft => {
-                                self.resize_mode_used = true;
-                                self.resize_active_pane(SplitDirection::Vertical, -1);
-                                return;
-                            }
-                            KeyCode::ArrowRight => {
-                                self.resize_mode_used = true;
-                                self.resize_active_pane(SplitDirection::Vertical, 1);
-                                return;
-                            }
-                            KeyCode::ArrowUp => {
-                                self.resize_mode_used = true;
-                                self.resize_active_pane(SplitDirection::Horizontal, -1);
-                                return;
-                            }
-                            KeyCode::ArrowDown => {
-                                self.resize_mode_used = true;
-                                self.resize_active_pane(SplitDirection::Horizontal, 1);
-                                return;
-                            }
-                            _ => {}
-                        }
-                    }
-                    if self.modifiers.control_key() && matches!(code, KeyCode::KeyB) {
-                        self.resize_mode_held = true;
-                        self.resize_mode_used = false;
-                        self.action_mode = true;
-                        return;
-                    } else if self.action_mode {
-                        self.action_mode = false;
-                        match code {
-                            KeyCode::Digit1 => {
-                                self.switch_tab(0);
-                                return;
-                            }
-                            KeyCode::Digit2 => {
-                                self.switch_tab(1);
-                                return;
-                            }
-                            KeyCode::Digit3 => {
-                                self.switch_tab(2);
-                                return;
-                            }
-                            KeyCode::Digit4 => {
-                                self.switch_tab(3);
-                                return;
-                            }
-                            KeyCode::Digit5 => {
-                                self.switch_tab(4);
-                                return;
-                            }
-                            KeyCode::Digit6 => {
-                                self.switch_tab(5);
-                                return;
-                            }
-                            KeyCode::Digit7 => {
-                                self.switch_tab(6);
-                                return;
-                            }
-                            KeyCode::Digit8 => {
-                                self.switch_tab(7);
-                                return;
-                            }
-                            KeyCode::Digit9 => {
-                                self.switch_tab(8);
-                                return;
-                            }
-                            KeyCode::KeyK => {
-                                self.switch_tab(self.next_tab_index());
-                                return;
-                            }
-                            KeyCode::KeyJ => {
-                                self.switch_tab(self.previous_tab_index());
-                                return;
-                            }
-                            KeyCode::KeyW => {
-                                self.focus_next_pane();
-                                return;
-                            }
-                            KeyCode::KeyV => {
-                                self.split_current_tab(SplitDirection::Vertical);
-                                return;
-                            }
-                            KeyCode::KeyH => {
-                                self.split_current_tab(SplitDirection::Horizontal);
-                                return;
-                            }
-                            /*KeyCode::KeyR => {
-                                if let Ok(config) = Config::load() {
-                                    self.apply_config(config);
+                            match code {
+                                KeyCode::Digit1 => {
+                                    self.switch_tab(0);
+                                    return;
                                 }
-                                return;
-                            }*/
-                            KeyCode::KeyS => {
-                                self.status_bar_hidden = !self.status_bar_hidden;
-                                self.resize_tab();
-                                self.request_redraw();
-                                return;
-                            }
-                            KeyCode::KeyP => {
-                                if let Some(overlay) = self.overlay.as_mut() {
-                                    overlay.show(Some(Screen::CmdPalette));
+                                KeyCode::Digit2 => {
+                                    self.switch_tab(1);
+                                    return;
+                                }
+                                KeyCode::Digit3 => {
+                                    self.switch_tab(2);
+                                    return;
+                                }
+                                KeyCode::Digit4 => {
+                                    self.switch_tab(3);
+                                    return;
+                                }
+                                KeyCode::Digit5 => {
+                                    self.switch_tab(4);
+                                    return;
+                                }
+                                KeyCode::Digit6 => {
+                                    self.switch_tab(5);
+                                    return;
+                                }
+                                KeyCode::Digit7 => {
+                                    self.switch_tab(6);
+                                    return;
+                                }
+                                KeyCode::Digit8 => {
+                                    self.switch_tab(7);
+                                    return;
+                                }
+                                KeyCode::Digit9 => {
+                                    self.switch_tab(8);
+                                    return;
+                                }
+                                KeyCode::KeyK => {
+                                    self.switch_tab(self.next_tab_index());
+                                    return;
+                                }
+                                KeyCode::KeyJ => {
+                                    self.switch_tab(self.previous_tab_index());
+                                    return;
+                                }
+                                KeyCode::KeyW => {
+                                    self.focus_next_pane();
+                                    return;
+                                }
+                                KeyCode::KeyV => {
+                                    self.split_current_tab(SplitDirection::Vertical);
+                                    return;
+                                }
+                                KeyCode::KeyH => {
+                                    self.split_current_tab(SplitDirection::Horizontal);
+                                    return;
+                                }
+                                KeyCode::KeyS => {
+                                    self.status_bar_hidden = !self.status_bar_hidden;
+                                    self.resize_tab();
                                     self.request_redraw();
+                                    return;
                                 }
-                                return;
+                                KeyCode::KeyP => {
+                                    if let Some(overlay) = self.overlay.as_mut() {
+                                        overlay.show(Some(Screen::CmdPalette));
+                                        self.request_redraw();
+                                    }
+                                    return;
+                                }
+                                _ => {}
                             }
-                            _ => {}
                         }
-                    }
-                    if self
-                        .modifiers
-                        .contains(ModifiersState::CONTROL | ModifiersState::SHIFT)
-                    {
-                        match code {
-                            KeyCode::KeyF => {
-                                if let Some(overlay) = self.overlay.as_mut() {
-                                    overlay.show(Some(Screen::CmdPalette));
-                                    self.request_redraw();
+                        if self
+                            .modifiers
+                            .contains(ModifiersState::CONTROL | ModifiersState::SHIFT)
+                        {
+                            match code {
+                                KeyCode::KeyF => {
+                                    if let Some(overlay) = self.overlay.as_mut() {
+                                        overlay.show(Some(Screen::CmdPalette));
+                                        self.request_redraw();
+                                    }
+                                    return;
                                 }
-                                return;
-                            }
-                            KeyCode::KeyS => {
-                                if let Some(overlay) = self.overlay.as_mut() {
-                                    overlay.show(Some(Screen::Sessions));
-                                    self.request_redraw();
+                                KeyCode::KeyS => {
+                                    if let Some(overlay) = self.overlay.as_mut() {
+                                        overlay.show(Some(Screen::Sessions));
+                                        self.request_redraw();
+                                    }
+                                    return;
                                 }
-                                return;
+                                _ => {}
                             }
-                            _ => {}
                         }
-                    }
-                    for (bind, func) in self.key_bindings.clone() {
+                    } else {
+                        if code == KeyCode::KeyB && event.state == ElementState::Released {
+                            self.resize_mode_held = false;
+                            if self.resize_mode_used {
+                                self.action_mode = false;
+                            }
+                            self.resize_mode_used = false;
+                            return;
+                        }
+                        if event.state != ElementState::Pressed {
+                            return;
+                        }
+                        if self.resize_mode_held {
+                            match code {
+                                KeyCode::ArrowLeft => {
+                                    self.resize_mode_used = true;
+                                    self.resize_active_pane(SplitDirection::Vertical, -1);
+                                    return;
+                                }
+                                KeyCode::ArrowRight => {
+                                    self.resize_mode_used = true;
+                                    self.resize_active_pane(SplitDirection::Vertical, 1);
+                                    return;
+                                }
+                                KeyCode::ArrowUp => {
+                                    self.resize_mode_used = true;
+                                    self.resize_active_pane(SplitDirection::Horizontal, -1);
+                                    return;
+                                }
+                                KeyCode::ArrowDown => {
+                                    self.resize_mode_used = true;
+                                    self.resize_active_pane(SplitDirection::Horizontal, 1);
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        }
                         let pressed = KeyBinding {
                             mods: self.modifiers,
                             key: code,
                         };
-                        if bind == pressed {
-                            config::with_env(self, |this| {
-                                func.call::<()>(this)?;
-                                Ok(())
-                            })
-                            .unwrap();
-                            self.request_redraw();
+                        if self.action == pressed {
+                            self.resize_mode_held = true;
+                            self.resize_mode_used = false;
+                            self.action_mode = true;
                             return;
+                        } else {
+                            for (bind, func) in self.key_bindings.clone() {
+                                if bind == pressed {
+                                    config::with_env(self, |this| {
+                                        func.call::<()>(this)?;
+                                        Ok(())
+                                    })
+                                    .into_log();
+                                    self.request_redraw();
+                                    return;
+                                }
+                            }
                         }
                     }
                 }
@@ -1256,6 +1303,56 @@ impl App {
 
             tab.split_active(SplitDirection::Horizontal, id);
             self.request_redraw();
+        }
+    }
+}
+
+pub trait ResultExt {
+    type OK;
+
+    #[track_caller]
+    fn log(self) -> Self;
+    #[track_caller]
+    fn into_log(self)
+    where
+        Self: Sized,
+    {
+        _ = self.log();
+    }
+    #[track_caller]
+    fn log_assert(self) -> Self::OK;
+}
+
+impl<T, E> ResultExt for std::result::Result<T, E>
+where
+    E: Display,
+{
+    type OK = T;
+
+    #[track_caller]
+    fn log(self) -> Self {
+        if let Err(error) = &self {
+            let caller = Location::caller();
+
+            tracing::error!(
+                error = %error,
+                caller.file = caller.file(),
+                caller.line = caller.line(),
+                caller.column = caller.column(),
+                "Result contained an error"
+            );
+        }
+
+        self
+    }
+
+    #[track_caller]
+    fn log_assert(self) -> Self::OK {
+        match self.log() {
+            Ok(value) => value,
+            Err(error) => {
+                panic!("ResultExt::log_assert failed: {error}");
+            }
         }
     }
 }

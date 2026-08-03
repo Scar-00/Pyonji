@@ -4,7 +4,7 @@ use ahash::{HashMap, HashMapExt as _};
 pub use background::BackgroundRenderer;
 pub use glyph::TerminalRenderer;
 
-use std::{cell::RefCell, sync::Arc};
+use std::{cell::RefCell, sync::Arc, time::Instant};
 
 use anyhow::{Context, Result};
 use bumpalo::Bump as Arena;
@@ -323,6 +323,8 @@ impl Renderer {
             self.font_size / size.width as f32,
             (self.line_height * 2.0) / size.height as f32,
         ];
+        //  TODO(K): paraellize this -- maybe this will allow proper line shaping without having a
+        //  performance impact
         for pane in panes {
             if pane.geometry.cols == 0 || pane.geometry.rows == 0 {
                 continue;

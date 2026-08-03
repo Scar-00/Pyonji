@@ -1,6 +1,7 @@
 use crate::overlay::{LuaAction, Screen};
 use crate::pty::SshConnection;
-use crate::{App, PtyEvent};
+use crate::terminal::{SplitDirection, Tab};
+use crate::{App, PtyEvent, ResultExt};
 use anyhow::{Context, Result};
 use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
@@ -8,7 +9,7 @@ use path_absolutize::*;
 use std::fmt::Debug;
 use std::io::Write;
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{PathBuf};
 use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
@@ -16,9 +17,7 @@ use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{KeyCode, ModifiersState};
 
 const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
-pub const LUA_MODULES: &[&str] = &[
-    include_str!("../resources/lua/keybind.lua"),
-];
+pub const LUA_MODULES: &[&str] = &[include_str!("../resources/lua/keybind.lua")];
 
 macro_rules! apply {
     ($this: ident.$field: ident, $table: expr) => {
@@ -31,6 +30,32 @@ macro_rules! apply {
             $this.$field = value;
         }
     };
+}
+
+macro_rules! callable_action {
+    ($lua: ident, $this: ident => $body: expr) => {{
+        if let Some(this) = $this {
+            this.borrow_mut_scoped(move |this: &mut App| $body(this))?;
+        }
+        $lua.create_function(move |_, this: LuaAnyUserData| {
+            this.borrow_mut_scoped(move |this: &mut App| $body(this))
+        })
+    }};
+}
+
+macro_rules! args {
+    ($args: ident, $lua: ident, $typ: ty) => {{
+        let mut args = $args;
+        let first = args[0].clone();
+        let this = if first.is_userdata() {
+            args.pop_front();
+            Some(LuaAnyUserData::from_lua(first, $lua)?)
+        } else {
+            None
+        };
+        let rest: $typ = FromLuaMulti::from_lua_multi(args, $lua)?;
+        (this, rest)
+    }};
 }
 
 impl App {
@@ -58,27 +83,51 @@ impl App {
 
 impl LuaUserData for App {
     fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method_mut(
-            "bind",
-            |_, this, (binding, func): (KeyBinding, LuaFunction)| {
+        methods.add_method_mut("bind", |lua, this, args: LuaMultiValue| {
+            if args.front().is_some_and(|arg| arg.is_table()) {
+                let (mods, key, func): (Vec<String>, String, LuaFunction) =
+                    FromLuaMulti::from_lua_multi(args, lua)?;
+                let mods = mods
+                    .iter()
+                    .map(|modifier| KeyBinding::parse_mod(&modifier))
+                    .collect::<Result<Vec<_>>>()?;
+                let mut state = ModifiersState::empty();
+                for m in mods {
+                    state |= m;
+                }
+                let key = KeyBinding::parse_key(&key)?;
+                this.key_bindings
+                    .push((KeyBinding { mods: state, key }, func.clone()));
+            } else {
+                let (binding, func): (KeyBinding, LuaFunction) =
+                    FromLuaMulti::from_lua_multi(args, lua)?;
                 this.key_bindings.push((binding, func));
+            }
+
+            Ok(())
+        });
+        methods.add_method_mut(
+            "register",
+            |lua, this, (name, func): (String, LuaFunction)| {
+                let (args, is_var_arg) = lua
+                    .globals()
+                    .get::<LuaFunction>("__HOST_INSPECT_FUNC")
+                    .and_then(|f| f.call::<(LuaTable, bool)>(func.clone()))
+                    .and_then(|(names, var_arg)| {
+                        names
+                            .sequence_values::<String>()
+                            .collect::<LuaResult<Vec<_>>>()
+                            .map(|names| (names, var_arg))
+                    })?;
+                this.registered_callbacks.push(LuaAction {
+                    args,
+                    is_var_arg,
+                    name,
+                    callback: func,
+                });
                 Ok(())
             },
         );
-        methods.add_method_mut("register", |lua, this, (name, func): (String, LuaFunction)| {
-            let (args, is_var_arg) = lua.globals().get::<LuaFunction>("__HOST_INSPECT_FUNC").and_then(|f| {
-                f.call::<(LuaTable, bool)>(func.clone())
-            }).and_then(|(names, var_arg)| {
-                names.sequence_values::<String>().collect::<LuaResult<Vec<_>>>().map(|names| (names, var_arg))
-            })?;
-            this.registered_callbacks.push(LuaAction {
-               args,
-               is_var_arg,
-               name,
-               callback: func,
-            });
-            Ok(())
-        });
         methods.add_method_mut("config", |lua, this, table: LuaTable| {
             apply!(this.font_size, table, |font_size: f32| {
                 this.line_height = font_size * 1.1;
@@ -90,33 +139,60 @@ impl LuaUserData for App {
             apply!(this.font_family, table);
             apply!(this.fullscreen, table);
             apply!(this.default_cwd, table);
+            apply!(this.action, table);
             this.ssh_sessions = util::collect_ssh_sessions(lua, &table);
 
             this.apply_config();
             Ok(())
         });
         methods.add_function("open_palette", |lua, this: Option<LuaAnyUserData>| {
-            if let Some(this) = this {
-                this.borrow_mut_scoped(|this: &mut App| {
-                    if let Some(overlay) = this.overlay.as_mut() {
-                        overlay.show(Some(Screen::CmdPalette));
-                    }
-                })?;
-            }
-            lua.create_function(move |_, this: LuaAnyUserData| {
-                this.borrow_mut_scoped(|this: &mut App| {
-                    if let Some(overlay) = this.overlay.as_mut() {
-                        overlay.show(Some(Screen::CmdPalette));
-                    }
-                })
+            callable_action!(lua, this => |this: &mut Self| {
+                if let Some(overlay) = this.overlay.as_mut() {
+                    overlay.show(Some(Screen::CmdPalette));
+                }
             })
         });
+        methods.add_function("open_sessions", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| {
+                if let Some(overlay) = this.overlay.as_mut() {
+                    overlay.show(Some(Screen::Sessions));
+                }
+            })
+        });
+        methods.add_function(
+            "create_session",
+            |lua, args: LuaMultiValue| {
+                let (this, (_, tab, _, _)) = args!(args, lua, (Option<String>, Option<usize>, Option<String>,
+                    Option<u64>));
+
+                callable_action!(lua, this => move |this: &mut Self| -> Result<()> {
+                    let session = this.session_manager.create_session(this.terminal_rows().max(1), this.cols.max(1), None)?;
+                    let tab = if let Some(tab) = tab {
+                        &mut this.tabs[tab]
+                    }else {
+                        &mut this.tabs[this.current_tab]
+                    };
+
+                    //let dir = dir.as_deref().map(Path::new).or(this.args.path.as_deref().or(this.default_cwd.as_deref()));
+
+                    if let Some(tab) = tab {
+                        tab.split_active(SplitDirection::Vertical, session);
+                    }else {
+                        *tab = Some(Tab::new(session));
+                    }
+                    Ok(())
+                })
+            },
+        );
     }
 
     fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
-        fields.add_field_method_get("current_tab", |_, this| {
-            Ok(this.current_tab)
-        });
+        fields.add_field_method_get("current_tab", |_, this| Ok(this.current_tab));
+        fields.add_field_method_get("font_size", |_, this| Ok(this.font_size));
+        fields.add_field_method_get("line_height", |_, this| Ok(this.line_height));
+        fields.add_field_method_get("font_family", |_, this| Ok(this.font_family.clone()));
+        fields.add_field_method_get("rows", |_, this| Ok(this.rows));
+        fields.add_field_method_get("cols", |_, this| Ok(this.cols));
     }
 }
 
@@ -154,16 +230,18 @@ pub fn load(this: &mut App) {
         return;
     };
 
-    _ = util::create_config_if_missing(&path).inspect_err(|e| tracing::error!(%e, "failed to create default config"));
+    _ = util::create_config_if_missing(&path)
+        .inspect_err(|e| tracing::error!(%e, "failed to create default config"));
 
     this.ssh_sessions.clear();
     this.key_bindings.clear();
     this.registered_callbacks.clear();
     let lua = this.lua.clone();
-    _ = with_env(this, |_| {
+    with_env(this, |_| {
         let chunk = lua.load(path);
         chunk.exec()
-    });
+    })
+    .into_log();
 }
 
 pub fn with_env<R>(this: &mut App, f: impl FnOnce(LuaAnyUserData) -> LuaResult<R>) -> Result<()> {
@@ -202,9 +280,15 @@ mod util {
                 let table = session
                     .as_table()
                     .context("ssh_session entry is not a table")?;
+                let name = table
+                    .get("name")
+                    .and_then(|v| from_value::<String>(v, lua))?;
                 Ok(SshConnection {
-                    name: table.get("name").and_then(|v| from_value(v, lua))?,
-                    user_name: table.get("user_name").and_then(|v| from_value(v, lua))?,
+                    name: name.clone(),
+                    user_name: table
+                        .get("user_name")
+                        .and_then(|v| from_value(v, lua))
+                        .unwrap_or(name),
                     ip: table
                         .get::<LuaValue>("ip")
                         .and_then(|v| from_value(v, lua))
@@ -433,18 +517,6 @@ impl KeyBinding {
     }*/
 
     fn parse_mods(binding: &str) -> Result<(&str, ModifiersState)> {
-        fn parse_mod(m: &str) -> Result<ModifiersState> {
-            Ok(match m.trim() {
-                "ctrl" => ModifiersState::CONTROL,
-                "alt" => ModifiersState::ALT,
-                "shift" => ModifiersState::SHIFT,
-                "mod" => ModifiersState::SUPER,
-                x => {
-                    anyhow::bail!("`{x}` is not a valid modifier");
-                }
-            })
-        }
-
         if !binding.starts_with('<') {
             return Ok((binding, ModifiersState::default()));
         }
@@ -459,17 +531,29 @@ impl KeyBinding {
 
         while let Some(next) = modifiers.chars().position(|c| c == '+') {
             let modifier = &modifiers[..next];
-            mods.extend(parse_mod(modifier)?);
+            mods.extend(Self::parse_mod(modifier)?);
             modifiers = &modifiers[next + 1..];
         }
-        mods.extend(parse_mod(modifiers)?);
+        mods.extend(Self::parse_mod(modifiers)?);
 
         let rest = &binding[end..];
 
         Ok((rest, mods))
     }
 
-    fn parse_key(key: &str) -> Result<KeyCode> {
+    pub fn parse_mod(m: &str) -> Result<ModifiersState> {
+        Ok(match m.trim() {
+            "ctrl" => ModifiersState::CONTROL,
+            "alt" => ModifiersState::ALT,
+            "shift" => ModifiersState::SHIFT,
+            "mod" => ModifiersState::SUPER,
+            x => {
+                anyhow::bail!("`{x}` is not a valid modifier");
+            }
+        })
+    }
+
+    pub fn parse_key(key: &str) -> Result<KeyCode> {
         let key = match key.to_lowercase().as_str() {
             "a" => KeyCode::KeyA,
             "b" => KeyCode::KeyB,

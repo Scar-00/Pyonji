@@ -1,6 +1,8 @@
-py:bind("<ctrl + shift>-W", py.open_palette());
+py:bind({'ctrl', 'shift'}, 'F', py.open_palette());
+py:bind({'ctrl', 'shift'}, 'S', py.open_sessions());
 
---print(KeyBind('A', { "ctrl" }));
+py:bind({'shift', 'ctrl'}, 'V', py.create_session(nil, 4, nil, nil));
+py:bind({'shift', 'ctrl'}, 'V', py.create_session("", 4, nil, nil));
 
 py:config({
     font_family = "Iosevka",
@@ -10,7 +12,6 @@ py:config({
     ssh_sessions = {
         {
             name = "ive",
-            user_name = "ive",
             ip = "192.168.178.20",
         }
     },

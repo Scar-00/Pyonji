@@ -15,7 +15,7 @@ use crate::{
     },
     pty::SshConnection,
     renderer::{BackgroundRenderer, TerminalRenderer},
-    App,
+    App, ResultExt,
 };
 use anyhow::Result;
 use crossterm::{
@@ -338,11 +338,14 @@ impl Overlay {
         actions
             .iter()
             .map(|action| {
-                let args = action
+                let mut args = action
                     .args
                     .iter()
                     .map(|name| Arg::new(name))
                     .collect::<Vec<_>>();
+                if action.is_var_arg {
+                    args.push(Arg::new("..."));
+                }
                 let func = action.callback.clone();
                 Cmd::new(action.name.clone(), args, move |_, app, args| {
                     let Ok(args) = args
@@ -353,7 +356,10 @@ impl Overlay {
                     else {
                         return;
                     };
-                    _ = func.call::<LuaValue>(LuaMultiValue::from_vec(args));
+                    config::with_env(app, |_| {
+                        func.call::<LuaValue>(LuaMultiValue::from_vec(args))
+                    })
+                    .into_log();
                 })
             })
             .collect()
