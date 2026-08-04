@@ -638,6 +638,12 @@ impl ApplicationHandler<PtyEvent> for App {
                                     self.split_current_tab(SplitDirection::Horizontal);
                                     return;
                                 }
+                                KeyCode::KeyT => {
+                                    if let Some(window) = self.window.as_mut() {
+                                        window.set_decorations(!window.is_decorated());
+                                        window.request_redraw();
+                                    }
+                                }
                                 KeyCode::KeyS => {
                                     self.status_bar_hidden = !self.status_bar_hidden;
                                     self.resize_tab();

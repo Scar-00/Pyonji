@@ -21,12 +21,12 @@ pub const LUA_MODULES: &[&str] = &[include_str!("../resources/lua/keybind.lua")]
 
 macro_rules! apply {
     ($this: ident.$field: ident, $table: expr) => {
-        if let Ok(value) = $table.get(stringify!($field)).inspect_err(|e| tracing::error!(%e, "failed to get field")) {
+        if let Ok(value) = $table.get(stringify!($field)).inspect_err(|e| tracing::error!(%e, "failed to get field `{}`", stringify!($field))) {
             $this.$field = value;
         }
     };
     ($this: ident.$field: ident, $table: expr, $transformer: expr) => {
-        if let Ok(value) = $table.get(stringify!($field)).map($transformer).inspect_err(|e| tracing::error!(%e, "failed to get field")) {
+        if let Ok(value) = $table.get(stringify!($field)).map($transformer).inspect_err(|e| tracing::error!(%e, "failed to get field `{}`", stringify!($field))) {
             $this.$field = value;
         }
     };

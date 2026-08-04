@@ -1,5 +1,5 @@
-py:bind({'ctrl', 'shift'}, 'F', py.open_palette());
-py:bind({'ctrl', 'shift'}, 'S', py.open_sessions());
+--py:bind({'ctrl', 'shift'}, 'F', py.open_palette());
+--py:bind({'ctrl', 'shift'}, 'S', py.open_sessions());
 
 py:config({
     font_family = "Iosevka",
