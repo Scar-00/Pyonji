@@ -35,12 +35,12 @@ macro_rules! apply {
 macro_rules! callable_action {
     ($lua: ident, $this: ident => $body: expr) => {{
         if let Some(this) = $this {
-            this.borrow_mut_scoped(move |this: &mut App| $body(this))?;
+            this.borrow_mut_scoped($body)??;
         }
         $lua.create_function(move |_, this: LuaAnyUserData| {
-            this.borrow_mut_scoped(move |this: &mut App| $body(this))
+            this.borrow_mut_scoped($body)?
         })
-    }};
+    }}
 }
 
 macro_rules! args {
@@ -89,7 +89,7 @@ impl LuaUserData for App {
                     FromLuaMulti::from_lua_multi(args, lua)?;
                 let mods = mods
                     .iter()
-                    .map(|modifier| KeyBinding::parse_mod(&modifier))
+                    .map(|modifier| KeyBinding::parse_mod(modifier))
                     .collect::<Result<Vec<_>>>()?;
                 let mut state = ModifiersState::empty();
                 for m in mods {
@@ -146,17 +146,19 @@ impl LuaUserData for App {
             Ok(())
         });
         methods.add_function("open_palette", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
                 if let Some(overlay) = this.overlay.as_mut() {
                     overlay.show(Some(Screen::CmdPalette));
                 }
+                Ok(())
             })
         });
         methods.add_function("open_sessions", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
                 if let Some(overlay) = this.overlay.as_mut() {
                     overlay.show(Some(Screen::Sessions));
                 }
+                Ok(())
             })
         });
         methods.add_function(
@@ -164,8 +166,7 @@ impl LuaUserData for App {
             |lua, args: LuaMultiValue| {
                 let (this, (_, tab, _, _)) = args!(args, lua, (Option<String>, Option<usize>, Option<String>,
                     Option<u64>));
-
-                callable_action!(lua, this => move |this: &mut Self| -> Result<()> {
+                callable_action!(lua, this => move |this: &mut Self| -> LuaResult<()> {
                     let session = this.session_manager.create_session(this.terminal_rows().max(1), this.cols.max(1), None)?;
                     let tab = if let Some(tab) = tab {
                         &mut this.tabs[tab]

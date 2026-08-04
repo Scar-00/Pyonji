@@ -4,7 +4,7 @@ use ahash::{HashMap, HashMapExt as _};
 pub use background::BackgroundRenderer;
 pub use glyph::TerminalRenderer;
 
-use std::{cell::RefCell, sync::Arc, time::Instant};
+use std::{cell::RefCell, sync::Arc};
 
 use anyhow::{Context, Result};
 use bumpalo::Bump as Arena;

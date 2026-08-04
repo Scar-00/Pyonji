@@ -338,11 +338,7 @@ impl Overlay {
         actions
             .iter()
             .map(|action| {
-                let mut args = action
-                    .args
-                    .iter()
-                    .map(|name| Arg::new(name))
-                    .collect::<Vec<_>>();
+                let mut args = action.args.iter().map(Arg::new).collect::<Vec<_>>();
                 if action.is_var_arg {
                     args.push(Arg::new("..."));
                 }

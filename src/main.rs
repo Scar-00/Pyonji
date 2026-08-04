@@ -18,7 +18,7 @@ mod overlay;
 mod pty;
 mod renderer;
 mod terminal;
-mod util;
+//mod util;
 
 use mlua::{prelude::LuaFunction, Lua, LuaOptions, StdLib};
 use smol::Task;
