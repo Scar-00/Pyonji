@@ -109,7 +109,9 @@ struct App {
     cols: u16,
     tabs: [Option<Tab>; 9],
     action_mode: bool,
+    pending_move_to_tab: bool,
     current_tab: usize,
+    detached_sessions: Vec<SessionId>,
     cursor_pos: Option<(f64, f64)>,
     wheel_remainder: f32,
     divider_drag: Option<DividerDrag>,
@@ -210,7 +212,9 @@ impl App {
             cols: 80,
             tabs: array::from_fn(|_| None),
             action_mode: false,
+            pending_move_to_tab: false,
             current_tab: 0,
+            detached_sessions: vec![],
             cursor_pos: None,
             wheel_remainder: 0.0,
             divider_drag: None,
@@ -308,6 +312,7 @@ impl ApplicationHandler<PtyEvent> for App {
         match event {
             PtyEvent::Closed(id) => {
                 self.session_manager.remove_session(id);
+                self.detached_sessions.retain(|detached| *detached != id);
                 if self.session_manager.is_empty() {
                     event_loop.exit();
                     return;
@@ -579,86 +584,8 @@ impl ApplicationHandler<PtyEvent> for App {
                             self.resize_mode_used = false;
                             self.action_mode = true;
                             return;
-                        } else if self.action_mode {
-                            self.action_mode = false;
-                            match code {
-                                KeyCode::Digit1 => {
-                                    self.switch_tab(0);
-                                    return;
-                                }
-                                KeyCode::Digit2 => {
-                                    self.switch_tab(1);
-                                    return;
-                                }
-                                KeyCode::Digit3 => {
-                                    self.switch_tab(2);
-                                    return;
-                                }
-                                KeyCode::Digit4 => {
-                                    self.switch_tab(3);
-                                    return;
-                                }
-                                KeyCode::Digit5 => {
-                                    self.switch_tab(4);
-                                    return;
-                                }
-                                KeyCode::Digit6 => {
-                                    self.switch_tab(5);
-                                    return;
-                                }
-                                KeyCode::Digit7 => {
-                                    self.switch_tab(6);
-                                    return;
-                                }
-                                KeyCode::Digit8 => {
-                                    self.switch_tab(7);
-                                    return;
-                                }
-                                KeyCode::Digit9 => {
-                                    self.switch_tab(8);
-                                    return;
-                                }
-                                KeyCode::KeyK => {
-                                    self.switch_tab(self.next_tab_index());
-                                    return;
-                                }
-                                KeyCode::KeyJ => {
-                                    self.switch_tab(self.previous_tab_index());
-                                    return;
-                                }
-                                KeyCode::KeyW => {
-                                    self.focus_next_pane();
-                                    return;
-                                }
-                                KeyCode::KeyV => {
-                                    self.split_current_tab(SplitDirection::Vertical);
-                                    return;
-                                }
-                                KeyCode::KeyH => {
-                                    self.split_current_tab(SplitDirection::Horizontal);
-                                    return;
-                                }
-                                KeyCode::KeyT => {
-                                    if let Some(window) = self.window.as_mut() {
-                                        window.set_decorations(!window.is_decorated());
-                                        window.request_redraw();
-                                    }
-                                }
-                                KeyCode::KeyS => {
-                                    self.status_bar_hidden = !self.status_bar_hidden;
-                                    self.resize_tab();
-                                    self.request_redraw();
-                                    return;
-                                }
-                                KeyCode::KeyP => {
-                                    if let Some(overlay) = self.overlay.as_mut() {
-                                        overlay.show(Some(Screen::CmdPalette));
-                                        self.request_redraw();
-                                    }
-                                    return;
-                                }
-                                _ => {}
-                            }
+                        } else if self.action_mode && self.action_mode_key(code) {
+                            return;
                         }
                         if self
                             .modifiers
@@ -718,6 +645,9 @@ impl ApplicationHandler<PtyEvent> for App {
                                 }
                                 _ => {}
                             }
+                        }
+                        if self.action_mode && self.action_mode_key(code) {
+                            return;
                         }
                         let pressed = KeyBinding {
                             mods: self.modifiers,
@@ -891,14 +821,29 @@ impl App {
     }
 
     fn resize_tab(&mut self) {
-        for (session_id, geometry) in self.tab_layouts() {
+        self.resize_tab_at(self.current_tab);
+    }
+
+    fn resize_tab_at(&mut self, index: usize) {
+        let rows = self.terminal_rows();
+        let Some(tab) = self.tabs[index].as_ref() else {
+            return;
+        };
+        for (session_id, geometry) in tab.layout(PaneGeometry {
+            x: 0,
+            y: 0,
+            cols: self.cols,
+            rows,
+        }) {
             self.session_manager.resize_session(
                 session_id,
                 geometry.rows.max(1),
                 geometry.cols.max(1),
             );
         }
-        self.update_ime_cursor_area();
+        if index == self.current_tab {
+            self.update_ime_cursor_area();
+        }
     }
 
     fn pane_hit_test(&self, x: f64, y: f64) -> Option<PaneHit> {
@@ -1105,6 +1050,204 @@ impl App {
         self.resize_tab();
         self.update_ime_cursor_area();
         self.request_redraw();
+    }
+
+    fn move_session_to_tab(&mut self, session: SessionId, target: usize) -> bool {
+        if target >= self.tabs.len() || target == self.current_tab {
+            return false;
+        }
+        let mut source = None;
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            if index == target {
+                continue;
+            }
+            if let Some(tab) = tab.as_mut()
+                && tab.remove_session(session)
+            {
+                source = Some(index);
+                break;
+            }
+        }
+        let Some(source) = source else {
+            return false;
+        };
+        self.detached_sessions.retain(|id| *id != session);
+
+        match self.tabs[target].as_mut() {
+            Some(tab) => {
+                if !tab.split_active(SplitDirection::Vertical, session) {
+                    self.detached_sessions.push(session);
+                }
+            }
+            None => self.tabs[target] = Some(Tab::new(session)),
+        }
+
+        self.current_tab = target;
+        self.wheel_remainder = 0.0;
+        if self.tabs[source]
+            .as_ref()
+            .is_some_and(|tab| !tab.is_empty())
+        {
+            self.resize_tab_at(source);
+        }
+        self.resize_tab();
+        self.request_redraw();
+        true
+    }
+
+    fn detach_active_session(&mut self) {
+        let Some(active_session) = self.active_session() else {
+            return;
+        };
+        let Some(tab) = self.tabs[self.current_tab].as_mut() else {
+            return;
+        };
+        if !tab.remove_session(active_session) {
+            return;
+        }
+        self.detached_sessions.push(active_session);
+        if self.tabs[self.current_tab]
+            .as_ref()
+            .is_some_and(Tab::is_empty)
+        {
+            self.tabs[self.current_tab] = None;
+            self.switch_to_previous_live_tab_or_stay(self.current_tab);
+        } else {
+            self.resize_tab();
+        }
+        self.update_ime_cursor_area();
+        self.request_redraw();
+    }
+
+    fn reattach_session(&mut self, session: SessionId, target: usize) -> bool {
+        if target >= self.tabs.len() || !self.detached_sessions.contains(&session) {
+            return false;
+        }
+        self.detached_sessions.retain(|id| *id != session);
+        match self.tabs[target].as_mut() {
+            Some(tab) => {
+                if !tab.split_active(SplitDirection::Vertical, session) {
+                    self.detached_sessions.push(session);
+                    return false;
+                }
+            }
+            None => self.tabs[target] = Some(Tab::new(session)),
+        }
+        self.current_tab = target;
+        self.wheel_remainder = 0.0;
+        self.resize_tab();
+        self.update_ime_cursor_area();
+        self.request_redraw();
+        true
+    }
+
+    pub fn live_detached_sessions(&self) -> Vec<SessionId> {
+        self.detached_sessions
+            .iter()
+            .copied()
+            .filter(|id| self.session_manager.session(*id).is_some())
+            .collect()
+    }
+
+    fn rename_active(&mut self, name: &str) {
+        let Some(session) = self.active_session() else {
+            return;
+        };
+        let Some(session) = self.session_manager.session_mut(session) else {
+            return;
+        };
+        session.rename(name.to_string());
+        self.request_redraw();
+    }
+
+    fn action_mode_key(&mut self, code: KeyCode) -> bool {
+        if self.pending_move_to_tab {
+            self.pending_move_to_tab = false;
+            self.action_mode = false;
+            self.pending_keys = None;
+            self.request_redraw();
+            if let Some(target) = Self::tab_digit_index(code)
+                && let Some(session) = self.active_session()
+            {
+                self.move_session_to_tab(session, target);
+            }
+            return true;
+        }
+
+        self.action_mode = false;
+        self.pending_keys = None;
+        self.request_redraw();
+        match code {
+            KeyCode::Digit1 => self.switch_tab(0),
+            KeyCode::Digit2 => self.switch_tab(1),
+            KeyCode::Digit3 => self.switch_tab(2),
+            KeyCode::Digit4 => self.switch_tab(3),
+            KeyCode::Digit5 => self.switch_tab(4),
+            KeyCode::Digit6 => self.switch_tab(5),
+            KeyCode::Digit7 => self.switch_tab(6),
+            KeyCode::Digit8 => self.switch_tab(7),
+            KeyCode::Digit9 => self.switch_tab(8),
+            KeyCode::KeyK => self.switch_tab(self.next_tab_index()),
+            KeyCode::KeyJ => self.switch_tab(self.previous_tab_index()),
+            KeyCode::KeyW => self.focus_next_pane(),
+            KeyCode::KeyV => self.split_current_tab(SplitDirection::Vertical),
+            KeyCode::KeyH => self.split_current_tab(SplitDirection::Horizontal),
+            KeyCode::KeyT => {
+                if let Some(window) = self.window.as_mut() {
+                    window.set_decorations(!window.is_decorated());
+                    window.request_redraw();
+                }
+            }
+            KeyCode::KeyS => {
+                self.status_bar_hidden = !self.status_bar_hidden;
+                self.resize_tab();
+                self.request_redraw();
+            }
+            KeyCode::KeyP => {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.show(Some(Screen::CmdPalette));
+                }
+                self.request_redraw();
+            }
+            KeyCode::KeyM => {
+                self.pending_move_to_tab = true;
+                self.action_mode = true;
+                self.pending_keys = Some("C-b move to tab: ".into());
+                self.request_redraw();
+            }
+            KeyCode::KeyD => {
+                self.detach_active_session();
+            }
+            KeyCode::KeyR => {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.show(Some(Screen::Rename));
+                }
+                self.request_redraw();
+            }
+            KeyCode::KeyA => {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.show(Some(Screen::Detached));
+                }
+                self.request_redraw();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn tab_digit_index(code: KeyCode) -> Option<usize> {
+        match code {
+            KeyCode::Digit1 => Some(0),
+            KeyCode::Digit2 => Some(1),
+            KeyCode::Digit3 => Some(2),
+            KeyCode::Digit4 => Some(3),
+            KeyCode::Digit5 => Some(4),
+            KeyCode::Digit6 => Some(5),
+            KeyCode::Digit7 => Some(6),
+            KeyCode::Digit8 => Some(7),
+            KeyCode::Digit9 => Some(8),
+            _ => None,
+        }
     }
 
     fn terminal_rows(&self) -> u16 {

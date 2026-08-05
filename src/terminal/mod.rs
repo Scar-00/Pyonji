@@ -524,7 +524,8 @@ pub struct TerminalSession {
     pub pty: Pty,
     pub vt: vt100::Parser<CB>,
     pub cursor_style: CursorState,
-    pub title: String,
+    title: String,
+    custom_title: Option<String>,
     pub mouse_pressed_button: Option<MouseButton>,
     pub last_mouse_cell: Option<(u16, u16)>,
 }
@@ -787,8 +788,12 @@ impl TerminalSession {
         self.title = title;
     }
 
+    pub fn rename(&mut self, name: String) {
+        self.custom_title = Some(name);
+    }
+
     pub fn title(&self) -> &str {
-        self.title.as_str()
+        self.custom_title.as_deref().unwrap_or(&self.title)
     }
 
     fn send_mouse_event(

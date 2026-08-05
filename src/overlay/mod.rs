@@ -1,6 +1,8 @@
+mod detached;
 mod opener;
 mod palette;
 mod releases;
+mod rename;
 mod sessions;
 
 use std::io::{self, Write};
@@ -8,9 +10,11 @@ use std::io::{self, Write};
 use crate::{
     config,
     overlay::{
+        detached::{DetachedState, DetachedView},
         opener::{OpenerState, OpenerView},
         palette::{Arg, Cmd, CmdPalleteState, CmdPalleteView},
         releases::{ReleasesState, ReleasesView},
+        rename::{RenameState, RenameView},
         sessions::{SessionsState, SessionsView},
     },
     pty::SshConnection,
@@ -61,6 +65,8 @@ macro_rules! execute {
 pub enum Screen {
     CmdPalette,
     Sessions,
+    Detached,
+    Rename,
     Releases,
     Opener,
 }
@@ -76,6 +82,10 @@ pub struct Overlay {
     cmd_palette_state: CmdPalleteState,
 
     session_state: SessionsState,
+
+    detached_state: DetachedState,
+
+    rename_state: RenameState,
 
     opener_state: OpenerState,
 }
@@ -129,6 +139,25 @@ impl Overlay {
                     self.toggle();
                 }
             }
+            Screen::Detached => {
+                if self.detached_state.handle_events(app, code) {
+                    self.toggle();
+                } else if let Some(session) = self.detached_state.take_rename_target() {
+                    self.rename_state.open(session);
+                    self.screen = Screen::Rename;
+                    app.request_redraw();
+                }
+            }
+            Screen::Rename => {
+                if self.rename_state.handle_events(app, code, event) {
+                    if self.rename_state.take_target().is_some() {
+                        self.screen = Screen::Detached;
+                        app.request_redraw();
+                    } else {
+                        self.toggle();
+                    }
+                }
+            }
             Screen::Releases => self.release_state.handle_events(app, code),
             Screen::Opener => {
                 if self.opener_state.handle_events(app, code) {
@@ -151,6 +180,8 @@ impl Overlay {
                 .border_type(BorderType::Rounded);
             let block = match self.screen {
                 Screen::Sessions => block.title("Sessions"),
+                Screen::Detached => block.title("Attach Session"),
+                Screen::Rename => block.title("Rename Session"),
                 Screen::Releases => block.title("Releases"),
                 Screen::Opener => block.title(format!(
                     "Opener - {}",
@@ -174,6 +205,20 @@ impl Overlay {
                         SessionsView::new(app),
                         inner,
                         &mut self.session_state,
+                    );
+                }
+                Screen::Detached => {
+                    frame.render_stateful_widget(
+                        DetachedView::new(app),
+                        inner,
+                        &mut self.detached_state,
+                    );
+                }
+                Screen::Rename => {
+                    frame.render_stateful_widget(
+                        RenameView::new(app),
+                        inner,
+                        &mut self.rename_state,
                     );
                 }
                 Screen::Releases => {
@@ -221,6 +266,10 @@ impl Overlay {
 
             session_state: SessionsState::new(),
 
+            detached_state: DetachedState::new(),
+
+            rename_state: RenameState::new(),
+
             opener_state: OpenerState::new(),
         })
     }
@@ -246,6 +295,9 @@ impl Overlay {
 
     pub fn show(&mut self, screen: Option<Screen>) {
         if let Some(screen) = screen {
+            if screen == Screen::Rename {
+                self.rename_state.reset();
+            }
             self.screen = screen;
         }
         self.shown = true;
@@ -288,6 +340,41 @@ impl Overlay {
             }),
             Cmd::new("sessions", [], |this, app, _| {
                 this.screen = Screen::Sessions;
+                this.toggle();
+                app.request_redraw();
+            }),
+            Cmd::new("detach", [], |_, app, _| {
+                app.detach_active_session();
+                app.request_redraw();
+            }),
+            Cmd::new("rename", [Arg::new("name")], |_, app, args| {
+                let Some(name) = args.first() else {
+                    return;
+                };
+                if let Some(session) = app.active_session()
+                    && let Some(session) = app.session_manager.session_mut(session)
+                {
+                    session.rename(name.clone());
+                }
+                app.request_redraw();
+            }),
+            Cmd::new("move-to", [Arg::new("tab")], |_, app, args| {
+                let Some(tab) = args.first() else {
+                    return;
+                };
+                let Ok(tab) = tab.parse::<usize>() else {
+                    return;
+                };
+                if tab == 0 || tab > 9 {
+                    return;
+                }
+                if let Some(session) = app.active_session() {
+                    app.move_session_to_tab(session, tab - 1);
+                }
+                app.request_redraw();
+            }),
+            Cmd::new("attach", [], |this, app, _| {
+                this.screen = Screen::Detached;
                 this.toggle();
                 app.request_redraw();
             }),

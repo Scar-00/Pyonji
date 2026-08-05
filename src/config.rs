@@ -161,6 +161,54 @@ impl LuaUserData for App {
                 Ok(())
             })
         });
+        methods.add_function("open_detached", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                if let Some(overlay) = this.overlay.as_mut() {
+                    overlay.show(Some(Screen::Detached));
+                }
+                Ok(())
+            })
+        });
+        methods.add_function("detach", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                this.detach_active_session();
+                Ok(())
+            })
+        });
+        methods.add_function("open_rename", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                if let Some(overlay) = this.overlay.as_mut() {
+                    overlay.show(Some(Screen::Rename));
+                }
+                Ok(())
+            })
+        });
+        methods.add_function("rename", |lua, args: LuaMultiValue| {
+            let (this, (name,)) = args!(args, lua, (String,));
+            if let Some(this) = this {
+                this.borrow_mut_scoped(|this: &mut Self| -> LuaResult<()> {
+                    this.rename_active(&name);
+                    Ok(())
+                })??;
+            }
+            lua.create_function(move |_, this: LuaAnyUserData| {
+                this.borrow_mut_scoped(|this: &mut Self| -> LuaResult<()> {
+                    this.rename_active(&name);
+                    Ok(())
+                })?
+            })
+        });
+        methods.add_function("move_to", |lua, args: LuaMultiValue| {
+            let (this, (tab,)) = args!(args, lua, (Option<usize>,));
+            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<()> {
+                if let Some(tab) = tab
+                    && let Some(session) = this.active_session()
+                {
+                    this.move_session_to_tab(session, tab);
+                }
+                Ok(())
+            })
+        });
         methods.add_function(
             "create_session",
             |lua, args: LuaMultiValue| {
