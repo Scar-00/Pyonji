@@ -1164,7 +1164,6 @@ impl App {
         if self.pending_move_to_tab {
             self.pending_move_to_tab = false;
             self.action_mode = false;
-            self.pending_keys = None;
             self.request_redraw();
             if let Some(target) = Self::tab_digit_index(code)
                 && let Some(session) = self.active_session()
@@ -1175,7 +1174,6 @@ impl App {
         }
 
         self.action_mode = false;
-        self.pending_keys = None;
         self.request_redraw();
         match code {
             KeyCode::Digit1 => self.switch_tab(0),
@@ -1212,7 +1210,6 @@ impl App {
             KeyCode::KeyM => {
                 self.pending_move_to_tab = true;
                 self.action_mode = true;
-                self.pending_keys = Some("C-b move to tab: ".into());
                 self.request_redraw();
             }
             KeyCode::KeyD => {
