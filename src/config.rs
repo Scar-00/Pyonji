@@ -292,16 +292,16 @@ pub fn load(this: &mut App) {
     .into_log();
 }
 
-pub fn with_env<R>(this: &mut App, f: impl FnOnce(LuaAnyUserData) -> LuaResult<R>) -> Result<()> {
+pub fn with_env<R>(this: &mut App, f: impl FnOnce(LuaAnyUserData) -> LuaResult<R>) -> Result<R> {
     let lua = this.lua.clone();
-    lua.scope(|scope| {
+    let res = lua.scope(|scope| {
         let app = scope.create_userdata_ref_mut(this)?;
         lua.globals().set("py", app.clone())?;
         let ret = f(app);
         lua.globals().remove("py")?;
         ret
     })?;
-    Ok(())
+    Ok(res)
 }
 
 pub fn install_inspect(lua: &Lua) -> Result<()> {

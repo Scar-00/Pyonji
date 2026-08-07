@@ -26,6 +26,7 @@ pub enum Event {
     Data(SessionId, Vec<u8>),
     ProgramChanged((SessionId, String)),
     ConfigChanged,
+    LuaPrint(String),
 }
 
 impl Pty {
