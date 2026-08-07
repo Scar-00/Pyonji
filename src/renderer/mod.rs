@@ -143,6 +143,18 @@ pub struct StatusTab {
     pub is_active: bool,
 }
 
+pub struct StatusInput {
+    pub prompt: String,
+    pub text: String,
+    pub cursor_col: usize,
+}
+
+pub struct StatusLine<'a> {
+    pub tabs: Option<&'a [StatusTab]>,
+    pub input: Option<&'a StatusInput>,
+    pub message: Option<&'a str>,
+}
+
 pub struct ImePreedit {
     pub text: String,
     pub geometry: PaneGeometry,
@@ -277,7 +289,7 @@ impl Renderer {
         &mut self,
         panes: &[Pane<'_>],
         dividers: &[Divider],
-        status_tabs: Option<&[StatusTab]>,
+        status: Option<StatusLine<'_>>,
         ime_preedit: Option<&ImePreedit>,
         overlay: Option<&Overlay>,
     ) -> Result<()> {
@@ -440,8 +452,8 @@ impl Renderer {
                 }
             }
         }
-        if let Some(tabs) = status_tabs {
-            self.draw_status_bar(grid_cols, grid_rows, screen_size, tabs);
+        if let Some(status) = status {
+            self.draw_status_bar(grid_cols, grid_rows, screen_size, status);
         }
         let mut encoder = self
             .device
@@ -491,7 +503,7 @@ impl Renderer {
         grid_cols: usize,
         grid_rows: usize,
         screen_size: [f32; 2],
-        status_tabs: &[StatusTab],
+        status: StatusLine,
     ) {
         if grid_cols == 0 || grid_rows == 0 {
             return;
@@ -502,58 +514,106 @@ impl Renderer {
         let bar_height = (self.line_height * 2.0) / screen_size[1].max(1.0);
         let bar_y = self.ndc([0.0, bar_bottom])[1];
 
-        let bg_color = None;
-        let active_bg = Color::rgb(0xbb, 0x9a, 0xf7);
-        let inactive_bg = Color::rgb(0x56, 0x5f, 0x89);
-        let inactive_fg = Color::rgb(0xf0, 0xe7, 0xfa);
-        let active_fg = inactive_fg;
+        let bg_color = Some(Color::rgb(0x1e, 0x1e, 0x2e)); // base
+        let accent = Color::rgb(0xb4, 0xbe, 0xfe); // lavender
+        let accent_fg = Color::rgb(0x1e, 0x1e, 0x2e); // base on accent
+        let inactive_bg = Color::rgb(0x31, 0x32, 0x44); // surface0
+        let inactive_fg = Color::rgb(0xcd, 0xd6, 0xf4); // text
+        let message_bg = Color::rgb(0xcb, 0xa6, 0xf7); // mauve
+        let message_fg = Color::rgb(0x11, 0x11, 0x1b); // crust
 
         if let Some(bg) = bg_color {
             self.background_renderer
-                .add_rect(-1.0, bar_y, 2.0, bar_height, bg);
+                .add_rect(-1.0, bar_y, 2.0, bar_height, bg.inner());
         }
 
         let left_limit = grid_cols;
 
-        let mut cursor = 0usize;
-        for tab in status_tabs {
-            if cursor >= left_limit {
-                break;
-            }
-            let remaining = left_limit.saturating_sub(cursor);
-            if remaining < 4 {
-                break;
-            }
-
-            let label = fit_status_text(&format!(" {} ", tab.label), remaining);
-            let width = label.chars().count();
-            if width == 0 {
-                continue;
-            }
-
-            self.draw_status_segment(
-                cursor,
-                bar_bottom,
-                width,
-                if tab.is_active {
-                    active_bg
-                } else {
-                    inactive_bg
-                },
-            );
-            self.draw_status_text(
-                &label,
-                cursor,
-                bar_row,
-                screen_size,
-                if tab.is_active {
-                    active_fg
-                } else {
-                    inactive_fg
-                },
-            );
-            cursor += width;
+        if let Some(input) = status.input {
+            self.draw_status_input(input, bar_row, bar_bottom, screen_size, accent, accent_fg);
+            return;
         }
+
+        if let Some(tabs) = status.tabs {
+            let mut cursor = 0usize;
+            for tab in tabs {
+                if cursor >= left_limit {
+                    break;
+                }
+                let remaining = left_limit.saturating_sub(cursor);
+                if remaining < 4 {
+                    break;
+                }
+
+                let label = fit_status_text(&format!(" {} ", tab.label), remaining);
+                let width = label.chars().count();
+                if width == 0 {
+                    continue;
+                }
+
+                self.draw_status_segment(
+                    cursor,
+                    bar_bottom,
+                    width,
+                    if tab.is_active {
+                        accent
+                    } else {
+                        inactive_bg
+                    },
+                );
+                self.draw_status_text(
+                    &label,
+                    cursor,
+                    bar_row,
+                    screen_size,
+                    if tab.is_active {
+                        accent_fg
+                    } else {
+                        inactive_fg
+                    },
+                );
+                cursor += width;
+            }
+        }
+
+        if let Some(message) = status.message {
+            let padded = format!(" {} ", message);
+            let text = fit_status_text(&padded, left_limit);
+            let width = text.chars().count();
+            let start = left_limit.saturating_sub(width);
+            self.draw_status_segment(start, bar_bottom, width, message_bg);
+            self.draw_status_text(&text, start, bar_row, screen_size, message_fg);
+        }
+    }
+
+    fn draw_status_input(
+        &mut self,
+        input: &StatusInput,
+        bar_row: usize,
+        bar_bottom: f32,
+        screen_size: [f32; 2],
+        prompt_bg: Color,
+        fg: Color,
+    ) {
+        let prompt_cols = input.prompt.chars().count();
+        self.draw_status_segment(0, bar_bottom, prompt_cols, prompt_bg);
+        self.draw_status_text(&input.prompt, 0, bar_row, screen_size, fg);
+        self.draw_status_text(
+            &input.text,
+            prompt_cols,
+            bar_row,
+            screen_size,
+            Color::rgb(0xcd, 0xd6, 0xf4),
+        );
+
+        let cell_w = self.font_size / 2.0;
+        let cursor_x = cell_w * input.cursor_col as f32;
+        let cursor_y = bar_bottom;
+        let cursor_w = (cell_w / self.window.inner_size().width.max(1) as f32) * 2.0;
+        let cursor_h = (self.line_height * 2.0) / self.window.inner_size().height.max(1) as f32;
+        let [cx, cy] = self.ndc([cursor_x, cursor_y]);
+        self.background_renderer
+            .add_rect(cx, cy, cursor_w, cursor_h, [0x10, 0x10, 0x18, 0x90]);
     }
 
     fn draw_status_segment(

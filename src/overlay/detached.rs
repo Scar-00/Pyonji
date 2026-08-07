@@ -1,7 +1,7 @@
 use ratatui::{prelude::*, widgets::*};
 use winit::keyboard::KeyCode;
 
-use crate::{App, terminal::SessionId};
+use crate::App;
 
 pub struct DetachedView<'a> {
     app: &'a mut App,
@@ -15,19 +15,13 @@ impl<'a> DetachedView<'a> {
 
 pub struct DetachedState {
     list_state: ListState,
-    rename_target: Option<SessionId>,
 }
 
 impl DetachedState {
     pub fn new() -> Self {
         Self {
             list_state: ListState::default(),
-            rename_target: None,
         }
-    }
-
-    pub fn take_rename_target(&mut self) -> Option<SessionId> {
-        self.rename_target.take()
     }
 
     pub fn handle_events(&mut self, app: &mut App, code: KeyCode) -> bool {
@@ -38,14 +32,6 @@ impl DetachedState {
             }
             KeyCode::ArrowUp => {
                 self.list_state.select_previous();
-                false
-            }
-            KeyCode::KeyR => {
-                let Some(selected) = self.list_state.selected() else {
-                    return false;
-                };
-                let sessions = app.live_detached_sessions();
-                self.rename_target = sessions.get(selected).copied();
                 false
             }
             KeyCode::Enter

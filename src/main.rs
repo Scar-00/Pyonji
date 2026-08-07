@@ -20,7 +20,7 @@ mod renderer;
 mod terminal;
 //mod util;
 
-use mlua::{prelude::LuaFunction, Lua, LuaOptions, StdLib};
+use mlua::{Lua, LuaOptions, StdLib, prelude::*};
 use smol::Task;
 #[cfg(not(feature = "install"))]
 use tracing_subscriber::prelude::*;
@@ -28,9 +28,10 @@ use tracing_subscriber::prelude::*;
 use anyhow::{Context, Result};
 use clap::Parser;
 use pty::Event as PtyEvent;
-use renderer::{ImePreedit, Pane, Renderer, StatusTab};
+use renderer::{ImePreedit, Pane, Renderer, StatusInput, StatusLine, StatusTab};
 use std::{
     array,
+    cell::RefCell,
     fmt::Display,
     panic::Location,
     path::{Path, PathBuf},
@@ -40,7 +41,7 @@ use tracing::error;
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
-    event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{KeyCode, ModifiersState, PhysicalKey},
     window::{Icon, Window, WindowId},
@@ -120,6 +121,8 @@ struct App {
     ime_enabled: bool,
     ime_preedit: Option<String>,
     status_bar_hidden: bool,
+    status_prompt: Option<StatusPrompt>,
+    status_message: Option<String>,
     _proxy: EventLoopProxy<PtyEvent>,
 
     pub local_executer: LocalExecutor,
@@ -146,6 +149,112 @@ struct PaneHit {
 struct DividerDrag {
     path: Vec<PanePathStep>,
     direction: SplitDirection,
+}
+
+enum StatusPromptMode {
+    Command,
+    Rename,
+    Lua,
+}
+
+struct StatusPrompt {
+    mode: StatusPromptMode,
+    buffer: String,
+    cursor: usize,
+    history: Vec<String>,
+    history_index: Option<usize>,
+}
+
+impl StatusPrompt {
+    fn new(mode: StatusPromptMode) -> Self {
+        Self {
+            mode,
+            buffer: String::new(),
+            cursor: 0,
+            history: Vec::new(),
+            history_index: None,
+        }
+    }
+
+    fn insert(&mut self, text: &str) {
+        self.buffer.insert_str(self.cursor, text);
+        self.cursor += text.len();
+    }
+
+    fn delete_before(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let index = self.buffer[..self.cursor]
+            .char_indices()
+            .next_back()
+            .map_or(0, |(index, _)| index);
+        self.buffer.remove(index);
+        self.cursor = index;
+    }
+
+    fn delete_at(&mut self) {
+        if self.cursor >= self.buffer.len() {
+            return;
+        }
+        self.buffer.remove(self.cursor);
+    }
+
+    fn cursor_left(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        self.cursor = self.buffer[..self.cursor]
+            .char_indices()
+            .next_back()
+            .map_or(0, |(index, _)| index);
+    }
+
+    fn cursor_right(&mut self) {
+        if self.cursor >= self.buffer.len() {
+            return;
+        }
+        self.cursor = self.buffer[self.cursor..]
+            .char_indices()
+            .nth(1)
+            .map_or(self.buffer.len(), |(index, _)| self.cursor + index);
+    }
+
+    fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        match self.history_index {
+            None => self.history_index = Some(self.history.len() - 1),
+            Some(index) if index > 0 => self.history_index = Some(index - 1),
+            _ => return,
+        }
+        let index = self.history_index.expect("just set");
+        self.buffer = self.history[index].clone();
+        self.cursor = self.buffer.len();
+    }
+
+    fn history_next(&mut self) {
+        match self.history_index {
+            Some(index) if index + 1 < self.history.len() => {
+                self.history_index = Some(index + 1);
+                self.buffer = self.history[index + 1].clone();
+            }
+            Some(_) => {
+                self.history_index = None;
+                self.buffer.clear();
+            }
+            None => return,
+        }
+        self.cursor = self.buffer.len();
+    }
+
+    fn push_history(&mut self, entry: String) {
+        if self.history.last() != Some(&entry) {
+            self.history.push(entry);
+        }
+        self.history_index = None;
+    }
 }
 
 fn main() -> Result<()> {
@@ -223,6 +332,8 @@ impl App {
             ime_enabled: false,
             ime_preedit: None,
             status_bar_hidden: false,
+            status_prompt: None,
+            status_message: None,
             _proxy: proxy,
 
             local_executer: LocalExecutor::new(),
@@ -370,6 +481,22 @@ impl ApplicationHandler<PtyEvent> for App {
                 let active = self.active_session();
                 let dividers = self.tab_dividers();
                 let status_tabs = self.status_tabs();
+                let status_input = self.status_input();
+                let status_message = if self.status_bar_hidden {
+                    None
+                } else {
+                    self.status_message.clone()
+                };
+                let status = if status_tabs.is_none() && status_input.is_none() && status_message.is_none()
+                {
+                    None
+                } else {
+                    Some(StatusLine {
+                        tabs: status_tabs.as_deref(),
+                        input: status_input.as_ref(),
+                        message: status_message.as_deref(),
+                    })
+                };
                 let ime_preedit = self.ime_preedit();
                 self.ui();
                 let Some(renderer) = self.renderer.as_mut() else {
@@ -391,7 +518,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 if let Err(e) = renderer.render(
                     &pane_data,
                     &dividers,
-                    status_tabs.as_deref(),
+                    status,
                     ime_preedit.as_ref(),
                     self.overlay.as_ref(),
                 ) {
@@ -541,6 +668,11 @@ impl ApplicationHandler<PtyEvent> for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                if let Some(prompt) = self.status_prompt.take() {
+                    self.handle_status_prompt(prompt, &event);
+                    self.request_redraw();
+                    return;
+                }
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if self.key_bindings.is_empty() {
                         if code == KeyCode::KeyB && event.state == ElementState::Released {
@@ -1160,6 +1292,178 @@ impl App {
         self.request_redraw();
     }
 
+    fn open_status_prompt(&mut self) {
+        self.status_bar_hidden = false;
+        self.status_message = None;
+        self.status_prompt = Some(StatusPrompt::new(StatusPromptMode::Command));
+        self.resize_tab();
+        self.request_redraw();
+    }
+
+    fn open_rename_prompt(&mut self) {
+        self.status_bar_hidden = false;
+        self.status_message = None;
+        let mut prompt = StatusPrompt::new(StatusPromptMode::Rename);
+        let name = self
+            .active_session()
+            .and_then(|id| self.session_manager.session(id))
+            .map(TerminalSession::title)
+            .unwrap_or_default();
+        if !name.is_empty() {
+            prompt.insert(name);
+        }
+        self.status_prompt = Some(prompt);
+        self.resize_tab();
+        self.request_redraw();
+    }
+
+    fn open_lua_prompt(&mut self) {
+        self.status_bar_hidden = false;
+        self.status_message = None;
+        self.status_prompt = Some(StatusPrompt::new(StatusPromptMode::Lua));
+        self.resize_tab();
+        self.request_redraw();
+    }
+
+    fn handle_status_prompt(&mut self, mut prompt: StatusPrompt, event: &KeyEvent) {
+        let PhysicalKey::Code(code) = event.physical_key else {
+            self.status_prompt = Some(prompt);
+            return;
+        };
+        if event.state != ElementState::Pressed {
+            self.status_prompt = Some(prompt);
+            return;
+        }
+        let mut keep = true;
+        match code {
+            KeyCode::Escape => keep = false,
+            KeyCode::Enter => {
+                let input = prompt.buffer.trim().to_string();
+                keep = false;
+                if !input.is_empty() {
+                    match prompt.mode {
+                        StatusPromptMode::Command => {
+                            prompt.push_history(input.clone());
+                            self.execute_status_command(&input);
+                        }
+                        StatusPromptMode::Rename => {
+                            self.rename_active(&input);
+                        }
+                        StatusPromptMode::Lua => {
+                            prompt.push_history(input.clone());
+                            self.evaluate_lua(&input);
+                        }
+                    }
+                }
+            }
+            KeyCode::Backspace => prompt.delete_before(),
+            KeyCode::Delete => prompt.delete_at(),
+            KeyCode::ArrowLeft => prompt.cursor_left(),
+            KeyCode::ArrowRight => prompt.cursor_right(),
+            KeyCode::Home => prompt.cursor = 0,
+            KeyCode::End => prompt.cursor = prompt.buffer.len(),
+            KeyCode::ArrowUp => prompt.history_prev(),
+            KeyCode::ArrowDown => prompt.history_next(),
+            _ => {
+                if let Some(text) = &event.text
+                    && !text.is_empty()
+                {
+                    prompt.insert(text);
+                }
+            }
+        }
+        if keep {
+            self.status_prompt = Some(prompt);
+        }
+        self.request_redraw();
+    }
+
+    fn execute_status_command(&mut self, input: &str) {
+        let mut overlay = self.overlay.take();
+        let handled = match overlay.as_mut() {
+            Some(overlay) => overlay.execute_command(self, input),
+            None => false,
+        };
+        self.overlay = overlay;
+        if !handled {
+            self.status_message =
+                Some(format!("unknown command: {}", input.split(' ').next().unwrap_or(input)));
+        }
+    }
+
+    fn evaluate_lua(&mut self, expr: &str) {
+        let lua = self.lua.clone();
+        let result = RefCell::new(None::<String>);
+        let out = config::with_env(self, |_| {
+            let value = lua.load(expr).eval::<LuaValue>()?;
+            *result.borrow_mut() = Some(Self::format_lua_value(&lua, value, 0)?);
+            Ok(())
+        });
+        let message = match out {
+            Err(error) => format!("{error}"),
+            Ok(()) => result.into_inner().unwrap_or_else(|| "nil".to_string()),
+        };
+        self.status_message = Some(message.replace(['\n', '\r'], " "));
+    }
+
+    fn format_lua_value(lua: &Lua, value: LuaValue, depth: usize) -> LuaResult<String> {
+        Ok(match value {
+            LuaValue::Nil => "nil".to_string(),
+            LuaValue::Boolean(b) => b.to_string(),
+            LuaValue::Integer(i) => i.to_string(),
+            LuaValue::Number(n) => n.to_string(),
+            LuaValue::String(s) => s.to_str()?.to_string(),
+            LuaValue::Table(t) if depth < 3 => {
+                let mut parts = Vec::new();
+                for pair in t.pairs::<LuaValue, LuaValue>() {
+                    let (key, value) = pair?;
+                    let key = Self::format_lua_value(lua, key, depth + 1)?;
+                    let value = Self::format_lua_value(lua, value, depth + 1)?;
+                    parts.push(format!("{key} = {value}"));
+                    if parts.len() >= 6 {
+                        parts.push("...".to_string());
+                        break;
+                    }
+                }
+                format!("{{ {} }}", parts.join(", "))
+            }
+            value => {
+                let tostring: LuaFunction = lua.globals().get("tostring")?;
+                tostring.call(value)?
+            }
+        })
+    }
+
+    fn status_input(&self) -> Option<StatusInput> {
+        let prompt = self.status_prompt.as_ref()?;
+        let left_limit = usize::from(self.cols.max(1));
+
+        let prompt_text = match prompt.mode {
+            StatusPromptMode::Command => " : ",
+            StatusPromptMode::Rename => " R: ",
+            StatusPromptMode::Lua => " > ",
+        };
+        let prompt_cols = prompt_text.chars().count();
+
+        let text = &prompt.buffer;
+        let cursor_col = text[..prompt.cursor.min(text.len())].chars().count();
+        let max_cols = left_limit.saturating_sub(prompt_cols).max(1);
+
+        let start = if cursor_col >= max_cols {
+            cursor_col - max_cols + 1
+        } else {
+            0
+        };
+        let visible = text.chars().skip(start).take(max_cols).collect::<String>();
+        let visible_cursor = cursor_col.saturating_sub(start);
+
+        Some(StatusInput {
+            prompt: prompt_text.to_string(),
+            text: visible,
+            cursor_col: prompt_cols + visible_cursor,
+        })
+    }
+
     fn action_mode_key(&mut self, code: KeyCode) -> bool {
         if self.pending_move_to_tab {
             self.pending_move_to_tab = false;
@@ -1207,6 +1511,12 @@ impl App {
                 }
                 self.request_redraw();
             }
+            KeyCode::Semicolon => {
+                self.open_status_prompt();
+            }
+            KeyCode::KeyL => {
+                self.open_lua_prompt();
+            }
             KeyCode::KeyM => {
                 self.pending_move_to_tab = true;
                 self.action_mode = true;
@@ -1216,10 +1526,7 @@ impl App {
                 self.detach_active_session();
             }
             KeyCode::KeyR => {
-                if let Some(overlay) = self.overlay.as_mut() {
-                    overlay.show(Some(Screen::Rename));
-                }
-                self.request_redraw();
+                self.open_rename_prompt();
             }
             KeyCode::KeyA => {
                 if let Some(overlay) = self.overlay.as_mut() {

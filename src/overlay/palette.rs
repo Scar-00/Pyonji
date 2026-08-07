@@ -171,9 +171,9 @@ impl Arg {
 
 #[derive(Clone)]
 pub struct Cmd {
-    name: String,
+    pub(crate) name: String,
     args: Vec<Arg>,
-    action: Rc<dyn Fn(&mut Overlay, &mut App, Vec<String>)>,
+    pub(crate) action: Rc<dyn Fn(&mut Overlay, &mut App, Vec<String>)>,
 }
 
 impl Cmd {

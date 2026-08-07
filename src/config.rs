@@ -70,8 +70,9 @@ impl App {
             }
             renderer.evict_glyphs();
         }
-        if let Some(overlay) = self.overlay.as_mut() {
-            overlay.update_cmds(&self.ssh_sessions, &self.registered_callbacks);
+        if let Some(mut overlay) = self.overlay.take() {
+            overlay.update_cmds(self);
+            self.overlay = Some(overlay);
         }
         self.rows = (size.height as f32 / self.line_height) as u16;
         self.cols = (size.width as f32 / (self.font_size / 2.0)) as u16;
@@ -177,9 +178,7 @@ impl LuaUserData for App {
         });
         methods.add_function("open_rename", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                if let Some(overlay) = this.overlay.as_mut() {
-                    overlay.show(Some(Screen::Rename));
-                }
+                this.open_rename_prompt();
                 Ok(())
             })
         });

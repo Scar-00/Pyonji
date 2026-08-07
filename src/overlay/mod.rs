@@ -2,7 +2,6 @@ mod detached;
 mod opener;
 mod palette;
 mod releases;
-mod rename;
 mod sessions;
 
 use std::io::{self, Write};
@@ -14,7 +13,6 @@ use crate::{
         opener::{OpenerState, OpenerView},
         palette::{Arg, Cmd, CmdPalleteState, CmdPalleteView},
         releases::{ReleasesState, ReleasesView},
-        rename::{RenameState, RenameView},
         sessions::{SessionsState, SessionsView},
     },
     pty::SshConnection,
@@ -66,7 +64,6 @@ pub enum Screen {
     CmdPalette,
     Sessions,
     Detached,
-    Rename,
     Releases,
     Opener,
 }
@@ -84,8 +81,6 @@ pub struct Overlay {
     session_state: SessionsState,
 
     detached_state: DetachedState,
-
-    rename_state: RenameState,
 
     opener_state: OpenerState,
 }
@@ -142,20 +137,6 @@ impl Overlay {
             Screen::Detached => {
                 if self.detached_state.handle_events(app, code) {
                     self.toggle();
-                } else if let Some(session) = self.detached_state.take_rename_target() {
-                    self.rename_state.open(session);
-                    self.screen = Screen::Rename;
-                    app.request_redraw();
-                }
-            }
-            Screen::Rename => {
-                if self.rename_state.handle_events(app, code, event) {
-                    if self.rename_state.take_target().is_some() {
-                        self.screen = Screen::Detached;
-                        app.request_redraw();
-                    } else {
-                        self.toggle();
-                    }
                 }
             }
             Screen::Releases => self.release_state.handle_events(app, code),
@@ -181,7 +162,6 @@ impl Overlay {
             let block = match self.screen {
                 Screen::Sessions => block.title("Sessions"),
                 Screen::Detached => block.title("Attach Session"),
-                Screen::Rename => block.title("Rename Session"),
                 Screen::Releases => block.title("Releases"),
                 Screen::Opener => block.title(format!(
                     "Opener - {}",
@@ -214,13 +194,6 @@ impl Overlay {
                         &mut self.detached_state,
                     );
                 }
-                Screen::Rename => {
-                    frame.render_stateful_widget(
-                        RenameView::new(app),
-                        inner,
-                        &mut self.rename_state,
-                    );
-                }
                 Screen::Releases => {
                     frame.render_stateful_widget(ReleasesView, inner, &mut self.release_state);
                 }
@@ -250,9 +223,6 @@ impl Overlay {
         let rows = (size.height as f32 / line_height) as u16;
         let cols = (size.width as f32 / (font_size / 2.0)) as u16;
         let terminal = Terminal::new(VtBackend::new(rows, cols))?;
-        let mut commands = Self::builtin_commands();
-        commands.extend(Self::commands_from_ssh_sessions(&app.ssh_sessions));
-        commands.extend(Self::commands_from_lua_actions(&app.registered_callbacks));
 
         Ok(Self {
             terminal,
@@ -262,13 +232,11 @@ impl Overlay {
 
             release_state: ReleasesState::new(app),
 
-            cmd_palette_state: CmdPalleteState::new(commands),
+            cmd_palette_state: CmdPalleteState::new(Self::commands_for(app)),
 
             session_state: SessionsState::new(),
 
             detached_state: DetachedState::new(),
-
-            rename_state: RenameState::new(),
 
             opener_state: OpenerState::new(),
         })
@@ -295,9 +263,6 @@ impl Overlay {
 
     pub fn show(&mut self, screen: Option<Screen>) {
         if let Some(screen) = screen {
-            if screen == Screen::Rename {
-                self.rename_state.reset();
-            }
             self.screen = screen;
         }
         self.shown = true;
@@ -307,11 +272,33 @@ impl Overlay {
         self.shown
     }
 
-    pub fn update_cmds(&mut self, sessions: &[SshConnection], actions: &[LuaAction]) {
+    pub fn update_cmds(&mut self, app: &App) {
+        self.cmd_palette_state.update(Self::commands_for(app));
+    }
+
+    pub fn execute_command(&mut self, app: &mut App, input: &str) -> bool {
+        let mut split = input.split(' ');
+        let Some(name) = split.next() else {
+            return false;
+        };
+        if name.is_empty() {
+            return false;
+        }
+        let args = split.map(str::to_string).collect::<Vec<_>>();
+        let commands = Self::commands_for(app);
+        let Some(cmd) = commands.iter().find(|cmd| cmd.name == name) else {
+            return false;
+        };
+        let action = cmd.action.clone();
+        action(self, app, args);
+        true
+    }
+
+    fn commands_for(app: &App) -> Vec<Cmd> {
         let mut commands = Self::builtin_commands();
-        commands.extend(Self::commands_from_ssh_sessions(sessions));
-        commands.extend(Self::commands_from_lua_actions(actions));
-        self.cmd_palette_state.update(commands);
+        commands.extend(Self::commands_from_ssh_sessions(&app.ssh_sessions));
+        commands.extend(Self::commands_from_lua_actions(&app.registered_callbacks));
+        commands
     }
 
     fn builtin_commands() -> Vec<Cmd> {
@@ -348,13 +335,14 @@ impl Overlay {
                 app.request_redraw();
             }),
             Cmd::new("rename", [Arg::new("name")], |_, app, args| {
-                let Some(name) = args.first() else {
+                let name = args.join(" ");
+                if name.is_empty() {
                     return;
-                };
+                }
                 if let Some(session) = app.active_session()
                     && let Some(session) = app.session_manager.session_mut(session)
                 {
-                    session.rename(name.clone());
+                    session.rename(name);
                 }
                 app.request_redraw();
             }),
