@@ -1,4 +1,5 @@
 use anyhow::Result;
+use mlua::prelude::*;
 use std::{collections::HashMap, path::Path};
 use winit::event_loop::EventLoopProxy;
 
@@ -14,6 +15,18 @@ pub struct SessionId(u64);
 impl std::fmt::Display for SessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+impl FromLua for SessionId {
+    fn from_lua(value: LuaValue, lua: &Lua) -> LuaResult<Self> {
+        Ok(Self(u64::from_lua(value, lua)?))
+    }
+}
+
+impl IntoLua for SessionId {
+    fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue> {
+        self.0.into_lua(lua)
     }
 }
 

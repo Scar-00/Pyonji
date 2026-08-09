@@ -1,7 +1,7 @@
 use crate::overlay::{LuaAction, Screen};
-use crate::pty::SshConnection;
-use crate::terminal::{SplitDirection, Tab};
-use crate::{App, PtyEvent, ResultExt};
+use crate::pty::{Event as PtyEvent, SshConnection};
+use crate::terminal::{SessionId, SplitDirection, Tab};
+use crate::{App, ResultExt};
 use anyhow::{Context, Result};
 use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
@@ -9,15 +9,16 @@ use path_absolutize::*;
 use std::fmt::Debug;
 use std::io::Write;
 use std::net::IpAddr;
-use std::path::{PathBuf};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{KeyCode, ModifiersState};
+use winit::window::Fullscreen;
 
 const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
-pub const LUA_MODULES: &[&str] = &[include_str!("../resources/lua/keybind.lua")];
+pub const LUA_MODULES: &[(&str, &str)] = &[("lua.keybind", include_str!("../resources/lua/keybind.lua"))];
 
 macro_rules! apply {
     ($this: ident.$field: ident, $table: expr) => {
@@ -35,23 +36,34 @@ macro_rules! apply {
 macro_rules! callable_action {
     ($lua: ident, $this: ident => $body: expr) => {{
         if let Some(this) = $this {
-            this.borrow_mut_scoped($body)??;
+            let value = this.borrow_mut_scoped($body)??;
+            Ok(value
+                .into_lua_multi($lua)?
+                .into_iter()
+                .next()
+                .unwrap_or(LuaValue::Nil))
+        } else {
+            let func = $lua.create_function(move |_, this: LuaAnyUserData| {
+                this.borrow_mut_scoped($body)?
+            })?;
+            Ok(LuaValue::Function(func))
         }
-        $lua.create_function(move |_, this: LuaAnyUserData| {
-            this.borrow_mut_scoped($body)?
-        })
     }}
 }
 
 macro_rules! args {
     ($args: ident, $lua: ident, $typ: ty) => {{
         let mut args = $args;
-        let first = args[0].clone();
-        let this = if first.is_userdata() {
-            args.pop_front();
-            Some(LuaAnyUserData::from_lua(first, $lua)?)
-        } else {
-            None
+        let first = args.pop_front();
+        let this = match first {
+            Some(first) if first.is_userdata() => {
+                Some(LuaAnyUserData::from_lua(first, $lua)?)
+            }
+            Some(first) => {
+                args.push_front(first);
+                None
+            }
+            None => None,
         };
         let rest: $typ = FromLuaMulti::from_lua_multi(args, $lua)?;
         (this, rest)
@@ -171,9 +183,14 @@ impl LuaUserData for App {
             })
         });
         methods.add_function("detach", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                this.detach_active_session();
-                Ok(())
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<bool> {
+                Ok(this.detach_active_session())
+            })
+        });
+        methods.add_function("attach", |lua, args: LuaMultiValue| {
+            let (this, (session, tab)) = args!(args, lua, (SessionId, Option<usize>));
+            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
+                Ok(this.reattach_session(session, tab.unwrap_or(this.current_tab)))
             })
         });
         methods.add_function("open_rename", |lua, this: Option<LuaAnyUserData>| {
@@ -183,52 +200,229 @@ impl LuaUserData for App {
             })
         });
         methods.add_function("rename", |lua, args: LuaMultiValue| {
-            let (this, (name,)) = args!(args, lua, (String,));
-            if let Some(this) = this {
-                this.borrow_mut_scoped(|this: &mut Self| -> LuaResult<()> {
-                    this.rename_active(&name);
-                    Ok(())
-                })??;
-            }
-            lua.create_function(move |_, this: LuaAnyUserData| {
-                this.borrow_mut_scoped(|this: &mut Self| -> LuaResult<()> {
-                    this.rename_active(&name);
-                    Ok(())
-                })?
+            let (this, (rest,)) = args!(args, lua, (LuaMultiValue,));
+            let (session, name) = {
+                let with_session: LuaResult<(SessionId, String)> =
+                    FromLuaMulti::from_lua_multi(rest.clone(), lua);
+                match with_session {
+                    Ok((session, name)) => (Some(session), name),
+                    Err(_) => {
+                        let (name,) = FromLuaMulti::from_lua_multi(rest, lua)?;
+                        (None, name)
+                    }
+                }
+            };
+            callable_action!(lua, this => {
+                let session = session;
+                let name = name.clone();
+                move |this: &mut Self| -> LuaResult<bool> {
+                    let Some(session) = session.or_else(|| this.active_session()) else {
+                        return Ok(false);
+                    };
+                    Ok(this.rename_session(session, &name))
+                }
+            })
+        });
+        methods.add_function("close", |lua, args: LuaMultiValue| {
+            let (this, (session,)) = args!(args, lua, (Option<SessionId>,));
+            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
+                let Some(session) = session.or_else(|| this.active_session()) else {
+                    return Ok(false);
+                };
+                Ok(this.close_session(session))
             })
         });
         methods.add_function("move_to", |lua, args: LuaMultiValue| {
             let (this, (tab,)) = args!(args, lua, (Option<usize>,));
-            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<()> {
-                if let Some(tab) = tab
-                    && let Some(session) = this.active_session()
-                {
-                    this.move_session_to_tab(session, tab);
+            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
+                let Some(tab) = tab else {
+                    return Ok(false);
+                };
+                let Some(session) = this.active_session() else {
+                    return Ok(false);
+                };
+                Ok(this.move_session_to_tab(session, tab))
+            })
+        });
+        methods.add_function("switch_tab", |lua, args: LuaMultiValue| {
+            let (this, (tab,)) = args!(args, lua, (usize,));
+            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
+                Ok(this.switch_tab(tab))
+            })
+        });
+        methods.add_function("next_tab", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<usize> {
+                let index = this.next_tab_index();
+                this.switch_tab(index);
+                Ok(index)
+            })
+        });
+        methods.add_function("prev_tab", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<usize> {
+                let index = this.previous_tab_index();
+                this.switch_tab(index);
+                Ok(index)
+            })
+        });
+        methods.add_function("split", |lua, args: LuaMultiValue| {
+            let (this, (direction,)) = args!(args, lua, (String,));
+            let direction = match direction.to_lowercase().as_str() {
+                "horizontal" | "h" => SplitDirection::Horizontal,
+                _ => SplitDirection::Vertical,
+            };
+            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<Option<SessionId>> {
+                Ok(this.split_current_tab(direction))
+            })
+        });
+        methods.add_function("focus_next_pane", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<Option<SessionId>> {
+                Ok(this.focus_next_pane())
+            })
+        });
+        methods.add_function("write", |lua, args: LuaMultiValue| {
+            let (this, (text,)) = args!(args, lua, (String,));
+            callable_action!(lua, this => {
+                let text = text.clone();
+                move |this: &mut Self| -> LuaResult<bool> {
+                    let Some(active) = this.active_session() else {
+                        return Ok(false);
+                    };
+                    this.session_manager.send_text(active, &text);
+                    Ok(true)
                 }
+            })
+        });
+        methods.add_function("write_to", |lua, args: LuaMultiValue| {
+            let (this, (session, text)) = args!(args, lua, (SessionId, String));
+            callable_action!(lua, this => {
+                let text = text.clone();
+                move |this: &mut Self| -> LuaResult<bool> {
+                    this.session_manager.send_text(session, &text);
+                    Ok(true)
+                }
+            })
+        });
+        methods.add_function("open_releases", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                if let Some(overlay) = this.overlay.as_mut() {
+                    overlay.show(Some(Screen::Releases));
+                }
+                Ok(())
+            })
+        });
+        methods.add_function("open_opener", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                if let Some(overlay) = this.overlay.as_mut() {
+                    overlay.show(Some(Screen::Opener));
+                }
+                Ok(())
+            })
+        });
+        methods.add_function("open_command", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                this.open_status_prompt();
+                Ok(())
+            })
+        });
+        methods.add_function("open_lua", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                this.open_lua_prompt();
+                Ok(())
+            })
+        });
+        methods.add_function("toggle_fullscreen", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<bool> {
+                let Some(window) = this.window.as_ref() else {
+                    return Ok(false);
+                };
+                let fullscreen = window.fullscreen().is_none();
+                window.set_fullscreen(fullscreen.then_some(Fullscreen::Borderless(None)));
+                this.fullscreen = fullscreen;
+                Ok(fullscreen)
+            })
+        });
+        methods.add_function("toggle_decorations", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                if let Some(window) = this.window.as_mut() {
+                    window.set_decorations(!window.is_decorated());
+                    this.request_redraw();
+                }
+                Ok(())
+            })
+        });
+        methods.add_function("toggle_status_bar", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                this.status_bar_hidden = !this.status_bar_hidden;
+                this.resize_tab();
+                this.request_redraw();
+                Ok(())
+            })
+        });
+        methods.add_function("reload_config", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                load(this);
+                Ok(())
+            })
+        });
+        methods.add_function("quit", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                _ = this._proxy.send_event(PtyEvent::Exit);
                 Ok(())
             })
         });
         methods.add_function(
             "create_session",
             |lua, args: LuaMultiValue| {
-                let (this, (_, tab, _, _)) = args!(args, lua, (Option<String>, Option<usize>, Option<String>,
-                    Option<u64>));
-                callable_action!(lua, this => move |this: &mut Self| -> LuaResult<()> {
-                    let session = this.session_manager.create_session(this.terminal_rows().max(1), this.cols.max(1), None)?;
-                    let tab = if let Some(tab) = tab {
-                        &mut this.tabs[tab]
-                    }else {
-                        &mut this.tabs[this.current_tab]
-                    };
-
-                    //let dir = dir.as_deref().map(Path::new).or(this.args.path.as_deref().or(this.default_cwd.as_deref()));
-
-                    if let Some(tab) = tab {
-                        tab.split_active(SplitDirection::Vertical, session);
-                    }else {
-                        *tab = Some(Tab::new(session));
+                let (this, (dir, tab, direction, parent)) = args!(
+                    args,
+                    lua,
+                    (
+                        Option<String>,
+                        Option<usize>,
+                        Option<String>,
+                        Option<SessionId>
+                    )
+                );
+                let direction = match direction.as_deref().map(str::to_lowercase).as_deref() {
+                    Some("horizontal") | Some("h") => SplitDirection::Horizontal,
+                    _ => SplitDirection::Vertical,
+                };
+                callable_action!(lua, this => {
+                    let dir = dir.clone();
+                    move |this: &mut Self| -> LuaResult<SessionId> {
+                        let session = this.session_manager.create_session(
+                            this.terminal_rows().max(1),
+                            this.cols.max(1),
+                            dir
+                                .as_deref()
+                                .map(Path::new)
+                                .or(this.default_cwd.as_deref()),
+                        )?;
+                        let target = tab
+                            .map(|tab| tab.min(this.tabs.len().saturating_sub(1)))
+                            .unwrap_or(this.current_tab);
+                        let tab = &mut this.tabs[target];
+                        let placed = if let Some(tab) = tab {
+                            let anchor = parent
+                                .filter(|anchor| tab.sessions().contains(anchor))
+                                .or_else(|| tab.active_session());
+                            match anchor {
+                                Some(anchor) => tab.split_on(anchor, direction, session),
+                                None => false,
+                            }
+                        } else {
+                            *tab = Some(Tab::new(session));
+                            true
+                        };
+                        if !placed {
+                            this.detached_sessions.push(session);
+                        }
+                        this.wheel_remainder = 0.0;
+                        this.resize_tab();
+                        this.update_ime_cursor_area();
+                        this.request_redraw();
+                        Ok(session)
                     }
-                    Ok(())
                 })
             },
         );
@@ -241,6 +435,37 @@ impl LuaUserData for App {
         fields.add_field_method_get("font_family", |_, this| Ok(this.font_family.clone()));
         fields.add_field_method_get("rows", |_, this| Ok(this.rows));
         fields.add_field_method_get("cols", |_, this| Ok(this.cols));
+        fields.add_field_method_get("active_session", |lua, this| {
+            Ok(this.active_session().into_lua(lua)?)
+        });
+        fields.add_field_method_get("tab_count", |_, this| {
+            Ok(this.tabs.iter().flatten().count())
+        });
+        fields.add_field_method_get("detached_sessions", |lua, this| {
+            let table = lua.create_table()?;
+            for (index, session) in this.live_detached_sessions().into_iter().enumerate() {
+                table.raw_set(index + 1, session)?;
+            }
+            Ok(table)
+        });
+        fields.add_field_method_get("ssh_sessions", |lua, this| {
+            let table = lua.create_table()?;
+            for (index, session) in this.ssh_sessions.iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.raw_set("name", session.name.clone())?;
+                entry.raw_set("user_name", session.user_name.clone())?;
+                entry.raw_set("ip", session.ip.to_string())?;
+                table.raw_set(index + 1, entry)?;
+            }
+            Ok(table)
+        });
+
+        fields.add_field_method_get("sessions", |lua, this| {
+            let tabs = this.tabs.iter().filter_map(|tab| {
+                lua.create_sequence_from(tab.as_ref()?.sessions()).ok()
+            });
+            lua.create_sequence_from(tabs)
+        });
     }
 }
 
@@ -577,12 +802,14 @@ impl KeyBinding {
 
         let mut mods = ModifiersState::default();
 
-        while let Some(next) = modifiers.chars().position(|c| c == '+') {
-            let modifier = &modifiers[..next];
-            mods.extend(Self::parse_mod(modifier)?);
-            modifiers = &modifiers[next + 1..];
+        if !modifiers.is_empty() {
+            while let Some(next) = modifiers.chars().position(|c| c == '+') {
+                let modifier = &modifiers[..next];
+                mods.extend(Self::parse_mod(modifier)?);
+                modifiers = &modifiers[next + 1..];
+            }
+            mods.extend(Self::parse_mod(modifiers)?);
         }
-        mods.extend(Self::parse_mod(modifiers)?);
 
         let rest = &binding[end..];
 
@@ -602,7 +829,8 @@ impl KeyBinding {
     }
 
     pub fn parse_key(key: &str) -> Result<KeyCode> {
-        let key = match key.to_lowercase().as_str() {
+        let key = key.to_lowercase();
+        let key = match key.as_str() {
             "a" => KeyCode::KeyA,
             "b" => KeyCode::KeyB,
             "c" => KeyCode::KeyC,
@@ -629,6 +857,54 @@ impl KeyBinding {
             "x" => KeyCode::KeyX,
             "y" => KeyCode::KeyY,
             "z" => KeyCode::KeyZ,
+            "0" => KeyCode::Digit0,
+            "1" => KeyCode::Digit1,
+            "2" => KeyCode::Digit2,
+            "3" => KeyCode::Digit3,
+            "4" => KeyCode::Digit4,
+            "5" => KeyCode::Digit5,
+            "6" => KeyCode::Digit6,
+            "7" => KeyCode::Digit7,
+            "8" => KeyCode::Digit8,
+            "9" => KeyCode::Digit9,
+            "up" | "arrowup" => KeyCode::ArrowUp,
+            "down" | "arrowdown" => KeyCode::ArrowDown,
+            "left" | "arrowleft" => KeyCode::ArrowLeft,
+            "right" | "arrowright" => KeyCode::ArrowRight,
+            "f1" => KeyCode::F1,
+            "f2" => KeyCode::F2,
+            "f3" => KeyCode::F3,
+            "f4" => KeyCode::F4,
+            "f5" => KeyCode::F5,
+            "f6" => KeyCode::F6,
+            "f7" => KeyCode::F7,
+            "f8" => KeyCode::F8,
+            "f9" => KeyCode::F9,
+            "f10" => KeyCode::F10,
+            "f11" => KeyCode::F11,
+            "f12" => KeyCode::F12,
+            "space" => KeyCode::Space,
+            "enter" | "return" => KeyCode::Enter,
+            "esc" | "escape" => KeyCode::Escape,
+            "tab" => KeyCode::Tab,
+            "backspace" => KeyCode::Backspace,
+            "delete" | "del" => KeyCode::Delete,
+            "insert" | "ins" => KeyCode::Insert,
+            "home" => KeyCode::Home,
+            "end" => KeyCode::End,
+            "pageup" => KeyCode::PageUp,
+            "pagedown" => KeyCode::PageDown,
+            "semicolon" => KeyCode::Semicolon,
+            "comma" => KeyCode::Comma,
+            "period" | "dot" => KeyCode::Period,
+            "slash" => KeyCode::Slash,
+            "backslash" => KeyCode::Backslash,
+            "minus" => KeyCode::Minus,
+            "equals" | "equal" => KeyCode::Equal,
+            "quote" | "apostrophe" => KeyCode::Quote,
+            "backquote" | "grave" => KeyCode::Backquote,
+            "bracketleft" | "[" => KeyCode::BracketLeft,
+            "bracketright" | "]" => KeyCode::BracketRight,
             x => anyhow::bail!("`{x}` is not a valid key"),
         };
         Ok(key)

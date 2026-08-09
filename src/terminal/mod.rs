@@ -357,6 +357,22 @@ impl Tab {
         true
     }
 
+    pub fn split_on(
+        &mut self,
+        target: SessionId,
+        direction: SplitDirection,
+        session: SessionId,
+    ) -> bool {
+        let Some(root) = self.root.as_mut() else {
+            return false;
+        };
+        if !root.split(target, direction, session) {
+            return false;
+        }
+        self.active_session = Some(session);
+        true
+    }
+
     pub fn focus_next(&mut self) -> Option<SessionId> {
         let sessions = self.sessions();
         let active = self.active_session?;

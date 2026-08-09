@@ -303,7 +303,27 @@ impl Overlay {
 
     fn builtin_commands() -> Vec<Cmd> {
         vec![
-            Cmd::new("close", [Arg::new("tab")], |_, _, _| {}),
+            Cmd::new("close", [Arg::new("tab")], |_, app, args| {
+                let Some(tab) = args.first() else {
+                    if let Some(session) = app.active_session() {
+                        app.close_session(session);
+                    }
+                    return;
+                };
+                let Ok(tab) = tab.parse::<usize>() else {
+                    return;
+                };
+                if tab == 0 || tab > 9 {
+                    return;
+                }
+                let Some(tab) = app.tabs.get(tab - 1).and_then(Option::as_ref) else {
+                    return;
+                };
+                let Some(session) = tab.sessions().first().copied() else {
+                    return;
+                };
+                app.close_session(session);
+            }),
             Cmd::new("next", [], |_, app, _| {
                 app.switch_tab(app.next_tab_index());
                 app.request_redraw();

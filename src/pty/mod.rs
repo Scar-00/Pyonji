@@ -27,6 +27,7 @@ pub enum Event {
     ProgramChanged((SessionId, String)),
     ConfigChanged,
     LuaPrint(String),
+    Exit,
 }
 
 impl Pty {

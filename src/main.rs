@@ -23,7 +23,7 @@ mod terminal;
 
 use mlua::{
     Lua, LuaOptions, StdLib,
-    prelude::{LuaFunction, LuaMultiValue},
+    prelude::{LuaFunction, LuaMultiValue, LuaTable},
 };
 use smol::Task;
 #[cfg(not(feature = "install"))]
@@ -177,8 +177,12 @@ fn main() -> Result<()> {
 
     let lua = unsafe { Lua::unsafe_new_with(StdLib::ALL_SAFE, LuaOptions::new()) };
     config::install_inspect(&lua)?;
-    for module in config::LUA_MODULES {
-        lua.load(*module).exec()?;
+    for (name, source) in config::LUA_MODULES {
+        let function = lua.load(*source).into_function()?;
+        let package: LuaTable = lua.globals().get("package")?;
+        let preload: LuaTable = package.get("preload")?;
+        preload.set(*name, function.clone())?;
+        function.call::<()>(())?;
     }
     {
         let proxy = proxy.clone();
@@ -193,6 +197,16 @@ fn main() -> Result<()> {
             Ok(())
         })?;
         lua.globals().set("print", print)?;
+        lua.globals().set("trace", lua.create_function(|lua, args: LuaMultiValue| {
+            let tostring: LuaFunction = lua.globals().get("tostring")?;
+            let mut parts = Vec::new();
+            for value in args {
+                let text: String = tostring.call(value)?;
+                parts.push(text);
+            }
+            tracing::error!("{}", parts.join("\t"));
+            Ok(())
+        })?)?;
     }
     let mut app = App::new(cli, lua.clone(), proxy);
 
@@ -346,34 +360,9 @@ impl ApplicationHandler<PtyEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: PtyEvent) {
         match event {
             PtyEvent::Closed(id) => {
-                self.session_manager.remove_session(id);
-                self.detached_sessions.retain(|detached| *detached != id);
-                if self.session_manager.is_empty() {
+                if self.close_session(id) && self.session_manager.is_empty() {
                     event_loop.exit();
-                    return;
                 }
-
-                let mut removed_current_tab = false;
-                for (index, tab) in self.tabs.iter_mut().enumerate() {
-                    let Some(tab_state) = tab.as_mut() else {
-                        continue;
-                    };
-                    if !tab_state.remove_session(id) {
-                        continue;
-                    }
-                    if tab_state.is_empty() {
-                        *tab = None;
-                        removed_current_tab |= index == self.current_tab;
-                    }
-                }
-
-                if removed_current_tab {
-                    self.switch_to_previous_live_tab_or_stay(self.current_tab);
-                } else {
-                    self.resize_tab();
-                }
-                self.update_ime_cursor_area();
-                self.request_redraw();
             }
             PtyEvent::Data(id, data) => {
                 self.session_manager.update_session(id, &data);
@@ -395,6 +384,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     .show_message(text.replace(['\n', '\r'], " "));
                 self.request_redraw();
             }
+            PtyEvent::Exit => event_loop.exit(),
         }
     }
 
@@ -982,16 +972,15 @@ impl App {
         }
     }
 
-    fn focus_next_pane(&mut self) {
+    fn focus_next_pane(&mut self) -> Option<SessionId> {
         let Some(tab) = self.tabs[self.current_tab].as_mut() else {
-            return;
+            return None;
         };
-        if tab.focus_next().is_none() {
-            return;
-        }
+        let next = tab.focus_next()?;
         self.wheel_remainder = 0.0;
         self.update_ime_cursor_area();
         self.request_redraw();
+        Some(next)
     }
 
     fn resize_active_pane(&mut self, direction: SplitDirection, delta_first: i16) {
@@ -1037,24 +1026,19 @@ impl App {
         self.request_redraw();
     }
 
-    fn split_current_tab(&mut self, direction: SplitDirection) {
-        let Some(active_session) = self.active_session() else {
-            return;
-        };
-        let Some((_, geometry)) = self
+    fn split_current_tab(&mut self, direction: SplitDirection) -> Option<SessionId> {
+        let active_session = self.active_session()?;
+        let (_, geometry) = self
             .tab_layouts()
             .into_iter()
-            .find(|(session_id, _)| *session_id == active_session)
-        else {
-            return;
-        };
+            .find(|(session_id, _)| *session_id == active_session)?;
 
         let can_split = match direction {
             SplitDirection::Horizontal => geometry.rows >= 2,
             SplitDirection::Vertical => geometry.cols >= 2,
         };
         if !can_split {
-            return;
+            return None;
         }
 
         let new_rows = match direction {
@@ -1076,22 +1060,26 @@ impl App {
             Ok(session_id) => session_id,
             Err(error) => {
                 error!(error = ?error, "failed to split session");
-                return;
+                return None;
             }
         };
         let Some(tab) = self.tabs[self.current_tab].as_mut() else {
-            return;
+            return None;
         };
         if !tab.split_active(direction, session_id) {
-            return;
+            return None;
         }
 
         self.wheel_remainder = 0.0;
         self.resize_tab();
         self.request_redraw();
+        Some(session_id)
     }
 
-    fn switch_tab(&mut self, tab: usize) {
+    fn switch_tab(&mut self, tab: usize) -> bool {
+        if tab >= self.tabs.len() {
+            return false;
+        }
         if self.tabs[tab].is_none() {
             let id = match self.session_manager.create_session(
                 self.terminal_rows().max(1),
@@ -1101,7 +1089,7 @@ impl App {
                 Ok(id) => id,
                 Err(error) => {
                     error!(error = ?error, "failed to create tab session");
-                    return;
+                    return false;
                 }
             };
             self.tabs[tab] = Some(Tab::new(id));
@@ -1112,6 +1100,7 @@ impl App {
         self.resize_tab();
         self.update_ime_cursor_area();
         self.request_redraw();
+        true
     }
 
     fn move_session_to_tab(&mut self, session: SessionId, target: usize) -> bool {
@@ -1157,15 +1146,15 @@ impl App {
         true
     }
 
-    fn detach_active_session(&mut self) {
+    fn detach_active_session(&mut self) -> bool {
         let Some(active_session) = self.active_session() else {
-            return;
+            return false;
         };
         let Some(tab) = self.tabs[self.current_tab].as_mut() else {
-            return;
+            return false;
         };
         if !tab.remove_session(active_session) {
-            return;
+            return false;
         }
         self.detached_sessions.push(active_session);
         if self.tabs[self.current_tab]
@@ -1179,6 +1168,38 @@ impl App {
         }
         self.update_ime_cursor_area();
         self.request_redraw();
+        true
+    }
+
+    fn close_session(&mut self, session: SessionId) -> bool {
+        if self.session_manager.session(session).is_none() {
+            return false;
+        }
+        self.session_manager.remove_session(session);
+        self.detached_sessions.retain(|detached| *detached != session);
+
+        let mut removed_current_tab = false;
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            let Some(tab_state) = tab.as_mut() else {
+                continue;
+            };
+            if !tab_state.remove_session(session) {
+                continue;
+            }
+            if tab_state.is_empty() {
+                *tab = None;
+                removed_current_tab |= index == self.current_tab;
+            }
+        }
+
+        if removed_current_tab {
+            self.switch_to_previous_live_tab_or_stay(self.current_tab);
+        } else {
+            self.resize_tab();
+        }
+        self.update_ime_cursor_area();
+        self.request_redraw();
+        true
     }
 
     fn reattach_session(&mut self, session: SessionId, target: usize) -> bool {
@@ -1211,15 +1232,20 @@ impl App {
             .collect()
     }
 
+    fn rename_session(&mut self, session: SessionId, name: &str) -> bool {
+        let Some(session) = self.session_manager.session_mut(session) else {
+            return false;
+        };
+        session.rename(name.to_string());
+        self.request_redraw();
+        true
+    }
+
     fn rename_active(&mut self, name: &str) {
         let Some(session) = self.active_session() else {
             return;
         };
-        let Some(session) = self.session_manager.session_mut(session) else {
-            return;
-        };
-        session.rename(name.to_string());
-        self.request_redraw();
+        self.rename_session(session, name);
     }
 
     fn open_status_prompt(&mut self) {
@@ -1265,20 +1291,48 @@ impl App {
         self.action_mode = false;
         self.request_redraw();
         match code {
-            KeyCode::Digit1 => self.switch_tab(0),
-            KeyCode::Digit2 => self.switch_tab(1),
-            KeyCode::Digit3 => self.switch_tab(2),
-            KeyCode::Digit4 => self.switch_tab(3),
-            KeyCode::Digit5 => self.switch_tab(4),
-            KeyCode::Digit6 => self.switch_tab(5),
-            KeyCode::Digit7 => self.switch_tab(6),
-            KeyCode::Digit8 => self.switch_tab(7),
-            KeyCode::Digit9 => self.switch_tab(8),
-            KeyCode::KeyK => self.switch_tab(self.next_tab_index()),
-            KeyCode::KeyJ => self.switch_tab(self.previous_tab_index()),
-            KeyCode::KeyW => self.focus_next_pane(),
-            KeyCode::KeyV => self.split_current_tab(SplitDirection::Vertical),
-            KeyCode::KeyH => self.split_current_tab(SplitDirection::Horizontal),
+            KeyCode::Digit1 => {
+                self.switch_tab(0);
+            }
+            KeyCode::Digit2 => {
+                self.switch_tab(1);
+            }
+            KeyCode::Digit3 => {
+                self.switch_tab(2);
+            }
+            KeyCode::Digit4 => {
+                self.switch_tab(3);
+            }
+            KeyCode::Digit5 => {
+                self.switch_tab(4);
+            }
+            KeyCode::Digit6 => {
+                self.switch_tab(5);
+            }
+            KeyCode::Digit7 => {
+                self.switch_tab(6);
+            }
+            KeyCode::Digit8 => {
+                self.switch_tab(7);
+            }
+            KeyCode::Digit9 => {
+                self.switch_tab(8);
+            }
+            KeyCode::KeyK => {
+                self.switch_tab(self.next_tab_index());
+            }
+            KeyCode::KeyJ => {
+                self.switch_tab(self.previous_tab_index());
+            }
+            KeyCode::KeyW => {
+                self.focus_next_pane();
+            }
+            KeyCode::KeyV => {
+                self.split_current_tab(SplitDirection::Vertical);
+            }
+            KeyCode::KeyH => {
+                self.split_current_tab(SplitDirection::Horizontal);
+            }
             KeyCode::KeyT => {
                 if let Some(window) = self.window.as_mut() {
                     window.set_decorations(!window.is_decorated());

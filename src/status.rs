@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use mlua::prelude::*;
