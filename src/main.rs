@@ -973,9 +973,7 @@ impl App {
     }
 
     fn focus_next_pane(&mut self) -> Option<SessionId> {
-        let Some(tab) = self.tabs[self.current_tab].as_mut() else {
-            return None;
-        };
+        let tab = self.tabs[self.current_tab].as_mut()?;
         let next = tab.focus_next()?;
         self.wheel_remainder = 0.0;
         self.update_ime_cursor_area();
@@ -1063,9 +1061,8 @@ impl App {
                 return None;
             }
         };
-        let Some(tab) = self.tabs[self.current_tab].as_mut() else {
-            return None;
-        };
+        let tab = self.tabs[self.current_tab].as_mut()?;
+
         if !tab.split_active(direction, session_id) {
             return None;
         }

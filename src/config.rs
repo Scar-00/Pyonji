@@ -213,7 +213,6 @@ impl LuaUserData for App {
                 }
             };
             callable_action!(lua, this => {
-                let session = session;
                 let name = name.clone();
                 move |this: &mut Self| -> LuaResult<bool> {
                     let Some(session) = session.or_else(|| this.active_session()) else {
@@ -436,7 +435,7 @@ impl LuaUserData for App {
         fields.add_field_method_get("rows", |_, this| Ok(this.rows));
         fields.add_field_method_get("cols", |_, this| Ok(this.cols));
         fields.add_field_method_get("active_session", |lua, this| {
-            Ok(this.active_session().into_lua(lua)?)
+            this.active_session().into_lua(lua)
         });
         fields.add_field_method_get("tab_count", |_, this| {
             Ok(this.tabs.iter().flatten().count())
