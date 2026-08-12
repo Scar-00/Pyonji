@@ -228,6 +228,10 @@ impl LuaUserData for App {
                 let Some(session) = session.or_else(|| this.active_session()) else {
                     return Ok(false);
                 };
+                let Some(term_session) = this.session_manager.session_mut(session) else {
+                    return Ok(false);
+                };
+                term_session.pty.kill();
                 Ok(this.close_session(session))
             })
         });

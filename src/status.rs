@@ -9,6 +9,7 @@ use crate::{config, App};
 
 const MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[derive(Clone, Copy)]
 pub enum Mode {
     Command,
     Rename,
@@ -18,6 +19,8 @@ pub enum Mode {
 pub struct StatusBar {
     prompt: Option<Prompt>,
     message: Option<(Instant, String)>,
+    command_history: Vec<String>,
+    lua_history: Vec<String>,
 }
 
 impl Default for StatusBar {
@@ -31,6 +34,8 @@ impl StatusBar {
         Self {
             prompt: None,
             message: None,
+            command_history: Vec::new(),
+            lua_history: Vec::new(),
         }
     }
 
@@ -100,14 +105,14 @@ impl StatusBar {
                 if !input.is_empty() {
                     match prompt.mode {
                         Mode::Command => {
-                            prompt.push_history(input.clone());
+                            self.push_history(Mode::Command, input.clone());
                             self.execute_command(app, &input);
                         }
                         Mode::Rename => {
                             app.rename_active(&input);
                         }
                         Mode::Lua => {
-                            prompt.push_history(input.clone());
+                            self.push_history(Mode::Lua, input.clone());
                             self.evaluate_lua(app, &input);
                         }
                     }
@@ -119,8 +124,14 @@ impl StatusBar {
             KeyCode::ArrowRight => prompt.cursor_right(),
             KeyCode::Home => prompt.cursor = 0,
             KeyCode::End => prompt.cursor = prompt.buffer.len(),
-            KeyCode::ArrowUp => prompt.history_prev(),
-            KeyCode::ArrowDown => prompt.history_next(),
+            KeyCode::ArrowUp => {
+                let history = self.history_for(prompt.mode);
+                prompt.history_prev(history);
+            }
+            KeyCode::ArrowDown => {
+                let history = self.history_for(prompt.mode);
+                prompt.history_next(history);
+            }
             _ => {
                 if let Some(text) = &event.text
                     && !text.is_empty()
@@ -131,6 +142,25 @@ impl StatusBar {
         }
         if keep {
             self.prompt = Some(prompt);
+        }
+    }
+
+    fn history_for(&self, mode: Mode) -> &[String] {
+        match mode {
+            Mode::Command => &self.command_history,
+            Mode::Rename => &[],
+            Mode::Lua => &self.lua_history,
+        }
+    }
+
+    fn push_history(&mut self, mode: Mode, entry: String) {
+        let history = match mode {
+            Mode::Command => &mut self.command_history,
+            Mode::Rename => return,
+            Mode::Lua => &mut self.lua_history,
+        };
+        if history.last() != Some(&entry) {
+            history.push(entry);
         }
     }
 
@@ -199,7 +229,6 @@ struct Prompt {
     mode: Mode,
     buffer: String,
     cursor: usize,
-    history: Vec<String>,
     history_index: Option<usize>,
 }
 
@@ -209,7 +238,6 @@ impl Prompt {
             mode,
             buffer: String::new(),
             cursor: 0,
-            history: Vec::new(),
             history_index: None,
         }
     }
@@ -258,25 +286,25 @@ impl Prompt {
             .map_or(self.buffer.len(), |(index, _)| self.cursor + index);
     }
 
-    fn history_prev(&mut self) {
-        if self.history.is_empty() {
+    fn history_prev(&mut self, history: &[String]) {
+        if history.is_empty() {
             return;
         }
         match self.history_index {
-            None => self.history_index = Some(self.history.len() - 1),
+            None => self.history_index = Some(history.len() - 1),
             Some(index) if index > 0 => self.history_index = Some(index - 1),
             _ => return,
         }
         let index = self.history_index.expect("just set");
-        self.buffer = self.history[index].clone();
+        self.buffer = history[index].clone();
         self.cursor = self.buffer.len();
     }
 
-    fn history_next(&mut self) {
+    fn history_next(&mut self, history: &[String]) {
         match self.history_index {
-            Some(index) if index + 1 < self.history.len() => {
+            Some(index) if index + 1 < history.len() => {
                 self.history_index = Some(index + 1);
-                self.buffer = self.history[index + 1].clone();
+                self.buffer = history[index + 1].clone();
             }
             Some(_) => {
                 self.history_index = None;
@@ -285,13 +313,6 @@ impl Prompt {
             None => return,
         }
         self.cursor = self.buffer.len();
-    }
-
-    fn push_history(&mut self, entry: String) {
-        if self.history.last() != Some(&entry) {
-            self.history.push(entry);
-        }
-        self.history_index = None;
     }
 
     fn display(&self, cols: u16) -> StatusInput {

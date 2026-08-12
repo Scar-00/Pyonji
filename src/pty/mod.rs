@@ -6,7 +6,7 @@ use std::{
 
 use crate::terminal::SessionId;
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use winit::event_loop::EventLoopProxy;
 
 #[derive(Debug, Clone)]
@@ -19,6 +19,7 @@ pub struct SshConnection {
 pub struct Pty {
     master: Box<dyn MasterPty>,
     writer: Box<dyn Write + Send>,
+    killer: Box<dyn ChildKiller>,
 }
 
 pub enum Event {
@@ -73,6 +74,8 @@ impl Pty {
             .take_writer()
             .context("failed to take PTY writer")?;
 
+        let killer = child.clone_killer();
+
         std::thread::spawn({
             let tx = tx.clone();
             move || {
@@ -99,6 +102,7 @@ impl Pty {
         Ok(Self {
             master: pair.master,
             writer,
+            killer,
         })
     }
 
@@ -142,6 +146,8 @@ impl Pty {
             .take_writer()
             .context("failed to take PTY writer")?;
 
+        let killer = child.clone_killer();
+
         std::thread::spawn({
             let tx = tx.clone();
             move || {
@@ -168,6 +174,7 @@ impl Pty {
         Ok(Self {
             master: pair.master,
             writer,
+            killer,
         })
 
         /*const SSH_SOCKET: Token = Token(0);
@@ -276,6 +283,10 @@ impl Pty {
             pixel_width: 0,
             pixel_height: 0,
         });
+    }
+
+    pub fn kill(&mut self) {
+        _ = self.killer.kill();
     }
 
     fn get_shell() -> String {
