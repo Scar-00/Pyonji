@@ -35,6 +35,7 @@ use pty::Event as PtyEvent;
 use renderer::{ImePreedit, Pane, Renderer, StatusLine, StatusTab};
 use std::{
     array,
+    collections::HashMap,
     fmt::Display,
     panic::Location,
     path::{Path, PathBuf},
@@ -133,7 +134,7 @@ struct App {
     overlay: Option<Overlay>,
 
     action: KeyBinding,
-    key_bindings: Vec<(KeyBinding, LuaFunction)>,
+    keymap: HashMap<KeyBinding, KeyAction>,
     registered_callbacks: Vec<LuaAction>,
     fullscreen: bool,
     default_cwd: Option<PathBuf>,
@@ -152,6 +153,33 @@ struct PaneHit {
 struct DividerDrag {
     path: Vec<PanePathStep>,
     direction: SplitDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BuiltinAction {
+    Action,
+    Palette,
+    Sessions,
+    Tab(usize),
+    NextTab,
+    PrevTab,
+    NextPane,
+    SplitVertical,
+    SplitHorizontal,
+    ToggleDecorations,
+    ToggleStatusBar,
+    StatusPrompt,
+    LuaPrompt,
+    MoveToTab,
+    DetachSession,
+    RenameSession,
+    Detached,
+}
+
+#[derive(Debug, Clone)]
+pub enum KeyAction {
+    Builtin(BuiltinAction),
+    Custom(LuaFunction),
 }
 
 fn main() -> Result<()> {
@@ -268,7 +296,7 @@ impl App {
                 mods: ModifiersState::CONTROL,
                 key: KeyCode::KeyB,
             },
-            key_bindings: vec![],
+            keymap: Self::default_keymap(),
             registered_callbacks: vec![],
             fullscreen: false,
             default_cwd: None,
@@ -285,6 +313,136 @@ impl App {
             overlay.draw(self).expect("drawing overlay");
         }
         self.overlay = Some(overlay);
+    }
+
+    pub fn default_keymap() -> HashMap<KeyBinding, KeyAction> {
+        use BuiltinAction as B;
+        let mut keymap = HashMap::new();
+        keymap.insert(
+            KeyBinding {
+                mods: ModifiersState::CONTROL,
+                key: KeyCode::KeyB,
+            },
+            KeyAction::Builtin(B::Action),
+        );
+        keymap.insert(
+            KeyBinding {
+                mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
+                key: KeyCode::KeyF,
+            },
+            KeyAction::Builtin(B::Palette),
+        );
+        keymap.insert(
+            KeyBinding {
+                mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
+                key: KeyCode::KeyS,
+            },
+            KeyAction::Builtin(B::Sessions),
+        );
+        let action_keys: &[(KeyCode, BuiltinAction)] = &[
+            (KeyCode::Digit1, B::Tab(0)),
+            (KeyCode::Digit2, B::Tab(1)),
+            (KeyCode::Digit3, B::Tab(2)),
+            (KeyCode::Digit4, B::Tab(3)),
+            (KeyCode::Digit5, B::Tab(4)),
+            (KeyCode::Digit6, B::Tab(5)),
+            (KeyCode::Digit7, B::Tab(6)),
+            (KeyCode::Digit8, B::Tab(7)),
+            (KeyCode::Digit9, B::Tab(8)),
+            (KeyCode::KeyK, B::NextTab),
+            (KeyCode::KeyJ, B::PrevTab),
+            (KeyCode::KeyW, B::NextPane),
+            (KeyCode::KeyV, B::SplitVertical),
+            (KeyCode::KeyH, B::SplitHorizontal),
+            (KeyCode::KeyT, B::ToggleDecorations),
+            (KeyCode::KeyS, B::ToggleStatusBar),
+            (KeyCode::KeyP, B::Palette),
+            (KeyCode::Semicolon, B::StatusPrompt),
+            (KeyCode::KeyL, B::LuaPrompt),
+            (KeyCode::KeyM, B::MoveToTab),
+            (KeyCode::KeyD, B::DetachSession),
+            (KeyCode::KeyR, B::RenameSession),
+            (KeyCode::KeyA, B::Detached),
+        ];
+        for (key, action) in action_keys {
+            keymap.insert(
+                KeyBinding {
+                    mods: ModifiersState::empty(),
+                    key: *key,
+                },
+                KeyAction::Builtin(*action),
+            );
+        }
+        keymap
+    }
+
+    fn dispatch_builtin(&mut self, action: BuiltinAction) -> bool {
+        match action {
+            BuiltinAction::Action => {
+                self.resize_mode_held = true;
+                self.resize_mode_used = false;
+                self.action_mode = true;
+            }
+            BuiltinAction::Palette => {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.show(Some(Screen::CmdPalette));
+                }
+                self.request_redraw();
+            }
+            BuiltinAction::Sessions => {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.show(Some(Screen::Sessions));
+                }
+                self.request_redraw();
+            }
+            BuiltinAction::Tab(index) => {
+                let _ = self.switch_tab(index);
+            }
+            BuiltinAction::NextTab => {
+                let _ = self.switch_tab(self.next_tab_index());
+            }
+            BuiltinAction::PrevTab => {
+                let _ = self.switch_tab(self.previous_tab_index());
+            }
+            BuiltinAction::NextPane => {
+                let _ = self.focus_next_pane();
+            }
+            BuiltinAction::SplitVertical => {
+                let _ = self.split_current_tab(SplitDirection::Vertical);
+            }
+            BuiltinAction::SplitHorizontal => {
+                let _ = self.split_current_tab(SplitDirection::Horizontal);
+            }
+            BuiltinAction::ToggleDecorations => {
+                if let Some(window) = self.window.as_mut() {
+                    window.set_decorations(!window.is_decorated());
+                    window.request_redraw();
+                }
+            }
+            BuiltinAction::ToggleStatusBar => {
+                self.status_bar_hidden = !self.status_bar_hidden;
+                self.resize_tab();
+                self.request_redraw();
+            }
+            BuiltinAction::StatusPrompt => self.open_status_prompt(),
+            BuiltinAction::LuaPrompt => self.open_lua_prompt(),
+            BuiltinAction::MoveToTab => {
+                self.pending_move_to_tab = true;
+                self.action_mode = true;
+                self.request_redraw();
+            }
+            BuiltinAction::DetachSession => {
+                let _ = self.detach_active_session();
+            }
+            BuiltinAction::RenameSession => self.open_rename_prompt(),
+            BuiltinAction::Detached => {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.show(Some(Screen::Detached));
+                }
+                self.request_redraw();
+            }
+        }
+        true
     }
 }
 
@@ -598,135 +756,83 @@ impl ApplicationHandler<PtyEvent> for App {
                     return;
                 }
                 if let PhysicalKey::Code(code) = event.physical_key {
-                    if self.key_bindings.is_empty() {
-                        if code == KeyCode::KeyB && event.state == ElementState::Released {
-                            self.resize_mode_held = false;
-                            if self.resize_mode_used {
-                                self.action_mode = false;
+                    if code == self.action.key && event.state == ElementState::Released {
+                        self.resize_mode_held = false;
+                        if self.resize_mode_used {
+                            self.action_mode = false;
+                        }
+                        self.resize_mode_used = false;
+                        return;
+                    }
+                    if event.state != ElementState::Pressed {
+                        return;
+                    }
+                    if self.resize_mode_held {
+                        match code {
+                            KeyCode::ArrowLeft => {
+                                self.resize_mode_used = true;
+                                self.resize_active_pane(SplitDirection::Vertical, -1);
+                                return;
                             }
-                            self.resize_mode_used = false;
-                            return;
-                        }
-                        if event.state != ElementState::Pressed {
-                            return;
-                        }
-                        if self.resize_mode_held {
-                            match code {
-                                KeyCode::ArrowLeft => {
-                                    self.resize_mode_used = true;
-                                    self.resize_active_pane(SplitDirection::Vertical, -1);
-                                    return;
-                                }
-                                KeyCode::ArrowRight => {
-                                    self.resize_mode_used = true;
-                                    self.resize_active_pane(SplitDirection::Vertical, 1);
-                                    return;
-                                }
-                                KeyCode::ArrowUp => {
-                                    self.resize_mode_used = true;
-                                    self.resize_active_pane(SplitDirection::Horizontal, -1);
-                                    return;
-                                }
-                                KeyCode::ArrowDown => {
-                                    self.resize_mode_used = true;
-                                    self.resize_active_pane(SplitDirection::Horizontal, 1);
-                                    return;
-                                }
-                                _ => {}
+                            KeyCode::ArrowRight => {
+                                self.resize_mode_used = true;
+                                self.resize_active_pane(SplitDirection::Vertical, 1);
+                                return;
                             }
+                            KeyCode::ArrowUp => {
+                                self.resize_mode_used = true;
+                                self.resize_active_pane(SplitDirection::Horizontal, -1);
+                                return;
+                            }
+                            KeyCode::ArrowDown => {
+                                self.resize_mode_used = true;
+                                self.resize_active_pane(SplitDirection::Horizontal, 1);
+                                return;
+                            }
+                            _ => {}
                         }
-                        if self.modifiers.control_key() && matches!(code, KeyCode::KeyB) {
-                            self.resize_mode_held = true;
-                            self.resize_mode_used = false;
-                            self.action_mode = true;
-                            return;
-                        } else if self.action_mode && self.action_mode_key(code) {
-                            return;
-                        }
-                        if self
-                            .modifiers
-                            .contains(ModifiersState::CONTROL | ModifiersState::SHIFT)
+                    }
+                    let pressed = KeyBinding {
+                        mods: self.modifiers,
+                        key: code,
+                    };
+                    let was_in_action_mode = self.action_mode;
+                    let is_action_trigger = matches!(
+                        self.keymap.get(&pressed),
+                        Some(KeyAction::Builtin(BuiltinAction::Action))
+                    );
+                    if was_in_action_mode && !is_action_trigger {
+                        self.action_mode = false;
+                        self.request_redraw();
+                    }
+                    if pressed.mods.is_empty() && self.pending_move_to_tab {
+                        self.pending_move_to_tab = false;
+                        self.request_redraw();
+                        if let Some(target) = Self::tab_digit_index(code)
+                            && let Some(session) = self.active_session()
                         {
-                            match code {
-                                KeyCode::KeyF => {
-                                    if let Some(overlay) = self.overlay.as_mut() {
-                                        overlay.show(Some(Screen::CmdPalette));
-                                        self.request_redraw();
-                                    }
-                                    return;
-                                }
-                                KeyCode::KeyS => {
-                                    if let Some(overlay) = self.overlay.as_mut() {
-                                        overlay.show(Some(Screen::Sessions));
-                                        self.request_redraw();
-                                    }
-                                    return;
-                                }
-                                _ => {}
+                            self.move_session_to_tab(session, target);
+                        }
+                        return;
+                    }
+                    if let Some(action) = self.keymap.get(&pressed).cloned()
+                        && (is_action_trigger
+                            || !(pressed.mods.is_empty() && !was_in_action_mode))
+                    {
+                        match action {
+                            KeyAction::Custom(func) => {
+                                config::with_env(self, |this| {
+                                    func.call::<()>(this)?;
+                                    Ok(())
+                                })
+                                .into_log();
+                                self.request_redraw();
+                            }
+                            KeyAction::Builtin(action) => {
+                                self.dispatch_builtin(action);
                             }
                         }
-                    } else {
-                        if code == KeyCode::KeyB && event.state == ElementState::Released {
-                            self.resize_mode_held = false;
-                            if self.resize_mode_used {
-                                self.action_mode = false;
-                            }
-                            self.resize_mode_used = false;
-                            return;
-                        }
-                        if event.state != ElementState::Pressed {
-                            return;
-                        }
-                        if self.resize_mode_held {
-                            match code {
-                                KeyCode::ArrowLeft => {
-                                    self.resize_mode_used = true;
-                                    self.resize_active_pane(SplitDirection::Vertical, -1);
-                                    return;
-                                }
-                                KeyCode::ArrowRight => {
-                                    self.resize_mode_used = true;
-                                    self.resize_active_pane(SplitDirection::Vertical, 1);
-                                    return;
-                                }
-                                KeyCode::ArrowUp => {
-                                    self.resize_mode_used = true;
-                                    self.resize_active_pane(SplitDirection::Horizontal, -1);
-                                    return;
-                                }
-                                KeyCode::ArrowDown => {
-                                    self.resize_mode_used = true;
-                                    self.resize_active_pane(SplitDirection::Horizontal, 1);
-                                    return;
-                                }
-                                _ => {}
-                            }
-                        }
-                        if self.action_mode && self.action_mode_key(code) {
-                            return;
-                        }
-                        let pressed = KeyBinding {
-                            mods: self.modifiers,
-                            key: code,
-                        };
-                        if self.action == pressed {
-                            self.resize_mode_held = true;
-                            self.resize_mode_used = false;
-                            self.action_mode = true;
-                            return;
-                        } else {
-                            for (bind, func) in self.key_bindings.clone() {
-                                if bind == pressed {
-                                    config::with_env(self, |this| {
-                                        func.call::<()>(this)?;
-                                        Ok(())
-                                    })
-                                    .into_log();
-                                    self.request_redraw();
-                                    return;
-                                }
-                            }
-                        }
+                        return;
                     }
                 }
 
@@ -1270,109 +1376,6 @@ impl App {
         self.status_bar.open(Mode::Lua);
         self.resize_tab();
         self.request_redraw();
-    }
-
-    fn action_mode_key(&mut self, code: KeyCode) -> bool {
-        if self.pending_move_to_tab {
-            self.pending_move_to_tab = false;
-            self.action_mode = false;
-            self.request_redraw();
-            if let Some(target) = Self::tab_digit_index(code)
-                && let Some(session) = self.active_session()
-            {
-                self.move_session_to_tab(session, target);
-            }
-            return true;
-        }
-
-        self.action_mode = false;
-        self.request_redraw();
-        match code {
-            KeyCode::Digit1 => {
-                self.switch_tab(0);
-            }
-            KeyCode::Digit2 => {
-                self.switch_tab(1);
-            }
-            KeyCode::Digit3 => {
-                self.switch_tab(2);
-            }
-            KeyCode::Digit4 => {
-                self.switch_tab(3);
-            }
-            KeyCode::Digit5 => {
-                self.switch_tab(4);
-            }
-            KeyCode::Digit6 => {
-                self.switch_tab(5);
-            }
-            KeyCode::Digit7 => {
-                self.switch_tab(6);
-            }
-            KeyCode::Digit8 => {
-                self.switch_tab(7);
-            }
-            KeyCode::Digit9 => {
-                self.switch_tab(8);
-            }
-            KeyCode::KeyK => {
-                self.switch_tab(self.next_tab_index());
-            }
-            KeyCode::KeyJ => {
-                self.switch_tab(self.previous_tab_index());
-            }
-            KeyCode::KeyW => {
-                self.focus_next_pane();
-            }
-            KeyCode::KeyV => {
-                self.split_current_tab(SplitDirection::Vertical);
-            }
-            KeyCode::KeyH => {
-                self.split_current_tab(SplitDirection::Horizontal);
-            }
-            KeyCode::KeyT => {
-                if let Some(window) = self.window.as_mut() {
-                    window.set_decorations(!window.is_decorated());
-                    window.request_redraw();
-                }
-            }
-            KeyCode::KeyS => {
-                self.status_bar_hidden = !self.status_bar_hidden;
-                self.resize_tab();
-                self.request_redraw();
-            }
-            KeyCode::KeyP => {
-                if let Some(overlay) = self.overlay.as_mut() {
-                    overlay.show(Some(Screen::CmdPalette));
-                }
-                self.request_redraw();
-            }
-            KeyCode::Semicolon => {
-                self.open_status_prompt();
-            }
-            KeyCode::KeyL => {
-                self.open_lua_prompt();
-            }
-            KeyCode::KeyM => {
-                self.pending_move_to_tab = true;
-                self.action_mode = true;
-                self.request_redraw();
-            }
-            KeyCode::KeyD => {
-                self.detach_active_session();
-            }
-            KeyCode::KeyR => {
-                self.open_rename_prompt();
-            }
-            KeyCode::KeyA => {
-                if let Some(overlay) = self.overlay.as_mut() {
-                    overlay.show(Some(Screen::Detached));
-                }
-                self.request_redraw();
-            }
-            _ => return false,
-        }
-        true
     }
 
     fn tab_digit_index(code: KeyCode) -> Option<usize> {

@@ -1,7 +1,7 @@
 use crate::overlay::{LuaAction, Screen};
 use crate::pty::{Event as PtyEvent, SshConnection};
 use crate::terminal::{SessionId, SplitDirection, Tab};
-use crate::{App, ResultExt};
+use crate::{App, BuiltinAction, KeyAction, ResultExt};
 use anyhow::{Context, Result};
 use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
@@ -109,12 +109,13 @@ impl LuaUserData for App {
                     state |= m;
                 }
                 let key = KeyBinding::parse_key(&key)?;
-                this.key_bindings
-                    .push((KeyBinding { mods: state, key }, func.clone()));
+                this.keymap
+                    .insert(KeyBinding { mods: state, key }, KeyAction::Custom(func.clone()));
             } else {
                 let (binding, func): (KeyBinding, LuaFunction) =
                     FromLuaMulti::from_lua_multi(args, lua)?;
-                this.key_bindings.push((binding, func));
+                this.keymap
+                    .insert(binding, KeyAction::Custom(func));
             }
 
             Ok(())
@@ -510,7 +511,7 @@ pub fn load(this: &mut App) {
         .inspect_err(|e| tracing::error!(%e, "failed to create default config"));
 
     this.ssh_sessions.clear();
-    this.key_bindings.clear();
+    this.keymap = App::default_keymap();
     this.registered_callbacks.clear();
     let lua = this.lua.clone();
     with_env(this, |_| {
@@ -518,6 +519,16 @@ pub fn load(this: &mut App) {
         chunk.exec()
     })
     .into_log();
+    let action_key = this.action;
+    let overridden = matches!(
+        this.keymap.get(&action_key),
+        Some(KeyAction::Custom(_))
+    );
+    if !overridden {
+        this.keymap
+            .retain(|_, v| !matches!(v, KeyAction::Builtin(BuiltinAction::Action)));
+        this.keymap.insert(action_key, KeyAction::Builtin(BuiltinAction::Action));
+    }
 }
 
 pub fn with_env<R>(this: &mut App, f: impl FnOnce(LuaAnyUserData) -> LuaResult<R>) -> Result<R> {
@@ -609,7 +620,7 @@ mod util {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KeyBinding {
     pub mods: ModifiersState,
     pub key: KeyCode,
