@@ -269,7 +269,7 @@ impl LuaUserData for App {
             })
         });
         methods.add_function("split", |lua, args: LuaMultiValue| {
-            let (this, (direction,)) = args!(args, lua, (String,));
+            let (this, direction) = args!(args, lua, String);
             let direction = match direction.to_lowercase().as_str() {
                 "horizontal" | "h" => SplitDirection::Horizontal,
                 _ => SplitDirection::Vertical,
