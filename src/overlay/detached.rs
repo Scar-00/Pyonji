@@ -1,89 +1,108 @@
-use ratatui::{prelude::*, widgets::*};
-use winit::keyboard::KeyCode;
+use gpui::{App, Entity, Window, div, prelude::*};
+use gpui_component::{ActiveTheme as _, IndexPath, WindowExt as _, command::{Command, CommandItem, CommandState}};
 
-use crate::App;
+use crate::{Surface, terminal::SessionId};
 
-pub struct DetachedView<'a> {
-    app: &'a mut App,
+/// One row of the attach dialog: `id  title`, like the old `DetachedView`.
+#[derive(Clone)]
+struct DetachedEntry {
+    session: SessionId,
+    label: String,
 }
 
-impl<'a> DetachedView<'a> {
-    pub fn new(app: &'a mut App) -> Self {
-        Self { app }
-    }
+fn detached_entries(surface: &Surface) -> Vec<DetachedEntry> {
+    surface
+        .live_detached_sessions()
+        .into_iter()
+        .filter_map(|id| {
+            let session = surface.session_manager.session(id)?;
+            Some(DetachedEntry {
+                session: id,
+                label: format!("{id}    {}", session.title()),
+            })
+        })
+        .collect()
 }
 
-pub struct DetachedState {
-    list_state: ListState,
-}
-
-impl DetachedState {
-    pub fn new() -> Self {
-        Self {
-            list_state: ListState::default(),
-        }
-    }
-
-    pub fn handle_events(&mut self, app: &mut App, code: KeyCode) -> bool {
-        match code {
-            KeyCode::ArrowDown => {
-                self.list_state.select_next();
-                false
-            }
-            KeyCode::ArrowUp => {
-                self.list_state.select_previous();
-                false
-            }
-            KeyCode::Enter
-            | KeyCode::Digit1
-            | KeyCode::Digit2
-            | KeyCode::Digit3
-            | KeyCode::Digit4
-            | KeyCode::Digit5
-            | KeyCode::Digit6
-            | KeyCode::Digit7
-            | KeyCode::Digit8
-            | KeyCode::Digit9 => {
-                let Some(selected) = self.list_state.selected() else {
-                    return false;
-                };
-                let sessions = app.live_detached_sessions();
-                let Some(session) = sessions.get(selected).copied() else {
-                    return false;
-                };
-                let target = match code {
-                    KeyCode::Digit1 => 0usize,
-                    KeyCode::Digit2 => 1,
-                    KeyCode::Digit3 => 2,
-                    KeyCode::Digit4 => 3,
-                    KeyCode::Digit5 => 4,
-                    KeyCode::Digit6 => 5,
-                    KeyCode::Digit7 => 6,
-                    KeyCode::Digit8 => 7,
-                    KeyCode::Digit9 => 8,
-                    _ => app.current_tab,
-                };
-                app.reattach_session(session, target)
-            }
-            _ => false,
-        }
-    }
-}
-
-impl StatefulWidget for DetachedView<'_> {
-    type State = DetachedState;
-
-    fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        let list_items = self
-            .app
-            .live_detached_sessions()
-            .into_iter()
-            .filter_map(|id| {
-                let session = self.app.session_manager.session(id)?;
-                Some(Line::from(format!("{id}    {}", session.title())))
+/// Open the attach-session dialog.
+///
+/// Enter attaches the highlighted session to the current tab — the same as
+/// the old `DetachedState` Enter path (`target = app.current_tab`).
+///
+/// Note: the ratatui version also accepted `1`–`9` to pick the target tab.
+/// That conflicts with the search field (digits must be typeable), so it is
+/// intentionally not carried over. Attach lands on the current tab; use the
+/// `move-to` command afterwards to relocate the session.
+pub fn open_detached(surface: Entity<Surface>, window: &mut Window, cx: &mut App) {
+    let entries = detached_entries(&surface.read(cx));
+    let current_tab = surface.read(cx).current_tab;
+    let state = cx.new(|cx| CommandState::new(window, cx));
+    state.update(cx, |state, cx| state.set_query("", window, cx));
+    window.open_dialog(cx, move |dialog, window, cx| {
+        let dialog_state = state.clone();
+        let focus_back = surface.clone();
+        let focus_state = dialog_state.clone();
+        window.defer(cx, move |window, cx| {
+            focus_state.update(cx, |state, cx| {
+                state.focus(window, cx);
             });
-        let list = List::new(list_items).highlight_style(Modifier::REVERSED);
+        });
+        let footer = div()
+            .w_full()
+            .px_3()
+            .py_2()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child("Enter attaches to the current tab");
+        let items = entries.clone();
+        dialog
+            .close_button(false)
+            .p_0()
+            .title("Attach Session")
+            .footer(footer)
+            .on_close(window.listener_for(&focus_back, |surface, _, window, cx| {
+                window.focus(&surface.focus_handle, cx);
+            }))
+            .content({
+                let state = dialog_state.clone();
+                let surface = surface.clone();
+                let items = items.clone();
+                move |content, _, _| {
+                    let surface = surface.clone();
+                    let confirm_entries = items.clone();
+                    let mut command = Command::new(&state)
+                        .placeholder("Search detached sessions..")
+                        .bordered(true)
+                        .on_confirm(move |index: IndexPath, window, cx| {
+                            let entry = confirm_entries.get(index.row).cloned();
+                            window.close_dialog(cx);
+                            let Some(entry) = entry else {
+                                surface.update(cx, |surface, cx| {
+                                    window.focus(&surface.focus_handle, cx);
+                                    cx.notify();
+                                });
+                                return;
+                            };
+                            surface.update(cx, |surface, cx| {
+                                surface.reattach_session(entry.session, current_tab);
+                                window.focus(&surface.focus_handle, cx);
+                                cx.notify();
+                            });
+                        });
+                    for entry in &items {
+                        command = command.item(CommandItem::new().label(entry.label.clone()));
+                    }
+                    content.child(command)
+                }
+            })
+    });
+}
 
-        StatefulWidget::render(list, area, buf, &mut state.list_state);
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn detached_label_format() {
+        let label = format!("{}    {}", 7, "nvim");
+        assert_eq!(label, "7    nvim");
     }
 }

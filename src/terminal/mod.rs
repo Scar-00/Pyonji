@@ -1,10 +1,7 @@
 pub mod manager;
 use crate::pty::Pty;
+use gpui::{KeyDownEvent, Modifiers, MouseButton};
 pub use manager::*;
-use winit::{
-    event::{ElementState, KeyEvent, MouseButton},
-    keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey},
-};
 
 #[derive(Debug)]
 pub enum CursorState {
@@ -553,35 +550,23 @@ enum MouseAction {
     Motion,
 }
 
-fn control_key_byte(code: KeyCode) -> Option<u8> {
-    match code {
-        KeyCode::KeyA => Some(0x01),
-        KeyCode::KeyB => Some(0x02),
-        KeyCode::KeyC => Some(0x03),
-        KeyCode::KeyD => Some(0x04),
-        KeyCode::KeyE => Some(0x05),
-        KeyCode::KeyF => Some(0x06),
-        KeyCode::KeyG => Some(0x07),
-        KeyCode::KeyH => Some(0x08),
-        KeyCode::KeyI => Some(0x09),
-        KeyCode::KeyJ => Some(0x0a),
-        KeyCode::KeyK => Some(0x0b),
-        KeyCode::KeyL => Some(0x0c),
-        KeyCode::KeyM => Some(0x0d),
-        KeyCode::KeyN => Some(0x0e),
-        KeyCode::KeyO => Some(0x0f),
-        KeyCode::KeyP => Some(0x10),
-        KeyCode::KeyQ => Some(0x11),
-        KeyCode::KeyR => Some(0x12),
-        KeyCode::KeyS => Some(0x13),
-        KeyCode::KeyT => Some(0x14),
-        KeyCode::KeyU => Some(0x15),
-        KeyCode::KeyV => Some(0x16),
-        KeyCode::KeyW => Some(0x17),
-        KeyCode::KeyX => Some(0x18),
-        KeyCode::KeyY => Some(0x19),
-        KeyCode::KeyZ => Some(0x1a),
-        _ => None,
+/// Map `ctrl+<letter>` to the corresponding C0 control byte (`ctrl-a` -> 0x01).
+fn control_key_byte(key: &str) -> Option<u8> {
+    let bytes = key.as_bytes();
+    if bytes.len() == 1 && bytes[0].is_ascii_lowercase() {
+        Some(bytes[0] - b'a' + 1)
+    } else {
+        None
+    }
+}
+
+/// xterm-style CSI modifier parameter: 1 + shift(1) + alt(2) + ctrl(4).
+/// `None` when no relevant modifier is held, meaning the plain sequence.
+fn csi_modifier(mods: &Modifiers) -> Option<u8> {
+    if mods.control || mods.alt || mods.shift {
+        Some(1 + u8::from(mods.shift) + 2 * u8::from(mods.alt) + 4 * u8::from(mods.control))
+    } else {
+        None
     }
 }
 
@@ -635,101 +620,187 @@ impl TerminalSession {
         }
     }
 
-    pub fn handle_key_press(&mut self, event: &KeyEvent, mods: ModifiersState, is_csi: Option<u8>) {
-        if event.state != ElementState::Pressed {
-            return;
+    /// Translate a GPUI key-down into pty bytes for the active session.
+    /// Returns `true` when the keystroke was consumed and should not
+    /// propagate further (caller should `prevent_default` + `stop_propagation`).
+    pub fn handle_key_down(&mut self, event: &KeyDownEvent) -> bool {
+        let mods = &event.keystroke.modifiers;
+        let key = event.keystroke.key.as_str();
+
+        // Let OS-level shortcuts (cmd/super, fn) pass through to the platform.
+        if mods.platform || mods.function {
+            return false;
         }
 
-        if let PhysicalKey::Code(code) = event.physical_key
-            && mods.control_key()
-            && let Some(byte) = control_key_byte(code)
-        {
-            self.pty.add_bytes([byte]);
-            return;
+        // `ctrl+<letter>` -> C0 control codes (e.g. `ctrl-c` -> ETX).
+        // Key bindings (e.g. the command palette) dispatch before key-down
+        // handlers and stop propagation, so bound strokes never reach here.
+        // Other `ctrl` combinations fall through so `csi_modifier` below
+        // still encodes the modifier (e.g. `ctrl-up` -> `\x1b[1;5A`).
+        if mods.control && !mods.alt {
+            if let Some(byte) = control_key_byte(key) {
+                self.pty.add_bytes([byte]);
+                return true;
+            }
+            if key == "space" {
+                // No text is produced for this chord; don't swallow it.
+                return false;
+            }
         }
-        let is_app_cursor_mode = self.vt.screen().application_cursor();
-        let _is_keypad_mode = self.vt.screen().application_keypad();
-        match &event.logical_key {
-            Key::Named(NamedKey::Escape) => self.pty.add_bytes([0x1b]),
-            Key::Named(NamedKey::Enter) => self.pty.add_bytes(b"\r"),
-            Key::Named(NamedKey::Backspace) => self.pty.add_bytes([0x7f]),
-            Key::Named(NamedKey::Tab) => {
-                if mods.shift_key() {
+
+        let csi = csi_modifier(mods);
+        let app_cursor = self.vt.screen().application_cursor();
+        match key {
+            "escape" => {
+                self.pty.add_bytes([0x1b]);
+                true
+            }
+            "enter" => {
+                self.pty.add_bytes(b"\r");
+                true
+            }
+            "backspace" => {
+                self.pty.add_bytes([0x7f]);
+                true
+            }
+            "tab" => {
+                if mods.shift {
                     self.pty.add_bytes(b"\x1b[Z");
                 } else {
                     self.pty.add_bytes(b"\t");
                 }
+                true
             }
-            Key::Named(NamedKey::ArrowUp) => {
-                self.pty.add_cursor_key(is_csi, b'A', is_app_cursor_mode);
+            "space" => {
+                if mods.alt {
+                    self.pty.add_bytes([0x1b]);
+                }
+                self.pty.add_bytes(b" ");
+                true
             }
-            Key::Named(NamedKey::ArrowDown) => {
-                self.pty.add_cursor_key(is_csi, b'B', is_app_cursor_mode);
+            "up" => {
+                self.pty.add_cursor_key(csi, b'A', app_cursor);
+                true
             }
-            Key::Named(NamedKey::ArrowRight) => {
-                self.pty.add_cursor_key(is_csi, b'C', is_app_cursor_mode);
+            "down" => {
+                self.pty.add_cursor_key(csi, b'B', app_cursor);
+                true
             }
-            Key::Named(NamedKey::ArrowLeft) => {
-                self.pty.add_cursor_key(is_csi, b'D', is_app_cursor_mode);
+            "right" => {
+                self.pty.add_cursor_key(csi, b'C', app_cursor);
+                true
             }
-            Key::Named(NamedKey::Home) => self.pty.add_csi_key(is_csi, b'H'),
-            Key::Named(NamedKey::End) => self.pty.add_csi_key(is_csi, b'F'),
-            Key::Named(NamedKey::Insert) => self.pty.add_csi_tilde(is_csi, 2),
-            Key::Named(NamedKey::Delete) => self.pty.add_csi_tilde(is_csi, 3),
-            Key::Named(NamedKey::PageUp) => self.pty.add_csi_tilde(is_csi, 5),
-            Key::Named(NamedKey::PageDown) => self.pty.add_csi_tilde(is_csi, 6),
-            Key::Named(NamedKey::F1) => {
-                if let Some(m) = is_csi {
+            "left" => {
+                self.pty.add_cursor_key(csi, b'D', app_cursor);
+                true
+            }
+            "home" => {
+                self.pty.add_csi_key(csi, b'H');
+                true
+            }
+            "end" => {
+                self.pty.add_csi_key(csi, b'F');
+                true
+            }
+            "insert" => {
+                self.pty.add_csi_tilde(csi, 2);
+                true
+            }
+            "delete" => {
+                self.pty.add_csi_tilde(csi, 3);
+                true
+            }
+            "pageup" => {
+                self.pty.add_csi_tilde(csi, 5);
+                true
+            }
+            "pagedown" => {
+                self.pty.add_csi_tilde(csi, 6);
+                true
+            }
+            "f1" => {
+                if let Some(m) = csi {
                     self.pty.add_bytes(format!("\x1b[1;{m}P").as_bytes());
                 } else {
                     self.pty.add_bytes(b"\x1bOP");
                 }
+                true
             }
-            Key::Named(NamedKey::F2) => {
-                if let Some(m) = is_csi {
+            "f2" => {
+                if let Some(m) = csi {
                     self.pty.add_bytes(format!("\x1b[1;{m}Q").as_bytes());
                 } else {
                     self.pty.add_bytes(b"\x1bOQ");
                 }
+                true
             }
-            Key::Named(NamedKey::F3) => {
-                if let Some(m) = is_csi {
+            "f3" => {
+                if let Some(m) = csi {
                     self.pty.add_bytes(format!("\x1b[1;{m}R").as_bytes());
                 } else {
                     self.pty.add_bytes(b"\x1bOR");
                 }
+                true
             }
-            Key::Named(NamedKey::F4) => {
-                if let Some(m) = is_csi {
+            "f4" => {
+                if let Some(m) = csi {
                     self.pty.add_bytes(format!("\x1b[1;{m}S").as_bytes());
                 } else {
                     self.pty.add_bytes(b"\x1bOS");
                 }
+                true
             }
-            Key::Named(NamedKey::F5) => self.pty.add_csi_tilde(is_csi, 15),
-            Key::Named(NamedKey::F6) => self.pty.add_csi_tilde(is_csi, 17),
-            Key::Named(NamedKey::F7) => self.pty.add_csi_tilde(is_csi, 18),
-            Key::Named(NamedKey::F8) => self.pty.add_csi_tilde(is_csi, 19),
-            Key::Named(NamedKey::F9) => self.pty.add_csi_tilde(is_csi, 20),
-            Key::Named(NamedKey::F10) => self.pty.add_csi_tilde(is_csi, 21),
-            Key::Named(NamedKey::F11) => self.pty.add_csi_tilde(is_csi, 23),
-            Key::Named(NamedKey::F12) => self.pty.add_csi_tilde(is_csi, 24),
+            "f5" => {
+                self.pty.add_csi_tilde(csi, 15);
+                true
+            }
+            "f6" => {
+                self.pty.add_csi_tilde(csi, 17);
+                true
+            }
+            "f7" => {
+                self.pty.add_csi_tilde(csi, 18);
+                true
+            }
+            "f8" => {
+                self.pty.add_csi_tilde(csi, 19);
+                true
+            }
+            "f9" => {
+                self.pty.add_csi_tilde(csi, 20);
+                true
+            }
+            "f10" => {
+                self.pty.add_csi_tilde(csi, 21);
+                true
+            }
+            "f11" => {
+                self.pty.add_csi_tilde(csi, 23);
+                true
+            }
+            "f12" => {
+                self.pty.add_csi_tilde(csi, 24);
+                true
+            }
             _ => {
-                if let Some(text) = &event.text {
-                    if mods.alt_key() {
+                if let Some(text) = event.keystroke.key_char.as_deref() {
+                    if mods.alt {
                         self.pty.add_bytes([0x1b]);
                     }
                     self.pty.add_bytes(text.as_bytes());
+                    true
+                } else {
+                    // No text (e.g. IME composition in progress): leave it alone.
+                    false
                 }
             }
         }
     }
 
-    pub fn handle_mouse_button(
+    pub fn handle_mouse_down(
         &mut self,
         button: MouseButton,
-        state: ElementState,
-        mods: ModifiersState,
+        mods: &Modifiers,
         col: u16,
         row: u16,
     ) {
@@ -738,22 +809,29 @@ impl TerminalSession {
             self.mouse_pressed_button = None;
             return;
         }
-
-        match state {
-            ElementState::Pressed => {
-                self.mouse_pressed_button = Some(button);
-                self.send_mouse_event(MouseAction::Press, Some(button), mods, col, row);
-                self.last_mouse_cell = Some((col, row));
-            }
-            ElementState::Released => {
-                self.send_mouse_event(MouseAction::Release, Some(button), mods, col, row);
-                self.mouse_pressed_button = None;
-                self.last_mouse_cell = Some((col, row));
-            }
-        }
+        self.mouse_pressed_button = Some(button);
+        self.send_mouse_event(MouseAction::Press, Some(button), mods, col, row);
+        self.last_mouse_cell = Some((col, row));
     }
 
-    pub fn handle_mouse_move(&mut self, mods: ModifiersState, col: u16, row: u16) {
+    pub fn handle_mouse_up(
+        &mut self,
+        button: MouseButton,
+        mods: &Modifiers,
+        col: u16,
+        row: u16,
+    ) {
+        let mode = self.vt.screen().mouse_protocol_mode();
+        if mode == vt100::MouseProtocolMode::None {
+            self.mouse_pressed_button = None;
+            return;
+        }
+        self.send_mouse_event(MouseAction::Release, Some(button), mods, col, row);
+        self.mouse_pressed_button = None;
+        self.last_mouse_cell = Some((col, row));
+    }
+
+    pub fn handle_mouse_move(&mut self, mods: &Modifiers, col: u16, row: u16) {
         let mode = self.vt.screen().mouse_protocol_mode();
         if mode == vt100::MouseProtocolMode::None {
             return;
@@ -768,32 +846,30 @@ impl TerminalSession {
                 let Some(button) = self.mouse_pressed_button else {
                     return;
                 };
-                button
+                Some(button)
             }
-            vt100::MouseProtocolMode::AnyMotion => {
-                self.mouse_pressed_button.unwrap_or(MouseButton::Other(0))
-            }
+            vt100::MouseProtocolMode::AnyMotion => self.mouse_pressed_button,
             _ => return,
         };
 
-        self.send_mouse_event(MouseAction::Motion, Some(button), mods, col, row);
+        self.send_mouse_event(MouseAction::Motion, button, mods, col, row);
         self.last_mouse_cell = Some((col, row));
     }
 
-    pub fn handle_mouse_wheel(&mut self, lines: f32, mods: ModifiersState, col: u16, row: u16) {
+    pub fn handle_mouse_wheel(&mut self, lines: f32, mods: &Modifiers, col: u16, row: u16) {
         let mode = self.vt.screen().mouse_protocol_mode();
         if mode == vt100::MouseProtocolMode::None || lines == 0.0 {
             return;
         }
 
         let mut button_code = if lines > 0.0 { 64u8 } else { 65u8 };
-        if mods.shift_key() {
+        if mods.shift {
             button_code += 4;
         }
-        if mods.alt_key() {
+        if mods.alt {
             button_code += 8;
         }
-        if mods.control_key() {
+        if mods.control {
             button_code += 16;
         }
         self.send_mouse_sequence(button_code, false, col, row);
@@ -816,7 +892,7 @@ impl TerminalSession {
         &mut self,
         action: MouseAction,
         button: Option<MouseButton>,
-        mods: ModifiersState,
+        mods: &Modifiers,
         col: u16,
         row: u16,
     ) {
@@ -863,13 +939,13 @@ impl TerminalSession {
             },
         };
 
-        if mods.shift_key() {
+        if mods.shift {
             code += 4;
         }
-        if mods.alt_key() {
+        if mods.alt {
             code += 8;
         }
-        if mods.control_key() {
+        if mods.control {
             code += 16;
         }
 
@@ -897,5 +973,72 @@ impl TerminalSession {
                 self.pty.add_bytes([0x1b, b'[', b'M', cb, cx, cy]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::Modifiers;
+
+    #[test]
+    fn ctrl_letters_map_to_c0_bytes() {
+        assert_eq!(control_key_byte("a"), Some(0x01));
+        assert_eq!(control_key_byte("c"), Some(0x03));
+        assert_eq!(control_key_byte("z"), Some(0x1a));
+        assert_eq!(control_key_byte("A"), None);
+        assert_eq!(control_key_byte("space"), None);
+        assert_eq!(control_key_byte("enter"), None);
+        assert_eq!(control_key_byte(""), None);
+    }
+
+    #[test]
+    fn csi_modifier_encodes_xterm_param() {
+        let none = Modifiers::default();
+        assert_eq!(csi_modifier(&none), None);
+        assert_eq!(
+            csi_modifier(&Modifiers {
+                shift: true,
+                ..Default::default()
+            }),
+            Some(2)
+        );
+        assert_eq!(
+            csi_modifier(&Modifiers {
+                alt: true,
+                ..Default::default()
+            }),
+            Some(3)
+        );
+        assert_eq!(
+            csi_modifier(&Modifiers {
+                control: true,
+                ..Default::default()
+            }),
+            Some(5)
+        );
+        assert_eq!(
+            csi_modifier(&Modifiers {
+                shift: true,
+                control: true,
+                ..Default::default()
+            }),
+            Some(6)
+        );
+        // Platform/fn keys alone never produce a CSI param.
+        assert_eq!(
+            csi_modifier(&Modifiers {
+                platform: true,
+                ..Default::default()
+            }),
+            None
+        );
+        assert_eq!(
+            csi_modifier(&Modifiers {
+                function: true,
+                ..Default::default()
+            }),
+            None
+        );
     }
 }

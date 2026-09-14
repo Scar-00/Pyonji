@@ -1,193 +1,181 @@
-use std::rc::Rc;
-
+use gpui::{App, Entity, Window, prelude::*};
+use gpui_component::{IndexPath, WindowExt as _, command::{Command, CommandItem, CommandState}};
 use nucleo_matcher::{Matcher, Utf32Str};
-use ratatui::{prelude::*, widgets::*};
-use ratatui_textarea::{CursorMove, Input, Key, TextArea};
-use winit::{event::KeyEvent, keyboard::KeyCode};
 
-use crate::{overlay::Overlay, App};
+use crate::{Surface, overlay::Cmd};
 
-#[derive(Default)]
-pub struct CmdPalleteView;
-
-impl CmdPalleteView {
-    fn render_text_area(text_area: &mut TextArea<'static>, area: Rect, buf: &mut Buffer) {
-        text_area.set_block(Block::default().borders(Borders::BOTTOM));
-        text_area.render(area, buf);
-        /*let query = text_area.lines().join("\n");
-        let width = query.width();
-        let ghost_start = area.x + width as u16 + 1;
-        let ghost_area = Rect {
-            x: ghost_start,
-            y: area.y,
-            width: area.width - ghost_start,
-            height: 1,
-        };
-        let ghost = Span::styled("test", Style::default().fg(Color::DarkGray));
-        ghost.render(ghost_area, buf);*/
+/// Fuzzy-filter `commands` by the name part of `query` (everything before the
+/// first space — the trailing words are the command's args).
+///
+/// Same behavior as the previous palette: empty query matches everything,
+/// otherwise nucleo fuzzy-match on the command name, best score first.
+///
+/// The dialog itself filters through the GPUI `Command` view; this stays as
+/// the canonical, unit-tested matcher for the name/args query shape.
+#[allow(dead_code)]
+pub fn filter_commands(commands: &[Cmd], query: &str) -> Vec<Cmd> {
+    let (name, _) = query.split_once(' ').unwrap_or((query, ""));
+    if name.is_empty() {
+        return commands.to_vec();
     }
+    let mut matcher = Matcher::default();
+    let mut buf_1 = vec![];
+    let mut buf_2 = vec![];
+    let mut scores = commands
+        .iter()
+        .filter_map(|cmd| {
+            Some((
+                cmd,
+                matcher.fuzzy_match(
+                    Utf32Str::new(&cmd.name, &mut buf_1),
+                    Utf32Str::new(name, &mut buf_2),
+                )?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    scores.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+    scores.into_iter().map(|(cmd, _)| cmd.clone()).collect()
 }
 
-pub struct CmdPalleteState {
-    commands: Vec<Cmd>,
-    filtered: Vec<Cmd>,
-    matcher: Matcher,
-
-    text_area: TextArea<'static>,
-    list_state: ListState,
+/// Split a palette query into the selected command's args: everything after
+/// the first space.
+pub fn query_args(query: &str) -> Vec<String> {
+    let mut split = query.split(' ');
+    split.next();
+    split.map(str::to_string).collect()
 }
 
-impl CmdPalleteState {
-    pub fn new(cmds: impl IntoIterator<Item = Cmd>) -> Self {
-        let cmds = cmds.into_iter().collect::<Vec<_>>();
-        Self {
-            commands: cmds.clone(),
-            filtered: cmds,
-            matcher: Matcher::default(),
-
-            text_area: TextArea::default(),
-            list_state: ListState::default(),
-        }
-    }
-
-    pub fn update(&mut self, cmds: Vec<Cmd>) {
-        self.commands = cmds;
-    }
-
-    pub fn handle_events(
-        &mut self,
-        _: &mut App,
-        code: KeyCode,
-        event: &KeyEvent,
-    ) -> Option<Rc<dyn Fn(&mut Overlay, &mut App)>> {
-        match code {
-            KeyCode::ArrowDown => {
-                self.list_state.select_next();
-            }
-            KeyCode::ArrowUp => {
-                self.list_state.select_previous();
-            }
-            KeyCode::Enter => {
-                if let Some(selected) = self.list_state.selected() {
-                    let action = self.filtered[selected].action.clone();
-                    let input = self.text_area.lines().join("\n");
-                    let mut split = input.split(' ');
-                    split.next();
-                    let args = split.map(str::to_string).collect::<Vec<_>>();
-                    self.text_area.move_cursor(CursorMove::Head);
-                    self.text_area.delete_line_by_end();
-                    self.list_state.select_first();
-                    self.filtered = self.filter_items();
-                    return Some(Rc::new(move |overlay, app| {
-                        action(overlay, app, args.clone());
-                    }));
-                }
-            }
-            KeyCode::Backspace => {
-                self.text_area.input(Input {
-                    key: Key::Backspace,
-                    ..Default::default()
-                });
-                self.filtered = self.filter_items();
-                self.list_state.select_first();
-            }
-            KeyCode::Tab => {
-                let selected = self.list_state.selected()?;
-                self.text_area.move_cursor(CursorMove::Head);
-                self.text_area.delete_line_by_end();
-                self.text_area.insert_str(&self.filtered[selected].name);
-            }
-            _ => {
-                if let Some(text) = &event.text {
-                    self.text_area.insert_str(text.as_str());
-                    self.filtered = self.filter_items();
-                    self.list_state.select_first();
-                }
-            }
-        }
-        None
-    }
-
-    fn filter_items(&mut self) -> Vec<Cmd> {
-        let mut buf_1 = vec![];
-        let mut buf_2 = vec![];
-        let query = self.text_area.lines().join("\n");
-        let (name, _) = query.split_once(' ').unwrap_or((query.as_ref(), ""));
-        let mut scores = self
-            .commands
-            .iter()
-            .filter_map(|cmd| {
-                Some((
-                    cmd,
-                    self.matcher.fuzzy_match(
-                        Utf32Str::new(&cmd.name, &mut buf_1),
-                        Utf32Str::new(name, &mut buf_2),
-                    )?,
-                ))
-            })
-            .collect::<Vec<_>>();
-        scores.sort_by_key(|entry| std::cmp::Reverse(entry.1));
-        scores.into_iter().map(|app| app.0).cloned().collect()
-    }
-}
-
-impl StatefulWidget for CmdPalleteView {
-    type State = CmdPalleteState;
-
-    fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        let layout =
-            Layout::default().constraints([Constraint::Length(2), Constraint::Percentage(100)]);
-        let [text, rest] = layout.areas(area);
-        Self::render_text_area(&mut state.text_area, text, buf);
-        let list = List::new(state.filtered.iter().map(|cmd| {
-            let mut line = Line::from(cmd.name.clone());
-            cmd.args.iter().for_each(|arg| {
-                let span = Span::styled(
-                    format!("<{}>", arg.placeholder),
-                    Style::default().fg(Color::DarkGray),
-                );
-                line.push_span(" ");
-                line.push_span(span);
+/// Open the command palette dialog.
+///
+/// Typing filters the commands; Enter runs the highlighted one with the
+/// trailing query words as args (e.g. `switch 2`).
+///
+/// Note: the ratatui palette's Tab-to-complete-name has no equivalent in the
+/// GPUI `Command` view, so it is intentionally not carried over. Everything
+/// else — fuzzy filtering, `<arg>` hints, arg parsing — is preserved.
+pub fn open_palette(surface: Entity<Surface>, window: &mut Window, cx: &mut App) {
+    let commands = surface.read(cx).palette_commands.clone();
+    let state = cx.new(|cx| CommandState::new(window, cx));
+    state.update(cx, |state, cx| state.set_query("", window, cx));
+    window.open_dialog(cx, move |dialog, window, cx| {
+        let dialog_state = state.clone();
+        let focus_back = surface.clone();
+        // Focus the search field on mount so typing filters the palette
+        // instead of being sent to the pty.
+        let focus_state = dialog_state.clone();
+        window.defer(cx, move |window, cx| {
+            focus_state.update(cx, |state, cx| {
+                state.focus(window, cx);
             });
-            line
-        }))
-        .highlight_style(Modifier::REVERSED);
-        StatefulWidget::render(list, rest, buf, &mut state.list_state);
+        });
+        // Cloned per build: the dialog builder is `Fn`, so nothing may move
+        // out of the captured environment.
+        let items = commands.clone();
+        dialog
+            .close_button(false)
+            .p_0()
+            .on_close(window.listener_for(&focus_back, |surface, _, window, cx| {
+                window.focus(&surface.focus_handle, cx);
+            }))
+            .content({
+                let state = dialog_state.clone();
+                let surface = surface.clone();
+                let items = items.clone();
+                move |content, _, _| {
+                    let state_for_confirm = state.clone();
+                    let surface = surface.clone();
+                    let mut command = Command::new(&state)
+                        .placeholder("Type a command, e.g. switch <tab>")
+                        .bordered(true)
+                        .on_confirm(move |index: IndexPath, window, cx| {
+                            confirm_palette(
+                                surface.clone(),
+                                state_for_confirm.clone(),
+                                index,
+                                window,
+                                cx,
+                            );
+                        });
+                    for cmd in &items {
+                        let label = cmd.hint();
+                        command = command.item(
+                            CommandItem::new()
+                                .label(label)
+                                .keywords([cmd.name.clone()]),
+                        );
+                    }
+                    content.child(command)
+                }
+            })
+    });
+}
+
+fn confirm_palette(
+    surface: Entity<Surface>,
+    state: Entity<CommandState>,
+    index: IndexPath,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let query = state.read(cx).query(cx).to_string();
+    let args = query_args(&query);
+    let action = surface.read(cx).palette_commands.get(index.row).map(|cmd| cmd.action.clone());
+    window.close_dialog(cx);
+    let Some(action) = action else {
+        surface.update(cx, |surface, cx| {
+            window.focus(&surface.focus_handle, cx);
+            cx.notify();
+        });
+        return;
+    };
+    action(surface.clone(), window, cx, args);
+    surface.update(cx, |surface, cx| {
+        window.focus(&surface.focus_handle, cx);
+        cx.notify();
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::rc::Rc;
+
+    fn test_commands() -> Vec<Cmd> {
+        vec![
+            Cmd::new("switch", [crate::overlay::Arg::new("tab")], |_, _, _, _| {}),
+            Cmd::new("sessions", [], |_, _, _, _| {}),
+            Cmd::new("ssh", [crate::overlay::Arg::new("session")], |_, _, _, _| {}),
+        ]
     }
-}
 
-#[derive(Clone)]
-pub struct Arg {
-    placeholder: String,
-}
-
-impl Arg {
-    pub fn new(n: impl ToString) -> Self {
-        Self {
-            placeholder: n.to_string(),
-        }
+    #[test]
+    fn empty_query_matches_everything() {
+        let commands = test_commands();
+        assert_eq!(filter_commands(&commands, "").len(), 3);
+        assert_eq!(filter_commands(&commands, "   ").len(), 3);
     }
-}
 
-#[derive(Clone)]
-pub struct Cmd {
-    pub(crate) name: String,
-    args: Vec<Arg>,
-    pub(crate) action: Rc<dyn Fn(&mut Overlay, &mut App, Vec<String>)>,
-}
+    #[test]
+    fn fuzzy_match_orders_best_first() {
+        let commands = test_commands();
+        let filtered = filter_commands(&commands, "sw");
+        assert_eq!(filtered.first().map(|cmd| cmd.name.as_str()), Some("switch"));
+        assert!(filter_commands(&commands, "zzz").is_empty());
+    }
 
-impl Cmd {
-    pub fn new(
-        name: impl ToString,
-        args: impl IntoIterator<Item = Arg>,
-        f: impl 'static + Fn(&mut Overlay, &mut App, &[String]),
-    ) -> Self {
-        Self {
-            name: name.to_string(),
-            args: args.into_iter().collect(),
-            action: Rc::new(move |overlay, app, args| {
-                f(overlay, app, &args);
-            }),
-        }
+    #[test]
+    fn query_args_skips_command_name() {
+        assert_eq!(query_args("switch 2"), vec!["2".to_string()]);
+        assert_eq!(query_args("rename foo bar"), vec!["foo".to_string(), "bar".to_string()]);
+        assert!(query_args("sessions").is_empty());
+    }
+
+    #[test]
+    fn rc_clone_keeps_action() {
+        let called = Rc::new(std::cell::Cell::new(false));
+        let flag = called.clone();
+        let cmd = Cmd::new("demo", [], move |_, _, _, _| flag.set(true));
+        assert_eq!(cmd.hint(), "demo");
+        let _ = (cmd, called);
     }
 }

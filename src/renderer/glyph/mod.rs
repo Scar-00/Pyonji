@@ -5,13 +5,13 @@ use bytemuck::{Pod, Zeroable};
 use etagere::{AtlasAllocator, BucketedAtlasAllocator};
 use smallvec::SmallVec;
 use swash::{
+    CacheKey, Charmap, FontRef,
     scale::{
-        image::{Content, Image},
         Render, ScaleContext, Source, StrikeWith,
+        image::{Content, Image},
     },
     shape::{Direction, ShapeContext},
     zeno::{Format, Placement, Vector},
-    CacheKey, Charmap, FontRef,
 };
 use wgpu::{
     AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
@@ -64,23 +64,9 @@ var image_tex: texture_2d<f32>;
 @group(0) @binding(3)
 var image_samp: sampler;
 
-fn srgb_channel_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        return c / 12.92;
-    }
-    return pow((c + 0.055) / 1.055, 2.4);
-}
-
-fn to_linear(srgba: vec4<u32>) -> vec4<f32> {
-    let c = vec4<f32>(srgba) / 255.0;
-    return vec4<f32>(
-        srgb_channel_to_linear(c.r),
-        srgb_channel_to_linear(c.g),
-        srgb_channel_to_linear(c.b),
-        c.a,
-    );
-}
-
+// NOTE: GPUI composites in pass-through sRGB (see background.rs): glyph
+// colors arrive as sRGB-encoded bytes, so just normalize them instead of
+// converting to linear (which would darken all text).
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
@@ -96,8 +82,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     switch in.variant {
         case 0u: {
             let tex = textureSample(glyph_tex, glyph_samp, vec2<f32>(in.uv));
-            var alpha = pow(tex.r, 1.43);
-            let color = to_linear(in.color);
+            var alpha = tex.r;//pow(tex.r, 1.43);
+            let color = vec4<f32>(in.color) / 255.0;
             return vec4<f32>(color.xyz, alpha);
         }
         case 1u: {
@@ -209,13 +195,14 @@ pub struct TerminalRenderer {
 }
 
 impl TerminalRenderer {
-    const NORMAL_FONT: &[u8] = include_bytes!("../../../resources/fonts/SGr-IosevkaTerm-Light.ttc");
+    const NORMAL_FONT: &[u8] =
+        include_bytes!("../../../../Pyonji/resources/fonts/SGr-IosevkaTerm-Light.ttc");
     const BOLD_FONT: &[u8] =
-        include_bytes!("../../../resources/fonts/SGr-IosevkaTerm-SemiBold.ttc");
+        include_bytes!("../../../../Pyonji/resources/fonts/SGr-IosevkaTerm-SemiBold.ttc");
     const IME_FONT: &[u8] =
-        include_bytes!("../../../resources/fonts/NotoSansMonoCJKkr-Regular.otf");
+        include_bytes!("../../../../Pyonji/resources/fonts/NotoSansMonoCJKkr-Regular.otf");
     const ICON_FONT: &[u8] =
-        include_bytes!("../../../resources/fonts/JetBrainsMonoNerdFontMono-Regular.ttf");
+        include_bytes!("../../../../Pyonji/resources/fonts/JetBrainsMonoNerdFontMono-Regular.ttf");
     const DEFAULT_BUFFER_SIZE: u64 = (1024 * 16) * 32;
 
     fn load_glyph(&mut self, variant: FontVariant, id: u16) -> Option<Image> {
@@ -457,12 +444,15 @@ impl TerminalRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: TextureDimension::D2,
-            format: TextureFormat::Rgba8UnormSrgb,
+            // NOTE: must stay non-sRGB. An Srgb format would make sampling
+            // decode to linear, darkening color glyphs on GPUI's
+            // pass-through (Bgra8Unorm, no conversions) pipeline.
+            format: TextureFormat::Rgba8Unorm,
             usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
             view_formats: &[],
         });
 
-        let image_view = glyph_texture.create_view(&TextureViewDescriptor::default());
+        let image_view = image_texture.create_view(&TextureViewDescriptor::default());
 
         let image_sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("font-atlas-texture-sampler"),
@@ -781,7 +771,7 @@ impl TerminalRenderer {
         color: Color,
         bold: bool,
     ) {
-        let color = color.inner(); //.to_linear();
+        let color = color.inner();
 
         let variant = if bold {
             FontVariant::Bold
@@ -854,7 +844,7 @@ impl TerminalRenderer {
         variant: FontVariant,
         color: Color,
     ) {
-        let color = color.inner(); //.to_linear();
+        let color = color.inner();
 
         let Some(glyph) = self.get_or_create_glyph_id(queue, variant, glyph) else {
             return;

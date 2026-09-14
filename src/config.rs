@@ -1,8 +1,9 @@
 use crate::overlay::{LuaAction, Screen};
 use crate::pty::{Event as PtyEvent, SshConnection};
 use crate::terminal::{SessionId, SplitDirection, Tab};
-use crate::{App, BuiltinAction, KeyAction, ResultExt};
+use crate::{BuiltinAction, KeyAction, ResultExt, Surface};
 use anyhow::{Context, Result};
+use gpui::{KeyDownEvent, Modifiers};
 use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
 use path_absolutize::*;
@@ -13,9 +14,6 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
-use winit::event_loop::EventLoopProxy;
-use winit::keyboard::{KeyCode, ModifiersState};
-use winit::window::Fullscreen;
 
 const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
 pub const LUA_MODULES: &[(&str, &str)] = &[("lua.keybind", include_str!("../resources/lua/keybind.lua"))];
@@ -70,11 +68,8 @@ macro_rules! args {
     }};
 }
 
-impl App {
+impl Surface {
     pub fn apply_config(&mut self) {
-        let Some(size) = self.window.as_ref().map(|window| window.inner_size()) else {
-            return;
-        };
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_font_metrics(self.font_size, self.line_height);
             if let Some(font_family) = self.font_family.as_deref() {
@@ -82,35 +77,25 @@ impl App {
             }
             renderer.evict_glyphs();
         }
-        if let Some(mut overlay) = self.overlay.take() {
-            overlay.update_cmds(self);
-            self.overlay = Some(overlay);
-        }
-        self.rows = (size.height as f32 / self.line_height) as u16;
-        self.cols = (size.width as f32 / (self.font_size / 2.0)) as u16;
-        self.resize_tab();
-
-        self.request_redraw();
+        self.refresh_palette_commands();
+        // Rows/cols are driven by the GPUI layout (`sync_surface`), so there is
+        // no window size to poll here. Resizing happens on the next frame.
     }
 }
 
-impl LuaUserData for App {
+impl LuaUserData for Surface {
     fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
         methods.add_method_mut("bind", |lua, this, args: LuaMultiValue| {
             if args.front().is_some_and(|arg| arg.is_table()) {
                 let (mods, key, func): (Vec<String>, String, LuaFunction) =
                     FromLuaMulti::from_lua_multi(args, lua)?;
-                let mods = mods
-                    .iter()
-                    .map(|modifier| KeyBinding::parse_mod(modifier))
-                    .collect::<Result<Vec<_>>>()?;
-                let mut state = ModifiersState::empty();
-                for m in mods {
-                    state |= m;
+                let mut state = Modifiers::default();
+                for modifier in &mods {
+                    state |= KeyBinding::parse_mod(modifier)?;
                 }
                 let key = KeyBinding::parse_key(&key)?;
                 this.keymap
-                    .insert(KeyBinding { mods: state, key }, KeyAction::Custom(func.clone()));
+                    .insert(KeyBinding { modifiers: state, key }, KeyAction::Custom(func.clone()));
             } else {
                 let (binding, func): (KeyBinding, LuaFunction) =
                     FromLuaMulti::from_lua_multi(args, lua)?;
@@ -139,6 +124,7 @@ impl LuaUserData for App {
                     name,
                     callback: func,
                 });
+                this.refresh_palette_commands();
                 Ok(())
             },
         );
@@ -161,25 +147,19 @@ impl LuaUserData for App {
         });
         methods.add_function("open_palette", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                if let Some(overlay) = this.overlay.as_mut() {
-                    overlay.show(Some(Screen::CmdPalette));
-                }
+                this.request_overlay(Screen::CmdPalette);
                 Ok(())
             })
         });
         methods.add_function("open_sessions", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                if let Some(overlay) = this.overlay.as_mut() {
-                    overlay.show(Some(Screen::Sessions));
-                }
+                this.request_overlay(Screen::Sessions);
                 Ok(())
             })
         });
         methods.add_function("open_detached", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                if let Some(overlay) = this.overlay.as_mut() {
-                    overlay.show(Some(Screen::Detached));
-                }
+                this.request_overlay(Screen::Detached);
                 Ok(())
             })
         });
@@ -308,17 +288,13 @@ impl LuaUserData for App {
         });
         methods.add_function("open_releases", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                if let Some(overlay) = this.overlay.as_mut() {
-                    overlay.show(Some(Screen::Releases));
-                }
+                this.request_overlay(Screen::Releases);
                 Ok(())
             })
         });
         methods.add_function("open_opener", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                if let Some(overlay) = this.overlay.as_mut() {
-                    overlay.show(Some(Screen::Opener));
-                }
+                this.request_overlay(Screen::Opener);
                 Ok(())
             })
         });
@@ -336,21 +312,19 @@ impl LuaUserData for App {
         });
         methods.add_function("toggle_fullscreen", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<bool> {
-                let Some(window) = this.window.as_ref() else {
-                    return Ok(false);
-                };
-                let fullscreen = window.fullscreen().is_none();
-                window.set_fullscreen(fullscreen.then_some(Fullscreen::Borderless(None)));
-                this.fullscreen = fullscreen;
-                Ok(fullscreen)
+                // Applied on the next frame: `Surface::render` owns the GPUI
+                // `Window`, which Lua callbacks cannot reach directly.
+                this.fullscreen = !this.fullscreen;
+                this.pending_fullscreen_toggle = true;
+                Ok(this.fullscreen)
             })
         });
         methods.add_function("toggle_decorations", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                if let Some(window) = this.window.as_mut() {
-                    window.set_decorations(!window.is_decorated());
-                    this.request_redraw();
-                }
+                // GPUI manages window chrome itself; there is no runtime
+                // toggle. Stay honest instead of silently doing nothing.
+                this.status
+                    .show_message("window decorations toggle is not supported on GPUI".to_string());
                 Ok(())
             })
         });
@@ -358,7 +332,6 @@ impl LuaUserData for App {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
                 this.status_bar_hidden = !this.status_bar_hidden;
                 this.resize_tab();
-                this.request_redraw();
                 Ok(())
             })
         });
@@ -370,7 +343,7 @@ impl LuaUserData for App {
         });
         methods.add_function("quit", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                _ = this._proxy.send_event(PtyEvent::Exit);
+                _ = this.event_tx.try_send(PtyEvent::Exit);
                 Ok(())
             })
         });
@@ -423,8 +396,6 @@ impl LuaUserData for App {
                         }
                         this.wheel_remainder = 0.0;
                         this.resize_tab();
-                        this.update_ime_cursor_area();
-                        this.request_redraw();
                         Ok(session)
                     }
                 })
@@ -473,7 +444,7 @@ impl LuaUserData for App {
     }
 }
 
-pub fn watch(proxy: EventLoopProxy<PtyEvent>) {
+pub fn watch(tx: async_channel::Sender<PtyEvent>) {
     let Some(path) = util::config_path() else {
         return;
     };
@@ -481,17 +452,17 @@ pub fn watch(proxy: EventLoopProxy<PtyEvent>) {
         let func = move || -> Result<()> {
             use notify::{EventKind, RecommendedWatcher, Watcher};
             use std::sync::mpsc;
-            let (tx, rx) = mpsc::channel();
+            let (watch_tx, rx) = mpsc::channel();
             let config = notify::Config::default()
                 .with_poll_interval(Duration::from_secs(1))
                 .with_compare_contents(true);
-            let mut watcher = RecommendedWatcher::new(tx, config)?;
+            let mut watcher = RecommendedWatcher::new(watch_tx, config)?;
             watcher.watch(&path.absolutize()?, RecursiveMode::Recursive)?;
             while let Ok(ev) = rx.recv() {
                 if let Ok(ev) = ev
                     && let EventKind::Modify(_) = ev.kind
                 {
-                    _ = proxy.send_event(PtyEvent::ConfigChanged);
+                    _ = tx.send_blocking(PtyEvent::ConfigChanged);
                 }
             }
             Ok(())
@@ -502,7 +473,7 @@ pub fn watch(proxy: EventLoopProxy<PtyEvent>) {
     });
 }
 
-pub fn load(this: &mut App) {
+pub fn load(this: &mut Surface) {
     let Some(path) = util::config_path() else {
         return;
     };
@@ -511,7 +482,7 @@ pub fn load(this: &mut App) {
         .inspect_err(|e| tracing::error!(%e, "failed to create default config"));
 
     this.ssh_sessions.clear();
-    this.keymap = App::default_keymap();
+    this.keymap = Surface::default_keymap();
     this.registered_callbacks.clear();
     let lua = this.lua.clone();
     with_env(this, |_| {
@@ -519,7 +490,7 @@ pub fn load(this: &mut App) {
         chunk.exec()
     })
     .into_log();
-    let action_key = this.action;
+    let action_key = this.action.clone();
     let overridden = matches!(
         this.keymap.get(&action_key),
         Some(KeyAction::Custom(_))
@@ -529,9 +500,10 @@ pub fn load(this: &mut App) {
             .retain(|_, v| !matches!(v, KeyAction::Builtin(BuiltinAction::Action)));
         this.keymap.insert(action_key, KeyAction::Builtin(BuiltinAction::Action));
     }
+    this.refresh_palette_commands();
 }
 
-pub fn with_env<R>(this: &mut App, f: impl FnOnce(LuaAnyUserData) -> LuaResult<R>) -> Result<R> {
+pub fn with_env<R>(this: &mut Surface, f: impl FnOnce(LuaAnyUserData) -> LuaResult<R>) -> Result<R> {
     let lua = this.lua.clone();
     let res = lua.scope(|scope| {
         let app = scope.create_userdata_ref_mut(this)?;
@@ -620,22 +592,124 @@ mod util {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// A keyboard shortcut, independent of any windowing toolkit.
+///
+/// `modifiers` uses [`gpui::Modifiers`] (`control`/`alt`/`shift`/`platform`)
+/// and `key` is the lowercase GPUI key name (`"b"`, `"f1"`, `"up"`,
+/// `"space"`, `"semicolon"`, …). The Lua surface keeps accepting the
+/// historical `"<ctrl+shift>-F"` spelling; [`KeyBinding::parse`] normalizes it
+/// into this form.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeyBinding {
-    pub mods: ModifiersState,
-    pub key: KeyCode,
+    pub modifiers: Modifiers,
+    pub key: String,
 }
 
 impl KeyBinding {
-    /*pub fn new(mods: ModifiersState, key: KeyCode) -> Self {
-        Self { mods, key }
-    }*/
+    pub fn new(modifiers: Modifiers, key: impl Into<String>) -> Self {
+        Self {
+            modifiers,
+            key: Self::canonical_key(&key.into()),
+        }
+    }
+
+    pub fn control(key: impl Into<String>) -> Self {
+        Self::new(
+            Modifiers {
+                control: true,
+                ..Default::default()
+            },
+            key,
+        )
+    }
+
+    /// Whether this binding matches a GPUI key-down event.
+    ///
+    /// Modifiers must match exactly (ignoring `function`, which has no
+    /// historical equivalent). The key matches either [`Keystroke::key`] or
+    /// the typed [`Keystroke::key_char`], so punctuation spellings like
+    /// `"semicolon"` keep working even though GPUI reports the literal `";"`.
+    pub fn matches_event(&self, event: &KeyDownEvent) -> bool {
+        let mods = &event.keystroke.modifiers;
+        if self.modifiers.control != mods.control
+            || self.modifiers.alt != mods.alt
+            || self.modifiers.shift != mods.shift
+            || self.modifiers.platform != mods.platform
+        {
+            return false;
+        }
+        let key = event.keystroke.key.to_lowercase();
+        if key == self.key {
+            return true;
+        }
+        if let Some(literal) = Self::key_literal(&self.key) {
+            if key == literal {
+                return true;
+            }
+        }
+        if let Some(ch) = event.keystroke.key_char.as_deref() {
+            let ch = ch.to_lowercase();
+            if ch == self.key {
+                return true;
+            }
+            if let Some(literal) = Self::key_literal(&self.key) {
+                if ch == literal {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Canonicalize a key name to the lowercase GPUI spelling.
+    fn canonical_key(key: &str) -> String {
+        match key.to_lowercase().as_str() {
+            "esc" => "escape".to_string(),
+            "return" => "enter".to_string(),
+            "del" => "delete".to_string(),
+            "ins" => "insert".to_string(),
+            "arrowup" => "up".to_string(),
+            "arrowdown" => "down".to_string(),
+            "arrowleft" => "left".to_string(),
+            "arrowright" => "right".to_string(),
+            "pageup" => "pageup".to_string(),
+            "pagedown" => "pagedown".to_string(),
+            "grave" => "backquote".to_string(),
+            "dot" => "period".to_string(),
+            "equal" => "equal".to_string(),
+            "apostrophe" => "quote".to_string(),
+            "[" => "bracketleft".to_string(),
+            "]" => "bracketright".to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    /// The literal character a punctuation name produces, if any.
+    fn key_literal(name: &str) -> Option<&'static str> {
+        Some(match name {
+            "space" => " ",
+            "semicolon" => ";",
+            "comma" => ",",
+            "period" => ".",
+            "slash" => "/",
+            "backslash" => "\\",
+            "minus" => "-",
+            "equal" => "=",
+            "quote" => "'",
+            "backquote" => "`",
+            "bracketleft" => "[",
+            "bracketright" => "]",
+            _ => return None,
+        })
+    }
 
     pub fn parse(binding: impl AsRef<str>) -> Result<Self> {
         let binding = binding.as_ref();
-        let (binding, mods) = Self::parse_mods(binding)?;
-        let key = if !mods.is_empty()
-            && let Some(delim) = binding.chars().position(|c| c == '-')
+        let (binding, modifiers) = Self::parse_mods(binding)?;
+        let key = if !matches!(
+            (modifiers.control, modifiers.alt, modifiers.shift, modifiers.platform),
+            (false, false, false, false)
+        ) && let Some(delim) = binding.chars().position(|c| c == '-')
         {
             &binding[delim + 1..]
         } else {
@@ -643,12 +717,15 @@ impl KeyBinding {
         };
         let key = Self::parse_key(key)?;
 
-        Ok(Self { mods, key })
+        Ok(Self {
+            modifiers,
+            key,
+        })
     }
 
-    fn parse_mods(binding: &str) -> Result<(&str, ModifiersState)> {
+    fn parse_mods(binding: &str) -> Result<(&str, Modifiers)> {
         if !binding.starts_with('<') {
-            return Ok((binding, ModifiersState::default()));
+            return Ok((binding, Modifiers::default()));
         }
         let binding = &binding[1..];
         let end = binding
@@ -657,15 +734,15 @@ impl KeyBinding {
             .context("failed to find `>` while parsing keybinding modifiers")?;
         let mut modifiers = &binding[..end];
 
-        let mut mods = ModifiersState::default();
+        let mut mods = Modifiers::default();
 
         if !modifiers.is_empty() {
             while let Some(next) = modifiers.chars().position(|c| c == '+') {
                 let modifier = &modifiers[..next];
-                mods.extend(Self::parse_mod(modifier)?);
+                mods |= Self::parse_mod(modifier)?;
                 modifiers = &modifiers[next + 1..];
             }
-            mods.extend(Self::parse_mod(modifiers)?);
+            mods |= Self::parse_mod(modifiers)?;
         }
 
         let rest = &binding[end..];
@@ -673,98 +750,87 @@ impl KeyBinding {
         Ok((rest, mods))
     }
 
-    pub fn parse_mod(m: &str) -> Result<ModifiersState> {
+    pub fn parse_mod(m: &str) -> Result<Modifiers> {
         Ok(match m.trim() {
-            "ctrl" => ModifiersState::CONTROL,
-            "alt" => ModifiersState::ALT,
-            "shift" => ModifiersState::SHIFT,
-            "mod" => ModifiersState::SUPER,
+            "ctrl" => Modifiers {
+                control: true,
+                ..Default::default()
+            },
+            "alt" => Modifiers {
+                alt: true,
+                ..Default::default()
+            },
+            "shift" => Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+            "mod" => Modifiers {
+                platform: true,
+                ..Default::default()
+            },
             x => {
                 anyhow::bail!("`{x}` is not a valid modifier");
             }
         })
     }
 
-    pub fn parse_key(key: &str) -> Result<KeyCode> {
+    /// Parse a historical key name into its canonical GPUI spelling.
+    pub fn parse_key(key: &str) -> Result<String> {
         let key = key.to_lowercase();
-        let key = match key.as_str() {
-            "a" => KeyCode::KeyA,
-            "b" => KeyCode::KeyB,
-            "c" => KeyCode::KeyC,
-            "d" => KeyCode::KeyD,
-            "e" => KeyCode::KeyE,
-            "f" => KeyCode::KeyF,
-            "g" => KeyCode::KeyG,
-            "h" => KeyCode::KeyH,
-            "i" => KeyCode::KeyI,
-            "j" => KeyCode::KeyJ,
-            "k" => KeyCode::KeyK,
-            "l" => KeyCode::KeyL,
-            "m" => KeyCode::KeyM,
-            "n" => KeyCode::KeyN,
-            "o" => KeyCode::KeyO,
-            "p" => KeyCode::KeyP,
-            "q" => KeyCode::KeyQ,
-            "r" => KeyCode::KeyR,
-            "s" => KeyCode::KeyS,
-            "t" => KeyCode::KeyT,
-            "u" => KeyCode::KeyU,
-            "v" => KeyCode::KeyV,
-            "w" => KeyCode::KeyW,
-            "x" => KeyCode::KeyX,
-            "y" => KeyCode::KeyY,
-            "z" => KeyCode::KeyZ,
-            "0" => KeyCode::Digit0,
-            "1" => KeyCode::Digit1,
-            "2" => KeyCode::Digit2,
-            "3" => KeyCode::Digit3,
-            "4" => KeyCode::Digit4,
-            "5" => KeyCode::Digit5,
-            "6" => KeyCode::Digit6,
-            "7" => KeyCode::Digit7,
-            "8" => KeyCode::Digit8,
-            "9" => KeyCode::Digit9,
-            "up" | "arrowup" => KeyCode::ArrowUp,
-            "down" | "arrowdown" => KeyCode::ArrowDown,
-            "left" | "arrowleft" => KeyCode::ArrowLeft,
-            "right" | "arrowright" => KeyCode::ArrowRight,
-            "f1" => KeyCode::F1,
-            "f2" => KeyCode::F2,
-            "f3" => KeyCode::F3,
-            "f4" => KeyCode::F4,
-            "f5" => KeyCode::F5,
-            "f6" => KeyCode::F6,
-            "f7" => KeyCode::F7,
-            "f8" => KeyCode::F8,
-            "f9" => KeyCode::F9,
-            "f10" => KeyCode::F10,
-            "f11" => KeyCode::F11,
-            "f12" => KeyCode::F12,
-            "space" => KeyCode::Space,
-            "enter" | "return" => KeyCode::Enter,
-            "esc" | "escape" => KeyCode::Escape,
-            "tab" => KeyCode::Tab,
-            "backspace" => KeyCode::Backspace,
-            "delete" | "del" => KeyCode::Delete,
-            "insert" | "ins" => KeyCode::Insert,
-            "home" => KeyCode::Home,
-            "end" => KeyCode::End,
-            "pageup" => KeyCode::PageUp,
-            "pagedown" => KeyCode::PageDown,
-            "semicolon" => KeyCode::Semicolon,
-            "comma" => KeyCode::Comma,
-            "period" | "dot" => KeyCode::Period,
-            "slash" => KeyCode::Slash,
-            "backslash" => KeyCode::Backslash,
-            "minus" => KeyCode::Minus,
-            "equals" | "equal" => KeyCode::Equal,
-            "quote" | "apostrophe" => KeyCode::Quote,
-            "backquote" | "grave" => KeyCode::Backquote,
-            "bracketleft" | "[" => KeyCode::BracketLeft,
-            "bracketright" | "]" => KeyCode::BracketRight,
+        let canonical = match key.as_str() {
+            "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m"
+            | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z"
+            | "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => key,
+            "up" | "arrowup" => "up".to_string(),
+            "down" | "arrowdown" => "down".to_string(),
+            "left" | "arrowleft" => "left".to_string(),
+            "right" | "arrowright" => "right".to_string(),
+            "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11"
+            | "f12" => key,
+            "space" => "space".to_string(),
+            "enter" | "return" => "enter".to_string(),
+            "esc" | "escape" => "escape".to_string(),
+            "tab" => "tab".to_string(),
+            "backspace" => "backspace".to_string(),
+            "delete" | "del" => "delete".to_string(),
+            "insert" | "ins" => "insert".to_string(),
+            "home" => "home".to_string(),
+            "end" => "end".to_string(),
+            "pageup" => "pageup".to_string(),
+            "pagedown" => "pagedown".to_string(),
+            "semicolon" => "semicolon".to_string(),
+            "comma" => "comma".to_string(),
+            "period" | "dot" => "period".to_string(),
+            "slash" => "slash".to_string(),
+            "backslash" => "backslash".to_string(),
+            "minus" => "minus".to_string(),
+            "equals" | "equal" => "equal".to_string(),
+            "quote" | "apostrophe" => "quote".to_string(),
+            "backquote" | "grave" => "backquote".to_string(),
+            "bracketleft" | "[" => "bracketleft".to_string(),
+            "bracketright" | "]" => "bracketright".to_string(),
             x => anyhow::bail!("`{x}` is not a valid key"),
         };
-        Ok(key)
+        Ok(canonical)
+    }
+
+    /// Digit value for `1`–`9` bindings (tab selection), if this is one.
+    pub fn digit_index(&self) -> Option<usize> {
+        if self.modifiers.control || self.modifiers.alt || self.modifiers.shift || self.modifiers.platform {
+            return None;
+        }
+        match self.key.as_str() {
+            "1" => Some(0),
+            "2" => Some(1),
+            "3" => Some(2),
+            "4" => Some(3),
+            "5" => Some(4),
+            "6" => Some(5),
+            "7" => Some(6),
+            "8" => Some(7),
+            "9" => Some(8),
+            _ => None,
+        }
     }
 }
 
@@ -772,5 +838,73 @@ impl FromLua for KeyBinding {
     fn from_lua(value: LuaValue, _: &Lua) -> LuaResult<Self> {
         let binding = value.as_string().context("not a string")?;
         Ok(Self::parse(binding.to_str()?)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keystroke(key: &str, modifiers: Modifiers) -> KeyDownEvent {
+        KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                modifiers,
+                key: key.to_string(),
+                key_char: None,
+            },
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    #[test]
+    fn parses_historical_spellings() {
+        let binding = KeyBinding::parse("<ctrl>-B").unwrap();
+        assert!(binding.modifiers.control);
+        assert_eq!(binding.key, "b");
+
+        let binding = KeyBinding::parse("<ctrl+shift>-F").unwrap();
+        assert!(binding.modifiers.control && binding.modifiers.shift);
+        assert_eq!(binding.key, "f");
+
+        let binding = KeyBinding::parse("semicolon").unwrap();
+        assert_eq!(binding.key, "semicolon");
+
+        assert!(KeyBinding::parse("<bogus>-a").is_err());
+        assert!(KeyBinding::parse("<ctrl>-bogus").is_err());
+    }
+
+    #[test]
+    fn matches_gpui_key_events() {
+        let binding = KeyBinding::control("b");
+        let event = keystroke(
+            "b",
+            Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        );
+        assert!(binding.matches_event(&event));
+        assert!(!KeyBinding::control("c").matches_event(&event));
+
+        // Punctuation keeps working when GPUI reports the literal character.
+        let binding = KeyBinding::parse("semicolon").unwrap();
+        let event = KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                modifiers: Modifiers::default(),
+                key: ";".to_string(),
+                key_char: Some(";".to_string()),
+            },
+            is_held: false,
+            prefer_character_input: false,
+        };
+        assert!(binding.matches_event(&event));
+    }
+
+    #[test]
+    fn digit_index_covers_tabs() {
+        assert_eq!(KeyBinding::parse("1").unwrap().digit_index(), Some(0));
+        assert_eq!(KeyBinding::parse("9").unwrap().digit_index(), Some(8));
+        assert_eq!(KeyBinding::parse("<ctrl>-1").unwrap().digit_index(), None);
     }
 }

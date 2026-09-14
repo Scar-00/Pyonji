@@ -1,7 +1,7 @@
 use anyhow::Result;
+use async_channel::Sender;
 use mlua::prelude::*;
 use std::{collections::HashMap, path::Path};
-use winit::event_loop::EventLoopProxy;
 
 use crate::{
     pty::{Event, Pty, SshConnection},
@@ -32,7 +32,7 @@ impl IntoLua for SessionId {
 
 pub struct CB {
     id: SessionId,
-    proxy: EventLoopProxy<Event>,
+    proxy: Sender<Event>,
 }
 
 impl CB {
@@ -64,7 +64,7 @@ impl Callbacks for CB {
         };
         _ = self
             .proxy
-            .send_event(Event::ProgramChanged((self.id, title)));
+            .send_blocking(Event::ProgramChanged((self.id, title)));
     }
 
     fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, _ty: &[u8], _data: &[u8]) {}
@@ -93,11 +93,11 @@ impl Callbacks for CB {
 pub struct SessionManager {
     current_id: u64,
     sessions: HashMap<SessionId, TerminalSession>,
-    proxy: EventLoopProxy<Event>,
+    proxy: Sender<Event>,
 }
 
 impl SessionManager {
-    pub fn new(proxy: EventLoopProxy<Event>) -> Self {
+    pub fn new(proxy: Sender<Event>) -> Self {
         Self {
             current_id: 0,
             sessions: HashMap::new(),

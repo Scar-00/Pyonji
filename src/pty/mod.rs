@@ -6,8 +6,8 @@ use std::{
 
 use crate::terminal::SessionId;
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
-use winit::event_loop::EventLoopProxy;
+use async_channel::Sender;
+use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 #[derive(Debug, Clone)]
 pub struct SshConnection {
@@ -28,6 +28,7 @@ pub enum Event {
     ProgramChanged((SessionId, String)),
     ConfigChanged,
     LuaPrint(String),
+    ReleasesReady(Vec<self_update::Release>),
     Exit,
 }
 
@@ -35,7 +36,7 @@ impl Pty {
     pub fn new(
         rows: u16,
         cols: u16,
-        tx: EventLoopProxy<Event>,
+        tx: Sender<Event>,
         id: SessionId,
         path: Option<&Path>,
     ) -> Result<Self> {
@@ -80,7 +81,7 @@ impl Pty {
             let tx = tx.clone();
             move || {
                 _ = child.wait();
-                _ = tx.send_event(Event::Closed(id));
+                _ = tx.send_blocking(Event::Closed(id));
             }
         });
 
@@ -89,11 +90,11 @@ impl Pty {
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => {
-                        _ = tx.send_event(Event::Closed(id));
+                        _ = tx.send_blocking(Event::Closed(id));
                         break;
                     }
                     Ok(n) => {
-                        _ = tx.send_event(Event::Data(id, buf[..n].to_vec()));
+                        _ = tx.send_blocking(Event::Data(id, buf[..n].to_vec()));
                     }
                 }
             }
@@ -109,7 +110,7 @@ impl Pty {
     pub fn new_remote(
         rows: u16,
         cols: u16,
-        tx: EventLoopProxy<Event>,
+        tx: Sender<Event>,
         id: SessionId,
         ssh: &SshConnection,
     ) -> Result<Self> {
@@ -152,7 +153,7 @@ impl Pty {
             let tx = tx.clone();
             move || {
                 _ = child.wait();
-                _ = tx.send_event(Event::Closed(id));
+                _ = tx.send_blocking(Event::Closed(id));
             }
         });
 
@@ -161,11 +162,11 @@ impl Pty {
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => {
-                        _ = tx.send_event(Event::Closed(id));
+                        _ = tx.send_blocking(Event::Closed(id));
                         break;
                     }
                     Ok(n) => {
-                        _ = tx.send_event(Event::Data(id, buf[..n].to_vec()));
+                        _ = tx.send_blocking(Event::Data(id, buf[..n].to_vec()));
                     }
                 }
             }

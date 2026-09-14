@@ -1,89 +1,108 @@
-use ratatui::{prelude::*, widgets::*};
-use winit::keyboard::KeyCode;
+use gpui::{App, Entity, Window, prelude::*};
+use gpui_component::{IndexPath, WindowExt as _, command::{Command, CommandItem, CommandState}};
 
-use crate::{App};
+use crate::{Surface, terminal::SessionId};
 
-pub struct SessionsView<'a> {
-    app: &'a mut App,
+/// One row of the sessions dialog: which tab owns it and which session it
+/// focuses. Mirrors the ratatui `SessionsView` lines (`[tab]-id  title`).
+#[derive(Clone)]
+struct SessionEntry {
+    tab: usize,
+    session: SessionId,
+    label: String,
 }
 
-impl<'a> SessionsView<'a> {
-    pub fn new(app: &'a mut App) -> Self {
-        Self { app }
-    }
-}
-
-pub struct SessionsState {
-    list_state: ListState,
-}
-
-impl SessionsState {
-    pub fn new() -> Self {
-        Self {
-            list_state: ListState::default(),
-        }
-    }
-
-    pub fn handle_events(&mut self, app: &mut App, code: KeyCode) -> bool {
-        match code {
-            KeyCode::ArrowDown => {
-                self.list_state.select_next();
-                false
-            }
-            KeyCode::ArrowUp => {
-                self.list_state.select_previous();
-                false
-            }
-            KeyCode::Enter => {
-                if let Some(selected) = self.list_state.selected() {
-                    let sessions = app
-                        .tabs
-                        .iter()
-                        .flatten()
-                        .flat_map(|tab| tab.sessions())
-                        .collect::<Vec<_>>();
-                    let session = sessions[selected];
-                    if let Some(tab) = app.tabs.iter().position(|tab| {
-                        let Some(tab) = tab else {
-                            return false;
-                        };
-                        tab.sessions().contains(&session)
-                    }) && tab != app.current_tab
-                    {
-                        app.switch_tab(tab);
-                    }
-                    app.set_active_session(session);
-                    true
-                }else {
-                    false
-                }
-            }
-            _ => false
-        }
-    }
-}
-
-impl StatefulWidget for SessionsView<'_> {
-    type State = SessionsState;
-
-    fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        let list_items = self
-            .app
-            .tabs
-            .iter()
-            .enumerate()
-            .filter_map(|(i, tab)| tab.as_ref().map(|tab| (i, tab)))
-            .flat_map(|(i, tab)| {
-                tab.sessions()
-                    .iter()
-                    .filter_map(|id| {
-                        let session = self.app.session_manager.session(*id)?;
-                        Some(Line::from(format!("[{i}]-{id}    {}", session.title())))
-                    })
-                    .collect::<Vec<_>>()
+fn session_entries(surface: &Surface) -> Vec<SessionEntry> {
+    let mut entries = Vec::new();
+    for (tab_index, tab) in surface.tabs.iter().enumerate() {
+        let Some(tab) = tab.as_ref() else {
+            continue;
+        };
+        for session in tab.sessions() {
+            let title = surface
+                .session_manager
+                .session(session)
+                .map(|s| s.title())
+                .unwrap_or("shell");
+            entries.push(SessionEntry {
+                tab: tab_index,
+                session,
+                label: format!("[{}]-{session}    {title}", tab_index + 1),
             });
-        let list = List::new(list_items).highlight_style(Modifier::REVERSED);
+        }
+    }
+    entries
+}
 
-        StatefulWidget::render(list, area, buf, &mut state.list_state);
+/// Open the sessions dialog.
+///
+/// Enter switches to the entry's tab when it is not current (like the old
+/// `SessionsState::handle_events`) and focuses the session.
+pub fn open_sessions(surface: Entity<Surface>, window: &mut Window, cx: &mut App) {
+    let entries = session_entries(&surface.read(cx));
+    let state = cx.new(|cx| CommandState::new(window, cx));
+    state.update(cx, |state, cx| state.set_query("", window, cx));
+    window.open_dialog(cx, move |dialog, window, cx| {
+        let dialog_state = state.clone();
+        let focus_back = surface.clone();
+        let focus_state = dialog_state.clone();
+        window.defer(cx, move |window, cx| {
+            focus_state.update(cx, |state, cx| {
+                state.focus(window, cx);
+            });
+        });
+        let items = entries.clone();
+        dialog
+            .close_button(false)
+            .p_0()
+            .title("Sessions")
+            .on_close(window.listener_for(&focus_back, |surface, _, window, cx| {
+                window.focus(&surface.focus_handle, cx);
+            }))
+            .content({
+                let state = dialog_state.clone();
+                let surface = surface.clone();
+                let items = items.clone();
+                move |content, _, _| {
+                    let surface = surface.clone();
+                    let confirm_entries = items.clone();
+                    let mut command = Command::new(&state)
+                        .placeholder("Search sessions..")
+                        .bordered(true)
+                        .on_confirm(move |index: IndexPath, window, cx| {
+                            let entry = confirm_entries.get(index.row).cloned();
+                            window.close_dialog(cx);
+                            let Some(entry) = entry else {
+                                surface.update(cx, |surface, cx| {
+                                    window.focus(&surface.focus_handle, cx);
+                                    cx.notify();
+                                });
+                                return;
+                            };
+                            surface.update(cx, |surface, cx| {
+                                if entry.tab != surface.current_tab {
+                                    surface.switch_tab(entry.tab);
+                                }
+                                surface.set_active_session(entry.session);
+                                window.focus(&surface.focus_handle, cx);
+                                cx.notify();
+                            });
+                        });
+                    for entry in &items {
+                        command = command.item(CommandItem::new().label(entry.label.clone()));
+                    }
+                    content.child(command)
+                }
+            })
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn session_entry_label_format() {
+        // `[tab]-id  title` with a 1-based tab number, as in the old view.
+        let label = format!("[{}]-{}    {}", 1, 42, "shell");
+        assert_eq!(label, "[1]-42    shell");
     }
 }

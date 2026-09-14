@@ -1,19 +1,27 @@
 use std::time::{Duration, Instant};
 
+use gpui::{App, Entity, KeyDownEvent};
 use mlua::prelude::*;
-use winit::event::{ElementState, KeyEvent};
-use winit::keyboard::{KeyCode, PhysicalKey};
 
-use crate::renderer::StatusInput;
-use crate::{config, App};
+use crate::{Surface, config, overlay};
 
-const MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Command,
     Rename,
     Lua,
+}
+
+impl Mode {
+    pub fn prompt_text(self) -> &'static str {
+        match self {
+            Mode::Command => " : ",
+            Mode::Rename => " R: ",
+            Mode::Lua => " > ",
+        }
+    }
 }
 
 pub struct StatusBar {
@@ -80,63 +88,92 @@ impl StatusBar {
         self.prompt = Some(prompt);
     }
 
-    pub fn status_input(&self, cols: u16) -> Option<StatusInput> {
-        self.prompt.as_ref().map(|prompt| prompt.display(cols))
+    /// Insert IME-committed text into the active prompt, if any.
+    /// Returns whether a prompt consumed the text.
+    pub fn insert_text(&mut self, text: &str) -> bool {
+        let Some(prompt) = self.prompt.as_mut() else {
+            return false;
+        };
+        if text.is_empty() {
+            return true;
+        }
+        prompt.insert(text);
+        true
     }
 
-    pub fn handle_key(&mut self, app: &mut App, event: &KeyEvent) {
+    /// Active prompt parts for the GPUI status bar: mode, prefix, full buffer,
+    /// and the cursor as a character index into the buffer.
+    pub fn prompt_parts(&self) -> Option<(Mode, &'static str, &str, usize)> {
+        let prompt = self.prompt.as_ref()?;
+        let cursor_col = prompt.buffer[..prompt.cursor.min(prompt.buffer.len())]
+            .chars()
+            .count();
+        Some((prompt.mode, prompt.mode.prompt_text(), &prompt.buffer, cursor_col))
+    }
+
+    /// Handle a key-down while the prompt is active.
+    ///
+    /// Same keys as the previous implementation: Escape cancels, Enter submits
+    /// (command → palette dispatch, rename → rename active, lua → evaluate),
+    /// Backspace/Delete/Home/End/arrows edit, Up/Down walk history, and
+    /// anything producing text inserts it.
+    pub fn handle_key(
+        &mut self,
+        surface: &mut Surface,
+        surface_entity: &Entity<Surface>,
+        event: &KeyDownEvent,
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) {
         let Some(mut prompt) = self.prompt.take() else {
             return;
         };
-        let PhysicalKey::Code(code) = event.physical_key else {
-            self.prompt = Some(prompt);
-            return;
-        };
-        if event.state != ElementState::Pressed {
-            self.prompt = Some(prompt);
-            return;
-        }
+        let key = event.keystroke.key.as_str();
         let mut keep = true;
-        match code {
-            KeyCode::Escape => keep = false,
-            KeyCode::Enter => {
+        match key {
+            "escape" => keep = false,
+            "enter" => {
                 let input = prompt.buffer.trim().to_string();
                 keep = false;
                 if !input.is_empty() {
                     match prompt.mode {
                         Mode::Command => {
                             self.push_history(Mode::Command, input.clone());
-                            self.execute_command(app, &input);
+                            self.execute_command(surface, surface_entity, window, cx, &input);
                         }
                         Mode::Rename => {
-                            app.rename_active(&input);
+                            surface.rename_active(&input);
                         }
                         Mode::Lua => {
                             self.push_history(Mode::Lua, input.clone());
-                            self.evaluate_lua(app, &input);
+                            self.evaluate_lua(surface, &input);
                         }
                     }
                 }
             }
-            KeyCode::Backspace => prompt.delete_before(),
-            KeyCode::Delete => prompt.delete_at(),
-            KeyCode::ArrowLeft => prompt.cursor_left(),
-            KeyCode::ArrowRight => prompt.cursor_right(),
-            KeyCode::Home => prompt.cursor = 0,
-            KeyCode::End => prompt.cursor = prompt.buffer.len(),
-            KeyCode::ArrowUp => {
+            "backspace" => prompt.delete_before(),
+            "delete" => prompt.delete_at(),
+            "left" => prompt.cursor_left(),
+            "right" => prompt.cursor_right(),
+            "home" => prompt.cursor = 0,
+            "end" => prompt.cursor = prompt.buffer.len(),
+            "up" => {
                 let history = self.history_for(prompt.mode);
                 prompt.history_prev(history);
             }
-            KeyCode::ArrowDown => {
+            "down" => {
                 let history = self.history_for(prompt.mode);
                 prompt.history_next(history);
             }
             _ => {
-                if let Some(text) = &event.text
-                    && !text.is_empty()
-                {
-                    prompt.insert(text);
+                // Only printable text lands in the buffer; control/platform
+                // chords (bound actions) never do.
+                if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform {
+                    if let Some(text) = event.keystroke.key_char.as_deref()
+                        && !text.is_empty()
+                    {
+                        prompt.insert(text);
+                    }
                 }
             }
         }
@@ -164,14 +201,18 @@ impl StatusBar {
         }
     }
 
-    fn execute_command(&mut self, app: &mut App, input: &str) {
-        let mut overlay = app.overlay.take();
-        let handled = match overlay.as_mut() {
-            Some(overlay) => overlay.execute_command(app, input),
-            None => false,
-        };
-        app.overlay = overlay;
-        if !handled {
+    fn execute_command(
+        &mut self,
+        surface: &mut Surface,
+        surface_entity: &Entity<Surface>,
+        window: &mut gpui::Window,
+        cx: &mut App,
+        input: &str,
+    ) {
+        // The palette command list lives on the surface; refresh it so Lua
+        // `register` calls made since the last prompt are visible.
+        surface.refresh_palette_commands();
+        if !overlay::execute_command(surface_entity.clone(), window, cx, input) {
             self.message = Some((
                 Instant::now(),
                 format!(
@@ -182,9 +223,9 @@ impl StatusBar {
         }
     }
 
-    fn evaluate_lua(&mut self, app: &mut App, expr: &str) {
-        let lua = app.lua.clone();
-        let out = config::with_env(app, |_| {
+    fn evaluate_lua(&mut self, surface: &mut Surface, expr: &str) {
+        let lua = surface.lua.clone();
+        let out = config::with_env(surface, |_| {
             let value = lua.load(expr).eval::<LuaValue>()?;
             let res = Self::format_lua_value(&lua, value, 0)?;
             Ok(res)
@@ -225,7 +266,7 @@ impl StatusBar {
     }
 }
 
-struct Prompt {
+pub struct Prompt {
     mode: Mode,
     buffer: String,
     cursor: usize,
@@ -315,14 +356,15 @@ impl Prompt {
         self.cursor = self.buffer.len();
     }
 
-    fn display(&self, cols: u16) -> StatusInput {
+    /// Visible window of the buffer for a `cols`-wide field, with the cursor
+    /// as a column offset into it. Kept from the wgpu status renderer so the
+    /// truncation behavior stays tested even though the GPUI bar renders the
+    /// full buffer.
+    #[cfg(test)]
+    fn display(&self, cols: u16) -> (String, String, usize) {
         let left_limit = usize::from(cols.max(1));
 
-        let prompt_text = match self.mode {
-            Mode::Command => " : ",
-            Mode::Rename => " R: ",
-            Mode::Lua => " > ",
-        };
+        let prompt_text = self.mode.prompt_text();
         let prompt_cols = prompt_text.chars().count();
 
         let cursor_col = self.buffer[..self.cursor.min(self.buffer.len())]
@@ -338,10 +380,70 @@ impl Prompt {
         let visible = self.buffer.chars().skip(start).take(max_cols).collect::<String>();
         let visible_cursor = cursor_col.saturating_sub(start);
 
-        StatusInput {
-            prompt: prompt_text.to_string(),
-            text: visible,
-            cursor_col: prompt_cols + visible_cursor,
-        }
+        (prompt_text.to_string(), visible, prompt_cols + visible_cursor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_insert_and_delete_are_char_aware() {
+        let mut prompt = Prompt::new(Mode::Command);
+        prompt.insert("héllo");
+        assert_eq!(prompt.cursor, "héllo".len());
+        prompt.cursor_left();
+        prompt.delete_before();
+        assert_eq!(prompt.buffer, "hélo");
+    }
+
+    #[test]
+    fn prompt_history_walks_and_resets() {
+        let history = vec!["first".to_string(), "second".to_string()];
+        let mut prompt = Prompt::new(Mode::Command);
+        prompt.history_prev(&history);
+        assert_eq!(prompt.buffer, "second");
+        prompt.history_prev(&history);
+        assert_eq!(prompt.buffer, "first");
+        prompt.history_prev(&history);
+        assert_eq!(prompt.buffer, "first");
+        prompt.history_next(&history);
+        assert_eq!(prompt.buffer, "second");
+        prompt.history_next(&history);
+        assert!(prompt.buffer.is_empty());
+    }
+
+    #[test]
+    fn display_truncates_to_width() {
+        let mut prompt = Prompt::new(Mode::Command);
+        prompt.insert("switch 12");
+        let (prefix, visible, cursor) = prompt.display(8);
+        assert_eq!(prefix, " : ");
+        // 8 cols minus the 3-col prefix leaves a 5-wide window scrolled to
+        // the cursor at the end of the 9-char buffer.
+        assert_eq!(visible, "h 12");
+        assert_eq!(cursor, 7);
+    }
+
+    #[test]
+    fn insert_text_targets_active_prompt() {
+        let mut status = StatusBar::new();
+        assert!(!status.insert_text("hi"));
+        status.open(Mode::Lua);
+        assert!(status.insert_text("1+"));
+        assert!(status.insert_text("1"));
+        let (_, _, buffer, cursor) = status.prompt_parts().unwrap();
+        assert_eq!(buffer, "1+1");
+        assert_eq!(cursor, 3);
+        // Empty text into an active prompt is a consumed no-op.
+        assert!(status.insert_text(""));
+    }
+
+    #[test]
+    fn mode_prefixes_match_history() {
+        assert_eq!(Mode::Command.prompt_text(), " : ");
+        assert_eq!(Mode::Rename.prompt_text(), " R: ");
+        assert_eq!(Mode::Lua.prompt_text(), " > ");
     }
 }

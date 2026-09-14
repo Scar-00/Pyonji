@@ -9,13 +9,12 @@ A GPU-accelerated terminal emulator written in Rust with Lua configuration, SSH 
 - VT100/xterm terminal emulation with 2000-line scrollback
 - 256-color + true color (24-bit) ANSI support (Catppuccin-inspired palette)
 - Multiple cursor styles (Bar, Block, Underline)
-- Pane splitting (horizontal/vertical) with mouse drag resize
-- Overlay/HUD system with fuzzy-search command palette
+- Pane splitting (horizontal/vertical) with keyboard resize
+- Overlay dialogs with fuzzy-search command palette
 - SSH remote session management
-- Self-update from GitHub releases
+- Release list from GitHub releases
 - In-app directory picker for opening sessions in a chosen folder
 - Lua-based configuration with hot-reloading
-- IME support with preedit rendering
 - Multiple bundled fonts (Iosevka, NotoSansMonoCJK, Nerd Font icons)
 
 ## Requirements
@@ -71,12 +70,11 @@ Hold `Ctrl+B` and press **Arrow Keys** to resize the active pane.
 | `Ctrl+Shift+S` | Sessions list |
 | `Escape` | Close current overlay |
 
-Within an overlay, use **Arrow Keys** to navigate, **Enter** to confirm, and **Tab** for auto-complete (command palette).
+Within a dialog, use **Arrow Keys** to navigate and **Enter** to confirm.
 
 ### Mouse
 
 - Left click a pane to focus it
-- Drag dividers to resize splits
 - Scroll wheel for scrollback / alternate screen scrolling
 
 ### Configuration
@@ -101,11 +99,10 @@ Config changes are applied automatically at runtime.
 
 ## Tech Stack
 
-- [wgpu](https://wgpu.rs/) — GPU rendering (Vulkan)
-- [winit](https://github.com/rust-windowing/winit) — Window management
+- [wgpu](https://wgpu.rs/) — GPU terminal rendering
+- [GPUI](https://github.com/gpui-ce/gpui-ce) — Window management and UI (dialogs, status bar)
 - [vt100](https://github.com/doy/vt100-rust) — Terminal emulation
 - [portable-pty](https://github.com/wez/wezterm) — PTY handling
-- [ratatui](https://ratatui.rs/) — Overlay UI framework
 - [mlua](https://github.com/khvzak/mlua) — Lua config integration
 - [swash](https://github.com/BrianSharpe/swash) — Font shaping
 - [nucleo-matcher](https://github.com/helix-editor/nucleo) — Fuzzy matching
