@@ -34,12 +34,7 @@ use clap::Parser;
 use pty::Event as PtyEvent;
 use renderer::{ImePreedit, Pane, Renderer, StatusLine, StatusTab};
 use std::{
-    array,
-    collections::HashMap,
-    fmt::Display,
-    panic::Location,
-    path::{Path, PathBuf},
-    sync::Arc,
+    array, collections::HashMap, fmt::Display, mem, panic::Location, path::{Path, PathBuf}, sync::Arc
 };
 use tracing::error;
 use winit::{
@@ -749,7 +744,7 @@ impl ApplicationHandler<PtyEvent> for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if self.status_bar.is_active() {
-                    let mut status_bar = std::mem::take(&mut self.status_bar);
+                    let mut status_bar = mem::take(&mut self.status_bar);
                     status_bar.handle_key(self, &event);
                     self.status_bar = status_bar;
                     self.request_redraw();
