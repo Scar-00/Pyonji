@@ -6,13 +6,13 @@ use crate::{Surface, terminal::SessionId};
 /// One row of the sessions dialog: which tab owns it and which session it
 /// focuses. Mirrors the ratatui `SessionsView` lines (`[tab]-id  title`).
 #[derive(Clone)]
-struct SessionEntry {
+pub(crate) struct SessionEntry {
     tab: usize,
     session: SessionId,
     label: String,
 }
 
-fn session_entries(surface: &Surface) -> Vec<SessionEntry> {
+pub(crate) fn session_entries(surface: &Surface) -> Vec<SessionEntry> {
     let mut entries = Vec::new();
     for (tab_index, tab) in surface.tabs.iter().enumerate() {
         let Some(tab) = tab.as_ref() else {
@@ -38,13 +38,17 @@ fn session_entries(surface: &Surface) -> Vec<SessionEntry> {
 ///
 /// Enter switches to the entry's tab when it is not current (like the old
 /// `SessionsState::handle_events`) and focuses the session.
-pub fn open_sessions(surface: Entity<Surface>, window: &mut Window, cx: &mut App) {
-    let entries = session_entries(&surface.read(cx));
+pub fn open_sessions(
+    entries: Vec<SessionEntry>,
+    entity: Entity<Surface>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let state = cx.new(|cx| CommandState::new(window, cx));
     state.update(cx, |state, cx| state.set_query("", window, cx));
     window.open_dialog(cx, move |dialog, window, cx| {
         let dialog_state = state.clone();
-        let focus_back = surface.clone();
+        let focus_back = entity.clone();
         let focus_state = dialog_state.clone();
         window.defer(cx, move |window, cx| {
             focus_state.update(cx, |state, cx| {
@@ -61,7 +65,7 @@ pub fn open_sessions(surface: Entity<Surface>, window: &mut Window, cx: &mut App
             }))
             .content({
                 let state = dialog_state.clone();
-                let surface = surface.clone();
+                let surface = entity.clone();
                 let items = items.clone();
                 move |content, _, _| {
                     let surface = surface.clone();

@@ -7,7 +7,7 @@ use crate::{Surface, config, overlay};
 
 pub const MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Command,
     Rename,
@@ -29,6 +29,7 @@ pub struct StatusBar {
     message: Option<(Instant, String)>,
     command_history: Vec<String>,
     lua_history: Vec<String>,
+    lua_history_index: Option<usize>,
 }
 
 impl Default for StatusBar {
@@ -44,11 +45,37 @@ impl StatusBar {
             message: None,
             command_history: Vec::new(),
             lua_history: Vec::new(),
+            lua_history_index: None,
         }
     }
 
     pub fn is_active(&self) -> bool {
         self.prompt.is_some()
+    }
+
+    /// Mode of the active prompt, if any.
+    pub fn prompt_mode(&self) -> Option<Mode> {
+        self.prompt.as_ref().map(|prompt| prompt.mode)
+    }
+
+    /// Close the prompt without submitting.
+    pub fn cancel_prompt(&mut self) {
+        self.prompt = None;
+    }
+
+    /// Highlighted completion row for the menu (meaningful in command mode).
+    pub fn completion_selected(&self) -> usize {
+        self.prompt.as_ref().map_or(0, |prompt| prompt.completion_index)
+    }
+
+    /// Match count for the command menu, so Up/Down can decide between
+    /// navigating it and walking history. Takes the active prompt: callers
+    /// have `take`n it out of `self` already.
+    fn command_matches(prompt: &Prompt, surface: &Surface) -> usize {
+        if prompt.mode != Mode::Command || prompt.buffer.is_empty() {
+            return 0;
+        }
+        overlay::filter_commands(&surface.palette_commands, &prompt.buffer).len()
     }
 
     pub fn message(&self) -> Option<&str> {
@@ -76,6 +103,7 @@ impl StatusBar {
 
     pub fn open(&mut self, mode: Mode) {
         self.message = None;
+        self.lua_history_index = None;
         self.prompt = Some(Prompt::new(mode));
     }
 
@@ -89,16 +117,62 @@ impl StatusBar {
     }
 
     /// Insert IME-committed text into the active prompt, if any.
-    /// Returns whether a prompt consumed the text.
+    /// Returns whether a prompt consumed the text. The Lua prompt owns an
+    /// editor instead of the buffer, so it never consumes here — the caller
+    /// routes to the editor directly.
     pub fn insert_text(&mut self, text: &str) -> bool {
         let Some(prompt) = self.prompt.as_mut() else {
             return false;
         };
+        if prompt.mode == Mode::Lua {
+            return false;
+        }
         if text.is_empty() {
             return true;
         }
         prompt.insert(text);
         true
+    }
+
+    /// Submit a Lua-prompt line from the editor: same history, `py`
+    /// environment, and message semantics as the legacy Enter path.
+    pub fn submit_lua(&mut self, surface: &mut Surface, input: &str) {
+        let input = input.trim().to_string();
+        self.prompt = None;
+        if input.is_empty() {
+            return;
+        }
+        self.push_history(Mode::Lua, input.clone());
+        self.evaluate_lua(surface, &input);
+    }
+
+    /// Walk Lua history for the editor prompt: `back` for older, otherwise
+    /// newer. Returns the entry to display (`Some("")` clears the field),
+    /// or `None` when there is nowhere to go.
+    pub fn lua_history_step(&mut self, back: bool) -> Option<String> {
+        if back {
+            if self.lua_history.is_empty() {
+                return None;
+            }
+            match self.lua_history_index {
+                None => self.lua_history_index = Some(self.lua_history.len() - 1),
+                Some(index) if index > 0 => self.lua_history_index = Some(index - 1),
+                _ => return None,
+            }
+            Some(self.lua_history[self.lua_history_index.expect("just set")].clone())
+        } else {
+            match self.lua_history_index {
+                Some(index) if index + 1 < self.lua_history.len() => {
+                    self.lua_history_index = Some(index + 1);
+                    Some(self.lua_history[index + 1].clone())
+                }
+                Some(_) => {
+                    self.lua_history_index = None;
+                    Some(String::new())
+                }
+                None => None,
+            }
+        }
     }
 
     /// Active prompt parts for the GPUI status bar: mode, prefix, full buffer,
@@ -155,16 +229,46 @@ impl StatusBar {
             "delete" => prompt.delete_at(),
             "left" => prompt.cursor_left(),
             "right" => prompt.cursor_right(),
-            "home" => prompt.cursor = 0,
-            "end" => prompt.cursor = prompt.buffer.len(),
+            "tab" => {
+                // Command mode only (rename keeps Tab inert, Lua mode never
+                // reaches this handler): complete the highlighted match,
+                // like the old palette Tab.
+                if prompt.mode == Mode::Command {
+                    surface.refresh_palette_commands();
+                    let selected = prompt.completion_index;
+                    if let Some(name) = overlay::complete_command_name(
+                        &surface.palette_commands,
+                        &prompt.buffer,
+                        selected,
+                    ) {
+                        prompt.accept_completion(name);
+                    }
+                }
+            }
             "up" => {
-                let history = self.history_for(prompt.mode);
-                prompt.history_prev(history);
+                if prompt.mode == Mode::Command
+                    && StatusBar::command_matches(&prompt, surface) > 0
+                {
+                    let matches = StatusBar::command_matches(&prompt, surface);
+                    prompt.move_completion(matches, false);
+                } else {
+                    let history = self.history_for(prompt.mode);
+                    prompt.history_prev(history);
+                }
             }
             "down" => {
-                let history = self.history_for(prompt.mode);
-                prompt.history_next(history);
+                if prompt.mode == Mode::Command
+                    && StatusBar::command_matches(&prompt, surface) > 0
+                {
+                    let matches = StatusBar::command_matches(&prompt, surface);
+                    prompt.move_completion(matches, true);
+                } else {
+                    let history = self.history_for(prompt.mode);
+                    prompt.history_next(history);
+                }
             }
+            "home" => prompt.cursor = 0,
+            "end" => prompt.cursor = prompt.buffer.len(),
             _ => {
                 // Only printable text lands in the buffer; control/platform
                 // chords (bound actions) never do.
@@ -212,7 +316,7 @@ impl StatusBar {
         // The palette command list lives on the surface; refresh it so Lua
         // `register` calls made since the last prompt are visible.
         surface.refresh_palette_commands();
-        if !overlay::execute_command(surface_entity.clone(), window, cx, input) {
+        if !overlay::execute_command(surface, surface_entity.clone(), window, cx, input) {
             self.message = Some((
                 Instant::now(),
                 format!(
@@ -271,6 +375,7 @@ pub struct Prompt {
     buffer: String,
     cursor: usize,
     history_index: Option<usize>,
+    completion_index: usize,
 }
 
 impl Prompt {
@@ -280,12 +385,14 @@ impl Prompt {
             buffer: String::new(),
             cursor: 0,
             history_index: None,
+            completion_index: 0,
         }
     }
 
     fn insert(&mut self, text: &str) {
         self.buffer.insert_str(self.cursor, text);
         self.cursor += text.len();
+        self.completion_index = 0;
     }
 
     fn delete_before(&mut self) {
@@ -298,6 +405,7 @@ impl Prompt {
             .map_or(0, |(index, _)| index);
         self.buffer.remove(index);
         self.cursor = index;
+        self.completion_index = 0;
     }
 
     fn delete_at(&mut self) {
@@ -305,6 +413,28 @@ impl Prompt {
             return;
         }
         self.buffer.remove(self.cursor);
+        self.completion_index = 0;
+    }
+
+    /// Accept a completion, replacing the whole line (the old palette Tab
+    /// dropped partial args the same way).
+    fn accept_completion(&mut self, name: String) {
+        self.buffer = name;
+        self.cursor = self.buffer.len();
+        self.completion_index = 0;
+    }
+
+    /// Move the completion highlight, wrapping around `matches` rows.
+    fn move_completion(&mut self, matches: usize, down: bool) {
+        if matches == 0 {
+            return;
+        }
+        let selected = self.completion_index.min(matches - 1);
+        self.completion_index = if down {
+            (selected + 1) % matches
+        } else {
+            (selected + matches - 1) % matches
+        };
     }
 
     fn cursor_left(&mut self) {
@@ -339,6 +469,7 @@ impl Prompt {
         let index = self.history_index.expect("just set");
         self.buffer = history[index].clone();
         self.cursor = self.buffer.len();
+        self.completion_index = 0;
     }
 
     fn history_next(&mut self, history: &[String]) {
@@ -354,6 +485,7 @@ impl Prompt {
             None => return,
         }
         self.cursor = self.buffer.len();
+        self.completion_index = 0;
     }
 
     /// Visible window of the buffer for a `cols`-wide field, with the cursor
@@ -430,14 +562,17 @@ mod tests {
     fn insert_text_targets_active_prompt() {
         let mut status = StatusBar::new();
         assert!(!status.insert_text("hi"));
-        status.open(Mode::Lua);
-        assert!(status.insert_text("1+"));
-        assert!(status.insert_text("1"));
+        status.open(Mode::Command);
+        assert!(status.insert_text("sw"));
+        assert!(status.insert_text("itch"));
         let (_, _, buffer, cursor) = status.prompt_parts().unwrap();
-        assert_eq!(buffer, "1+1");
-        assert_eq!(cursor, 3);
+        assert_eq!(buffer, "switch");
+        assert_eq!(cursor, 6);
         // Empty text into an active prompt is a consumed no-op.
         assert!(status.insert_text(""));
+        // Lua mode owns an editor instead of the buffer: never consumes here.
+        status.open(Mode::Lua);
+        assert!(!status.insert_text("hi"));
     }
 
     #[test]

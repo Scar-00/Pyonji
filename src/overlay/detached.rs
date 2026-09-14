@@ -5,12 +5,12 @@ use crate::{Surface, terminal::SessionId};
 
 /// One row of the attach dialog: `id  title`, like the old `DetachedView`.
 #[derive(Clone)]
-struct DetachedEntry {
+pub(crate) struct DetachedEntry {
     session: SessionId,
     label: String,
 }
 
-fn detached_entries(surface: &Surface) -> Vec<DetachedEntry> {
+pub(crate) fn detached_entries(surface: &Surface) -> Vec<DetachedEntry> {
     surface
         .live_detached_sessions()
         .into_iter()
@@ -33,14 +33,18 @@ fn detached_entries(surface: &Surface) -> Vec<DetachedEntry> {
 /// That conflicts with the search field (digits must be typeable), so it is
 /// intentionally not carried over. Attach lands on the current tab; use the
 /// `move-to` command afterwards to relocate the session.
-pub fn open_detached(surface: Entity<Surface>, window: &mut Window, cx: &mut App) {
-    let entries = detached_entries(&surface.read(cx));
-    let current_tab = surface.read(cx).current_tab;
+pub fn open_detached(
+    entries: Vec<DetachedEntry>,
+    current_tab: usize,
+    entity: Entity<Surface>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let state = cx.new(|cx| CommandState::new(window, cx));
     state.update(cx, |state, cx| state.set_query("", window, cx));
     window.open_dialog(cx, move |dialog, window, cx| {
         let dialog_state = state.clone();
-        let focus_back = surface.clone();
+        let focus_back = entity.clone();
         let focus_state = dialog_state.clone();
         window.defer(cx, move |window, cx| {
             focus_state.update(cx, |state, cx| {
@@ -65,7 +69,7 @@ pub fn open_detached(surface: Entity<Surface>, window: &mut Window, cx: &mut App
             }))
             .content({
                 let state = dialog_state.clone();
-                let surface = surface.clone();
+                let surface = entity.clone();
                 let items = items.clone();
                 move |content, _, _| {
                     let surface = surface.clone();

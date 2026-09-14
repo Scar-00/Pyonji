@@ -21,6 +21,7 @@ require('lua.keybind');
 ---@field font_family ?Value<string>
 ---@field font_size ?Value<number>
 ---@field line_height ?Value<number>
+---@field status_height ?Value<number> status bar height as a multiple of line_height (default 1.0)
 ---@field fullscreen ?Value<boolean>
 ---@field default_cwd ?Value<string>
 ---@field ssh_sessions ?SshSession[]

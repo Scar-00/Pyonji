@@ -140,6 +140,9 @@ impl LuaUserData for Surface {
             apply!(this.fullscreen, table);
             apply!(this.default_cwd, table);
             apply!(this.action, table);
+            apply!(this.status_height, table, |status_height: f32| {
+                status_height.max(0.5)
+            });
             this.ssh_sessions = util::collect_ssh_sessions(lua, &table);
 
             this.apply_config();
@@ -406,6 +409,7 @@ impl LuaUserData for Surface {
     fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("current_tab", |_, this| Ok(this.current_tab));
         fields.add_field_method_get("font_size", |_, this| Ok(this.font_size));
+        fields.add_field_method_get("status_height", |_, this| Ok(this.status_height));
         fields.add_field_method_get("line_height", |_, this| Ok(this.line_height));
         fields.add_field_method_get("font_family", |_, this| Ok(this.font_family.clone()));
         fields.add_field_method_get("rows", |_, this| Ok(this.rows));

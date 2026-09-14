@@ -12,6 +12,7 @@
 )]
 
 mod config;
+mod lua_input;
 #[cfg(feature = "install")]
 mod logging;
 mod overlay;
@@ -27,10 +28,7 @@ use tracing_subscriber::prelude::*;
 use anyhow::Result;
 use clap::Parser;
 use gpui::{
-    App, Bounds, Context, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable,
-    IntoElement, KeyDownEvent, KeyUpEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, TextInputConfiguration,
-    UTF16Selection, Window, canvas, container_query, div, point, prelude::*, px, size,
+    Anchor, App, Bounds, ClipboardItem, Context, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, IntoElement, KeyDownEvent, KeyUpEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, Subscription, TextInputConfiguration, UTF16Selection, Window, actions, anchored, canvas, container_query, deferred, div, point, prelude::*, px, size
 };
 use gpui_component::{ActiveTheme as _, Root, Theme, ThemeMode, h_flex, v_flex};
 use gpui_wgpu::{WgpuContextHandle, WgpuRenderTarget};
@@ -41,6 +39,10 @@ use mlua::{
 
 use crate::{
     config::KeyBinding,
+    lua_input::{
+        COMPLETION_MENU_LIMIT, LuaInputEvent, LuaSingleLineInput, lua_match_labels,
+        split_completion_target,
+    },
     overlay::{Cmd, LuaAction, Screen},
     pty::{Event as PtyEvent, SshConnection},
     renderer::{ImePreedit, Pane, Renderer},
@@ -50,6 +52,25 @@ use crate::{
         TerminalSession,
     },
 };
+
+// Actions for the Lua status prompt, scoped to the `status-lua` key context
+// on the prompt wrapper. The editor owns Up/Down/Enter/Escape under its
+// deeper `Input` context (Up/Down move the cursor, Enter submits, Escape is
+// unconsumed without a menu), so history lives on Ctrl+P/Ctrl+N
+// (readline-style, no conflicts) and Tab accepts the first completion
+// (single-line editors propagate Tab instead of indenting).
+actions!(status_lua, [
+    LuaCancelPrompt,
+    LuaHistoryPrev,
+    LuaHistoryNext
+]);
+
+// Tab gate for the Lua prompt, bound under the editor's own `Input`
+// context. Same depth as the component's `IndentInline`, but registered
+// later, so it runs first: with our Lua editor focused it accepts the
+// first match, otherwise it propagates and normal Tab behavior proceeds
+// (other inputs, palettes, focus navigation).
+actions!([LuaTabAccept]);
 
 #[derive(clap::Parser)]
 struct Cli {
@@ -79,6 +100,19 @@ pub struct Surface {
 
     pub status_bar_hidden: bool,
     pub status: StatusBar,
+    /// Status bar height as a multiple of `line_height` (1.0 = one row).
+    /// Configurable via `status_height`; every bar variant (tabs, prompts,
+    /// Lua editor) pins to it so the bar never changes size between modes.
+    pub status_height: f32,
+    /// Lua status-prompt input (EditorState with mlua-backed completion).
+    /// Lives as its own entity; only rendered/focused while a Lua prompt is
+    /// open. Shares the app Lua state, but Enter evaluation stays with the
+    /// host (`SubmitRequested`) so `py` and history semantics are unchanged.
+    lua_editor: Entity<LuaSingleLineInput>,
+    /// Set when a Lua prompt opens without a window at hand (Lua API); the
+    /// next render focuses the editor.
+    lua_prompt_needs_focus: bool,
+    _subscriptions: Vec<Subscription>,
 
     pub ssh_sessions: Vec<SshConnection>,
     pub keymap: HashMap<KeyBinding, KeyAction>,
@@ -283,7 +317,7 @@ impl Surface {
     const ICON: &[u8] = include_bytes!("../resources/icon.ico");
     /// Initial windowed size, matching the old winit window.
     const INITIAL_SIZE: (f32, f32) = (1280.0, 720.0);
-    const STATUS_BAR_ROWS: u16 = 1;
+    const STATUS_BAR_ROWS: u16 = 0;
 
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -315,6 +349,12 @@ impl Surface {
             font_family: None,
             status_bar_hidden: false,
             status: StatusBar::new(),
+            status_height: 1.0,
+            lua_editor: cx.new(|cx| {
+                LuaSingleLineInput::new_with_lua(lua.clone(), window, cx)
+            }),
+            lua_prompt_needs_focus: false,
+            _subscriptions: Vec::new(),
             ssh_sessions: vec![],
             keymap: Self::default_keymap(),
             action: KeyBinding::control("b"),
@@ -337,6 +377,52 @@ impl Surface {
             initial_path,
         };
         surface.palette_commands = overlay::commands_for(&surface);
+        // One menu design for both prompt modes: the editor's built-in
+        // completion popover stays off (hover and diagnostics keep working);
+        // the status bar renders the shared hand-rolled menu instead.
+        surface.lua_editor.update(cx, |editor, cx| {
+            editor.disable_builtin_completion(cx);
+        });
+        // Lua-prompt submits: evaluation stays with the host (history, `py`
+        // environment, messages), so the editor only reports the line.
+        {
+            let editor = surface.lua_editor.clone();
+            let subscription = cx.subscribe_in(
+                &editor,
+                window,
+                |surface: &mut Surface,
+                 _: &Entity<LuaSingleLineInput>,
+                 event: &LuaInputEvent,
+                 window: &mut Window,
+                 cx: &mut Context<Surface>| {
+                    if let LuaInputEvent::SubmitRequested(code) = event {
+                        let code = code.clone();
+                        surface.submit_lua_from_editor(&code, window, cx);
+                    }
+                },
+            );
+            surface._subscriptions.push(subscription);
+        }
+
+        // Lua-prompt keys, scoped to the `status-lua` wrapper context so they
+        // only fire while the prompt editor is focused. Up/Down/Enter/Escape
+        // stay with the editor's own (deeper) `Input` context.
+        cx.bind_keys([
+            gpui::KeyBinding::new("tab", LuaTabAccept, Some("Input")),
+            gpui::KeyBinding::new("escape", LuaCancelPrompt, Some("status-lua")),
+            gpui::KeyBinding::new("ctrl-p", LuaHistoryPrev, Some("status-lua")),
+            gpui::KeyBinding::new("ctrl-n", LuaHistoryNext, Some("status-lua")),
+        ]);
+        // `Root` binds Tab/Shift-Tab to focus navigation; without these
+        // deeper-context `NoAction` shadows the terminal would lose Tab to
+        // focus jumps and the status Tab completion would never fire. A
+        // matched `NoAction` dispatches nothing, so the keystroke keeps
+        // falling through to `handle_key_down` (and, with the editor
+        // focused, to its own `Input`-context bindings first).
+        cx.bind_keys([
+            gpui::KeyBinding::new("tab", gpui::NoAction {}, Some("terminal")),
+            gpui::KeyBinding::new("shift-tab", gpui::NoAction {}, Some("terminal")),
+        ]);
 
         // Background pty/config events → surface updates. Mirrors the old
         // event-loop `user_event` handler.
@@ -367,6 +453,16 @@ impl Surface {
         let cwd = self.initial_path.as_deref().or(self.default_cwd.as_deref());
         if let Ok(id) = self.session_manager.create_session(20, 80, cwd) {
             self.tabs[0] = Some(Tab::new(id));
+        }
+    }
+
+    /// Kick off a releases fetch on first open. Plain field writes — no
+    /// entity access — so this is safe from key handling (leased) and render.
+    /// Results arrive as `PtyEvent::ReleasesReady` on the background channel.
+    pub fn ensure_releases_fetch(&mut self) {
+        if self.releases.is_empty() && !self.releases_loading {
+            self.releases_loading = true;
+            crate::overlay::fetch_releases_async(self.event_tx.clone());
         }
     }
 
@@ -490,6 +586,12 @@ impl Surface {
     pub fn show_status_message(&mut self, text: String, cx: &mut Context<Self>) {
         self.status.show_message(text);
         cx.notify();
+        Self::arm_message_timer(cx);
+    }
+
+    /// Clear an expired message on a timer, shared by every path that sets
+    /// one (manual `show_message`, Lua evaluation, release selection).
+    fn arm_message_timer(cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             smol::Timer::after(status::MESSAGE_TIMEOUT).await;
             let _ = this.update(cx, |this: &mut Surface, cx| {
@@ -499,6 +601,88 @@ impl Surface {
             });
         })
         .detach();
+    }
+
+    /// Run a Lua-prompt line submitted from the editor: same history, `py`
+    /// environment, and message semantics as the legacy Enter path, then
+    /// clear the editor and hand focus back to the terminal.
+    fn submit_lua_from_editor(&mut self, code: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let mut status = mem::take(&mut self.status);
+        status.submit_lua(self, code);
+        self.status = status;
+        self.lua_editor.update(cx, |editor, cx| {
+            editor.set_value("", window, cx);
+        });
+        window.focus(&self.focus_handle, cx);
+        Self::arm_message_timer(cx);
+        cx.notify();
+    }
+
+    /// Accept the first Lua completion: replace the unfinished name before
+    /// the cursor, keep any trailing text. Same first-hit semantics as the
+    /// command menu's Tab. Fires ahead of the component's own Tab binding;
+    /// anything but our focused Lua editor propagates untouched.
+    fn accept_lua_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = self.lua_editor.clone();
+        if self.status.prompt_mode() != Some(Mode::Lua)
+            || !editor.read(cx).is_focused(window, cx)
+        {
+            cx.propagate();
+            return;
+        }
+        window.prevent_default();
+        let value = editor.read(cx).value(cx).to_string();
+        let offset = editor
+            .read(cx)
+            .editor()
+            .read(cx)
+            .cursor()
+            .min(value.len());
+        if !value.is_char_boundary(offset) {
+            return;
+        }
+        let before = &value[..offset];
+        let labels =
+            lua_match_labels(editor.read(cx).lsp().lua(), before, COMPLETION_MENU_LIMIT);
+        let Some(label) = labels.into_iter().next() else {
+            return;
+        };
+        let (_, prefix) = split_completion_target(before);
+        let prefix_start = offset - prefix.len();
+        let mut completed = String::with_capacity(value.len() + label.len());
+        completed.push_str(&value[..prefix_start]);
+        completed.push_str(&label);
+        completed.push_str(&value[offset..]);
+        editor.update(cx, |editor, cx| {
+            editor.set_value(&completed, window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Cancel the Lua prompt: clear the editor and refocus the terminal.
+    fn cancel_lua_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.prevent_default();
+        cx.stop_propagation();
+        self.status.cancel_prompt();
+        self.lua_editor.update(cx, |editor, cx| {
+            editor.set_value("", window, cx);
+        });
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    /// Walk Lua history into the editor (Ctrl+P/Ctrl+N — Up/Down belong to
+    /// the editor's own context and can't be rebound from outside it).
+    fn lua_history_step(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        window.prevent_default();
+        cx.stop_propagation();
+        if let Some(text) = self.status.lua_history_step(back) {
+            let editor = self.lua_editor.clone();
+            editor.update(cx, |editor, cx| {
+                editor.set_value(&text, window, cx);
+            });
+        }
+        cx.notify();
     }
 
     fn dispatch_builtin(
@@ -515,10 +699,12 @@ impl Surface {
                 self.action_mode = true;
             }
             BuiltinAction::Palette => {
-                overlay::open_palette(entity, window, cx);
+                let commands = self.palette_commands.clone();
+                overlay::open_palette(commands, entity, window, cx);
             }
             BuiltinAction::Sessions => {
-                overlay::open_sessions(entity, window, cx);
+                let entries = overlay::session_entries(self);
+                overlay::open_sessions(entries, entity, window, cx);
             }
             BuiltinAction::Tab(index) => {
                 let _ = self.switch_tab(index);
@@ -561,7 +747,9 @@ impl Surface {
             }
             BuiltinAction::RenameSession => self.open_rename_prompt(),
             BuiltinAction::Detached => {
-                overlay::open_detached(entity, window, cx);
+                let entries = overlay::detached_entries(self);
+                let current_tab = self.current_tab;
+                overlay::open_detached(entries, current_tab, entity, window, cx);
             }
         }
         cx.notify();
@@ -733,8 +921,19 @@ impl Surface {
             return self.handle_key_repeat(event, entity, window, cx);
         }
 
-        // The status prompt owns the keyboard while active, as before.
+        // The status prompt owns the keyboard while active, as before —
+        // except Lua mode, which is an EditorState with its own focus. If it
+        // somehow isn't focused (just opened), focus it instead of running
+        // the legacy buffer path.
         if self.status.is_active() {
+            if self.status.prompt_mode() == Some(Mode::Lua) {
+                let editor = self.lua_editor.clone();
+                editor.update(cx, |editor, cx| editor.focus(window, cx));
+                window.prevent_default();
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
             let mut status = mem::take(&mut self.status);
             status.handle_key(self, &entity, event, window, cx);
             self.status = status;
@@ -809,9 +1008,11 @@ impl Surface {
                     }
                     KeyAction::Builtin(action) => {
                         self.dispatch_builtin(action, entity, window, cx);
-                        return;
                     }
                 }
+                // Consumed keys must stop here: GPUI delivers text separately
+                // from key events, and an unstopped trigger would be
+                // re-delivered as text into whatever just opened.
                 window.prevent_default();
                 cx.stop_propagation();
                 cx.notify();
@@ -853,6 +1054,13 @@ impl Surface {
         cx: &mut Context<Self>,
     ) {
         if self.status.is_active() {
+            // Lua mode is editor-driven; repeats go to the focused editor
+            // natively, never through the legacy buffer path.
+            if self.status.prompt_mode() == Some(Mode::Lua) {
+                window.prevent_default();
+                cx.stop_propagation();
+                return;
+            }
             let mut status = mem::take(&mut self.status);
             status.handle_key(self, &entity, event, window, cx);
             self.status = status;
@@ -1224,39 +1432,42 @@ impl EntityInputHandler for Surface {
             .map(|text| 0..text.encode_utf16().count())
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.ime_preedit.take().is_some() {
-            cx.notify();
-        }
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        // Repaints happen every frame; nothing to notify from `App`.
+        self.ime_preedit = None;
     }
 
     fn replace_text_in_range(
         &mut self,
         _range: Option<Range<usize>>,
         text: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Plain key text duplicates the KeyDown path (which already sent it),
+        // so only an IME commit — one with a composition in flight — sends
+        // here. Pastes bypass this via `paste` below.
+        if self.ime_preedit.is_none() {
+            return;
+        }
         self.ime_preedit = None;
         if text.is_empty() {
             return;
         }
-        if self.status.insert_text(text) {
-            cx.notify();
-            return;
-        }
-        let Some(active_session) = self.active_session() else {
+        self.commit_text(text, window, cx);
+    }
+
+    fn paste(&mut self, item: ClipboardItem, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = item.text() else {
             return;
         };
-        let reset_scrollback = self
-            .session_manager
-            .session_mut(active_session)
-            .is_some_and(TerminalSession::reset_scrollback);
-        self.session_manager.send_text(active_session, text);
-        if reset_scrollback {
-            cx.notify();
+        if text.is_empty() {
+            return;
         }
+        self.ime_preedit = None;
+        self.commit_text(&text, window, cx);
     }
+
 
     fn replace_and_mark_text_in_range(
         &mut self,
@@ -1312,6 +1523,81 @@ impl EntityInputHandler for Surface {
     ) -> TextInputConfiguration {
         TextInputConfiguration::default()
     }
+}
+
+/// The shared status-bar completion menu: a constrained popover above the
+/// bar, the `selected` hit highlighted (Tab accepts it). Used identically by
+/// command mode (fuzzy command names) and Lua mode (semantic matches, always
+/// the first hit — the editor owns Up/Down there) — one menu design, two
+/// item sources.
+fn completion_menu(items: &[String], selected: usize, cx: &mut App) -> impl IntoElement {
+    if items.is_empty() {
+        return div().into_any_element();
+    }
+    let selected = selected.min(items.len() - 1);
+    deferred(anchored().anchor(Anchor::BottomLeft).child(div()
+        .id("completion-menu")
+        .max_w(px(480.))
+        .rounded(cx.theme().radius_lg)
+        .border_1()
+        .border_color(gpui::rgb(0x313244))
+        .bg(gpui::rgb(0x1e1e2e))
+        .py_1()
+        .px_1()
+        .children(items.iter().enumerate().map(|(index, hint)| {
+            div()
+                .px_2()
+                .rounded(cx.theme().radius)
+                .when(index == selected, |this| {
+                    this.bg(gpui::rgb(0xb4befe))
+                        .text_color(gpui::rgb(0x1e1e2e))
+                })
+                .when(index != selected, |this| {
+                    this.text_color(gpui::rgb(0xcdd6f4))
+                })
+                .child(hint.clone())
+        }))))
+        .priority_auto()
+        .into_any_element()
+}
+
+impl Surface {
+    /// Send committed text (IME commit or paste) to whoever owns input: the
+    /// Lua editor, the legacy prompt, or the active pty.
+    fn commit_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // Lua prompt mode owns an editor: committed text appends there.
+        if self.status.prompt_mode() == Some(Mode::Lua) {
+            let editor = self.lua_editor.clone();
+            let current = editor.read(cx).value(cx).to_string();
+            editor.update(cx, |editor, cx| {
+                editor.set_value(&format!("{current}{text}"), window, cx);
+            });
+            cx.notify();
+            return;
+        }
+        if self.status.insert_text(text) {
+            cx.notify();
+            return;
+        }
+        let Some(active_session) = self.active_session() else {
+            return;
+        };
+        let reset_scrollback = self
+            .session_manager
+            .session_mut(active_session)
+            .is_some_and(TerminalSession::reset_scrollback);
+        self.session_manager.send_text(active_session, text);
+        if reset_scrollback {
+            cx.notify();
+        }
+    }
+}
+
+/// Status bar height in logical pixels: `status_height` rows of
+/// `line_height`. Every bar variant pins to it so mode switches never resize
+/// the bar (and with it the terminal above).
+fn status_bar_height_px(status_height: f32, line_height: f32) -> f32 {
+    (status_height.max(0.5) * line_height).max(1.0)
 }
 
 fn digit_index(event: &KeyDownEvent) -> Option<usize> {    match event.keystroke.key.as_str() {
@@ -1664,6 +1950,7 @@ impl Surface {
     fn open_status_prompt(&mut self) {
         self.status_bar_hidden = false;
         self.status.open(Mode::Command);
+        self.refresh_palette_commands();
         self.resize_tab();
     }
 
@@ -1682,6 +1969,9 @@ impl Surface {
     fn open_lua_prompt(&mut self) {
         self.status_bar_hidden = false;
         self.status.open(Mode::Lua);
+        // The editor is focused on the next frame (render owns a window;
+        // Lua-API callers have none).
+        self.lua_prompt_needs_focus = true;
         self.resize_tab();
     }
 
@@ -1799,55 +2089,129 @@ impl Surface {
     /// GPUI status bar: tab segments, or the active prompt, or a transient
     /// message. Same content model as the wgpu bar (tabs left, message right,
     /// prompt prefix + buffer + cursor), now as host UI instead of glyphs.
-    fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Lua mode renders the `EditorState` input (completion, hover,
+    /// diagnostics) instead of the legacy buffer.
+    fn render_status_bar(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         if self.status_bar_hidden {
             return div().into_any_element();
+        }
+        // One height for every variant — tabs, legacy prompts, Lua editor —
+        // so the bar never jumps between modes.
+        let bar_h = px(status_bar_height_px(self.status_height, self.line_height));
+        if self.status.prompt_mode() == Some(Mode::Lua) {
+            let editor = self.lua_editor.clone();
+            let matches = {
+                let input = editor.read(cx);
+                let value = input.value(cx).to_string();
+                let offset = input.editor().read(cx).cursor().min(value.len());
+                let before = value[..offset.min(value.len())].to_string();
+                lua_match_labels(input.lsp().lua(), &before, COMPLETION_MENU_LIMIT)
+            };
+            return v_flex()
+                .w_full()
+                .text_sm()
+                .child(completion_menu(&matches, 0, cx))
+                .child(
+                    div()
+                        .id("status-lua")
+                        .key_context("status-lua")
+                        .on_action(cx.listener(
+                            |this, _: &LuaTabAccept, window, cx| {
+                                this.accept_lua_completion(window, cx);
+                            },
+                        ))
+                        .on_action(cx.listener(
+                            |this, _: &LuaCancelPrompt, window, cx| {
+                                this.cancel_lua_prompt(window, cx);
+                            },
+                        ))
+                        .on_action(cx.listener(
+                            |this, _: &LuaHistoryPrev, window, cx| {
+                                this.lua_history_step(true, window, cx);
+                            },
+                        ))
+                        .on_action(cx.listener(
+                            |this, _: &LuaHistoryNext, window, cx| {
+                                this.lua_history_step(false, window, cx);
+                            },
+                        ))
+                        .w_full()
+                        .h(bar_h)
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .child(editor),
+                )
+                .into_any_element();
         }
         // Expired messages are dropped lazily; the timer in
         // `show_status_message` already scheduled a notify.
         let message = self.status.message().map(str::to_string);
 
         if let Some((mode, prefix, buffer, cursor_col)) = self.status.prompt_parts() {
-            let _ = mode;
             let cursor_byte = buffer
                 .char_indices()
                 .nth(cursor_col)
                 .map(|(index, _)| index)
                 .unwrap_or(buffer.len());
-            let (before, after) = buffer.split_at(cursor_byte.min(buffer.len()));
-            let cursor_char = after.chars().next().unwrap_or(' ');
-            let rest = after
-                .char_indices()
-                .nth(1)
-                .map(|(index, _)| &after[index..])
-                .unwrap_or("");
-            return h_flex()
+            let (before, rest) = buffer.split_at(cursor_byte.min(buffer.len()));
+            // Command-mode completion menu: fuzzy matches for the name part,
+            // first hit highlighted (Tab accepts it). A constrained popover
+            // above the bar — deliberately not full width.
+            let completions: Vec<String> = if mode == Mode::Command && !buffer.is_empty() {
+                overlay::filter_commands(&self.palette_commands, buffer)
+                    .into_iter()
+                    .take(8)
+                    .map(|cmd| cmd.hint())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            // Input frame mirrors the Lua editor's frame; the cursor is a
+            // normal thin bar one UI line tall instead of a reversed block.
+            let cursor_h = window.line_height();
+            return v_flex()
                 .w_full()
+                .text_sm()
+                .child(completion_menu(&completions, self.status.completion_selected(), cx))
+                .child(
+                    h_flex()
+                .w_full()
+                .h(bar_h)
                 .items_center()
-                .bg(gpui::rgb(0x1e1e2e))
+                .gap_1()
+                .px_1()
+                .rounded(cx.theme().radius)
+                .bg(cx.theme().input_background())
+                .border_1()
+                .border_color(cx.theme().ring)
                 .text_color(gpui::rgb(0xcdd6f4))
                 .child(
                     div()
-                        .px_2()
+                        .px_1()
+                        .rounded(cx.theme().radius)
                         .bg(gpui::rgb(0xb4befe))
                         .text_color(gpui::rgb(0x1e1e2e))
-                        .child(prefix.to_string()),
+                        .child(prefix.trim().to_string()),
                 )
-                .child(div().px_1().child(before.to_string()))
-                .child(
-                    div()
-                        .px_0p5()
-                        .bg(gpui::rgb(0xcdd6f4))
-                        .text_color(gpui::rgb(0x1e1e2e))
-                        .child(cursor_char.to_string()),
+                .child(div().child(before.to_string()))
+                .child(div().w_px().h(cursor_h).bg(gpui::rgb(0xcdd6f4)))
+                .child(div().child(rest.to_string())),
                 )
-                .child(div().child(rest.to_string()))
                 .into_any_element();
         }
 
         let tabs = self.status_tabs();
         h_flex()
             .w_full()
+            .text_sm()
+            .px_1()
+            .h(bar_h)
+            .rounded(cx.theme().radius)
             .items_center()
             .bg(gpui::rgb(0x1e1e2e))
             .children(tabs.into_iter().map(|(label, is_active)| {
@@ -1864,7 +2228,7 @@ impl Surface {
                         this.bg(gpui::rgb(0x313244))
                             .text_color(gpui::rgb(0xcdd6f4))
                     })
-                    .child(format!(" {label} "))
+                    .child(format!("{label}"))
             }))
             .when_some(message, |this, message| {
                 this.child(
@@ -1875,7 +2239,7 @@ impl Surface {
                         .rounded(cx.theme().radius)
                         .bg(gpui::rgb(0xcba6f7))
                         .text_color(gpui::rgb(0x11111b))
-                        .child(format!(" {message} ")),
+                        .child(format!("{message}")),
                 )
             })
             .into_any_element()
@@ -1903,8 +2267,22 @@ impl Render for Surface {
         }
         if let Some(screen) = self.pending_overlay.take() {
             let entity = cx.entity();
+            // Fulfilled after render: the deferred frame holds no surface
+            // lease, so the dialog builder may snapshot freely.
             window.defer(cx, move |window, cx| {
-                overlay::open_screen(screen, entity, window, cx);
+                entity.update(cx, |surface, cx| {
+                    overlay::open_screen(screen, surface, entity.clone(), window, cx);
+                });
+            });
+        }
+
+        // Lua prompt focus handoff: Lua-API callers open prompts without a
+        // window, so the first render after opening moves focus in.
+        if self.lua_prompt_needs_focus && self.status.prompt_mode() == Some(Mode::Lua) {
+            self.lua_prompt_needs_focus = false;
+            let editor = self.lua_editor.clone();
+            window.defer(cx, move |window, cx| {
+                editor.update(cx, |editor, cx| editor.focus(window, cx));
             });
         }
 
@@ -1982,7 +2360,7 @@ impl Render for Surface {
                             }
                         });
                     })
-                    .child(gpui::div().size_full().child(
+                    .child(div().size_full().child(
                         container_query(cx.processor(
                             |this, content_size: gpui::Size<Pixels>, window, _| {
                                 this.sync_surface(window, content_size);
@@ -2020,7 +2398,7 @@ impl Render for Surface {
                         .size_full(),
                     ),
             )
-            .child(self.render_status_bar(cx))
+            .child(self.render_status_bar(window, cx))
     }
 }
 
@@ -2122,6 +2500,15 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_height_scales_with_line_height() {
+        assert_eq!(status_bar_height_px(1.0, 28.0), 28.0);
+        assert_eq!(status_bar_height_px(2.0, 26.4), 52.8);
+        // Floored so degenerate configs stay visible.
+        assert_eq!(status_bar_height_px(0.0, 28.0), 14.0);
+        assert_eq!(status_bar_height_px(-3.0, 28.0), 14.0);
+    }
+
+    #[test]
     fn grid_position_clamps_to_grid() {
         assert_eq!(grid_position(25.0, 30.0, 10.0, 20.0, 80, 24), (2.5, 1.5));
         assert_eq!(grid_position(-5.0, -5.0, 10.0, 20.0, 80, 24), (0.0, 0.0));
@@ -2129,5 +2516,280 @@ mod tests {
             grid_position(10000.0, 10000.0, 10.0, 20.0, 80, 24),
             (80.0, 24.0)
         );
+    }
+}
+
+
+
+
+/// Key dispatch tests for the status prompts. These drive the real window
+/// key dispatch (keymap → focus → listeners), unlike unit tests that call
+/// handlers directly: trigger keys must not leak, Tab must complete, and
+/// Up/Down must navigate the command menu.
+#[cfg(test)]
+mod prompt_key_tests {
+    use super::*;
+
+    #[gpui::test]
+    async fn lua_trigger_does_not_leak(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let lua = Lua::new();
+        let (tx, rx) = async_channel::unbounded();
+        let (view, vcx) =
+            cx.add_window_view(|window, cx| Surface::new(window, cx, None, lua, tx, rx));
+        vcx.update(|window, cx| {
+            view.update(cx, |surface, cx| {
+                window.focus(&surface.focus_handle, cx);
+            });
+        });
+        vcx.simulate_keystrokes("ctrl-b");
+        vcx.update(|_, cx| {
+            assert!(view.read(cx).action_mode);
+        });
+        vcx.simulate_keystrokes("l");
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        vcx.run_until_parked();
+
+        vcx.update(|_, cx| {
+            let surface = view.read(cx);
+            assert_eq!(surface.status.prompt_mode(), Some(Mode::Lua));
+            assert_eq!(
+                surface.lua_editor.read(cx).value(cx).to_string(),
+                "",
+                "trigger key leaked into the Lua prompt"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn command_trigger_does_not_leak(cx: &mut gpui::TestAppContext) {        cx.update(gpui_component::init);
+        let lua = Lua::new();
+        let (tx, rx) = async_channel::unbounded();
+        let (view, vcx) =
+            cx.add_window_view(|window, cx| Surface::new(window, cx, None, lua, tx, rx));
+        vcx.update(|window, cx| {
+            view.update(cx, |surface, cx| {
+                window.focus(&surface.focus_handle, cx);
+            });
+        });
+        vcx.simulate_keystrokes("ctrl-b");
+        vcx.simulate_keystrokes("semicolon");
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        vcx.run_until_parked();
+
+        vcx.update(|_, cx| {
+            let surface = view.read(cx);
+            assert_eq!(surface.status.prompt_mode(), Some(Mode::Command));
+            let (_, _, buffer, _) = surface.status.prompt_parts().unwrap();
+            assert_eq!(buffer, "", "trigger key leaked into the command prompt");
+        });
+    }
+}
+
+    /// The text phase duplicates KeyDown delivery: plain text without an IME
+    /// composition in flight must be ignored (the KeyDown path sent it),
+    /// while a real commit still clears preedit state.
+    #[gpui::test]
+    async fn text_phase_ignores_non_ime_text(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let lua = Lua::new();
+        let (tx, rx) = async_channel::unbounded();
+        let (view, vcx) =
+            cx.add_window_view(|window, cx| Surface::new(window, cx, None, lua, tx, rx));
+        vcx.update(|window, cx| {
+            view.update(cx, |surface, cx| {
+                window.focus(&surface.focus_handle, cx);
+            });
+        });
+        vcx.simulate_keystrokes("ctrl-b");
+        vcx.simulate_keystrokes("semicolon");
+        vcx.run_until_parked();
+
+        // Plain text with no composition in flight: prompt buffer untouched.
+        vcx.update(|window, cx| {
+            view.update(cx, |surface, cx| {
+                surface.replace_text_in_range(None, "x", window, cx);
+            });
+        });
+        vcx.update(|_, cx| {
+            let surface = view.read(cx);
+            let (_, _, buffer, _) = surface.status.prompt_parts().unwrap();
+            assert_eq!(buffer, "", "text phase duplicated KeyDown insertion");
+            assert!(surface.ime_preedit.is_none());
+        });
+
+        // An IME commit clears the staged preedit.
+        vcx.update(|window, cx| {
+            view.update(cx, |surface, cx| {
+                surface.ime_preedit = Some("ni".to_string());
+                surface.replace_text_in_range(None, "ni", window, cx);
+            });
+        });
+        vcx.update(|_, cx| {
+            assert!(view.read(cx).ime_preedit.is_none());
+        });
+    }
+
+
+/// The `status_height` Lua option reaches the surface (applied + clamped).
+#[cfg(test)]
+mod status_height_tests {
+    use super::*;
+
+    fn surface_with(
+        cx: &mut gpui::TestAppContext,
+    ) -> (Entity<Surface>, &mut gpui::VisualTestContext) {
+        cx.update(gpui_component::init);
+        let lua = Lua::new();
+        let (tx, rx) = async_channel::unbounded();
+        let (view, vcx) =
+            cx.add_window_view(|window, cx| Surface::new(window, cx, None, lua, tx, rx));
+        (view, vcx)
+    }
+
+    #[gpui::test]
+    async fn status_height_defaults_and_applies(cx: &mut gpui::TestAppContext) {
+        let (view, _) = surface_with(cx);
+        view.update(cx, |surface, _| {
+            assert_eq!(surface.status_height, 1.0);
+            let lua = surface.lua.clone();
+            config::with_env(surface, |_| {
+                lua.load("py:config({ status_height = 2.5 })").exec()
+            })
+            .unwrap();
+            assert_eq!(surface.status_height, 2.5);
+        });
+    }
+
+    #[gpui::test]
+    async fn status_height_clamps_degenerate_values(cx: &mut gpui::TestAppContext) {
+        let (view, _) = surface_with(cx);
+        view.update(cx, |surface, _| {
+            let lua = surface.lua.clone();
+            config::with_env(surface, |_| {
+                lua.load("py:config({ status_height = 0 })").exec()
+            })
+            .unwrap();
+            assert_eq!(surface.status_height, 0.5);
+        });
+    }
+}
+
+#[cfg(test)]
+mod prompt_completion_tests {
+    use super::*;
+
+    #[gpui::test]
+    async fn command_tab_accepts_highlight(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let lua = Lua::new();
+        let (tx, rx) = async_channel::unbounded();
+        let (view, mut vcx) =
+            cx.add_window_view(|window, cx| Surface::new(window, cx, None, lua, tx, rx));
+        vcx.update(|window, cx| {
+            view.update(cx, |surface, cx| {
+                window.focus(&surface.focus_handle, cx);
+            });
+        });
+        vcx.simulate_keystrokes("ctrl-b");
+        vcx.simulate_keystrokes("semicolon");
+        vcx.simulate_keystrokes("s w");
+        vcx.update(|_, cx| {
+            let surface = view.read(cx);
+            let (_, _, buffer, _) = surface.status.prompt_parts().unwrap();
+            assert_eq!(buffer, "sw");
+        });
+        vcx.simulate_keystrokes("tab");
+        vcx.update(|_, cx| {
+            let surface = view.read(cx);
+            let (_, _, buffer, _) = surface.status.prompt_parts().unwrap();
+            assert_eq!(buffer, "switch", "tab should accept the first match");
+        });
+    }
+
+    #[gpui::test]
+    async fn command_arrows_navigate_menu(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let lua = Lua::new();
+        let (tx, rx) = async_channel::unbounded();
+        let (view, mut vcx) =
+            cx.add_window_view(|window, cx| Surface::new(window, cx, None, lua, tx, rx));
+        vcx.update(|window, cx| {
+            view.update(cx, |surface, cx| {
+                window.focus(&surface.focus_handle, cx);
+            });
+        });
+        vcx.simulate_keystrokes("ctrl-b");
+        vcx.simulate_keystrokes("semicolon");
+        vcx.simulate_keystrokes("s");
+        vcx.update(|_, cx| {
+            assert_eq!(view.read(cx).status.completion_selected(), 0);
+        });
+        vcx.simulate_keystrokes("down");
+        vcx.update(|_, cx| {
+            assert_eq!(view.read(cx).status.completion_selected(), 1);
+        });
+        vcx.simulate_keystrokes("up");
+        vcx.update(|_, cx| {
+            assert_eq!(view.read(cx).status.completion_selected(), 0);
+        });
+        // Tab accepts the highlighted (second) match, not just the first.
+        vcx.simulate_keystrokes("down");
+        vcx.simulate_keystrokes("tab");
+        vcx.update(|_, cx| {
+            let surface = view.read(cx);
+            let expected = overlay::filter_commands(&surface.palette_commands, "s")
+                .into_iter()
+                .nth(1)
+                .map(|cmd| cmd.name);
+            let (_, _, buffer, _) = surface.status.prompt_parts().unwrap();
+            assert_eq!(buffer, expected.expect("second match exists"));
+        });
+    }
+
+    #[gpui::test]
+    async fn lua_tab_accepts_first_match(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let lua = Lua::new();
+        let (tx, rx) = async_channel::unbounded();
+        let (view, mut vcx) =
+            cx.add_window_view(|window, cx| Surface::new(window, cx, None, lua, tx, rx));
+        vcx.update(|window, cx| {
+            view.update(cx, |surface, cx| {
+                window.focus(&surface.focus_handle, cx);
+            });
+        });
+        vcx.simulate_keystrokes("ctrl-b");
+        vcx.simulate_keystrokes("l");
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        vcx.run_until_parked();
+        // Type into the focused editor through real dispatch.
+        vcx.simulate_keystrokes("p r i");
+        vcx.update(|_, cx| {
+            let surface = view.read(cx);
+            assert_eq!(
+                surface.lua_editor.read(cx).value(cx).to_string(),
+                "pri".to_string(),
+                "typing must reach the focused Lua editor"
+            );
+        });
+        vcx.simulate_keystrokes("tab");
+        vcx.update(|_, cx| {
+            let surface = view.read(cx);
+            assert_eq!(
+                surface.lua_editor.read(cx).value(cx).to_string(),
+                "print".to_string(),
+                "tab should accept the first Lua match"
+            );
+        });
     }
 }

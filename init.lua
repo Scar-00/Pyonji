@@ -77,6 +77,7 @@ py:config({
             ip = "192.168.178.20",
         }
     },
+    status_height = 0.75,
 });
 
 --[[Workspaces = {};

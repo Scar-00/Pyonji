@@ -5,11 +5,13 @@ mod releases;
 mod sessions;
 
 pub use detached::open_detached;
+pub(crate) use detached::detached_entries;
 pub use opener::open_opener;
 #[allow(unused_imports)]
-pub use palette::{filter_commands, open_palette};
-pub use releases::open_releases;
+pub use palette::{complete_command_name, filter_commands, open_palette};
+pub use releases::{fetch_releases_async, open_releases};
 pub use sessions::open_sessions;
+pub(crate) use sessions::session_entries;
 
 use std::rc::Rc;
 
@@ -33,13 +35,37 @@ pub enum Screen {
 }
 
 /// Open the dialog for `screen` on `window`.
-pub fn open_screen(screen: Screen, surface: Entity<Surface>, window: &mut Window, cx: &mut App) {
+///
+/// `surface` is a plain borrow for snapshotting dialog data — never an entity
+/// access: this runs from render and from key handling, and key handling runs
+/// under the surface's update lease, where any `Entity<Surface>` read/update
+/// would panic ("already being updated"). Entity handles travel only into
+/// deferred closures (dialog confirm callbacks), which run lease-free.
+pub fn open_screen(
+    screen: Screen,
+    surface: &mut Surface,
+    entity: Entity<Surface>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    // Every dialog takes owned snapshots, never entity access: this runs from
+    // render (lease-free) and from key handling (leased), and only the owned
+    // form is safe in both.
     match screen {
-        Screen::CmdPalette => open_palette(surface, window, cx),
-        Screen::Sessions => open_sessions(surface, window, cx),
-        Screen::Detached => open_detached(surface, window, cx),
-        Screen::Releases => open_releases(surface, window, cx),
-        Screen::Opener => open_opener(surface, window, cx),
+        Screen::CmdPalette => open_palette(surface.palette_commands.clone(), entity, window, cx),
+        Screen::Sessions => open_sessions(session_entries(surface), entity, window, cx),
+        Screen::Detached => open_detached(
+            detached_entries(surface),
+            surface.current_tab,
+            entity,
+            window,
+            cx,
+        ),
+        Screen::Releases => {
+            surface.ensure_releases_fetch();
+            open_releases(entity, window, cx);
+        }
+        Screen::Opener => open_opener(entity, window, cx),
     }
 }
 
@@ -110,8 +136,14 @@ pub fn commands_for(surface: &Surface) -> Vec<Cmd> {
 
 /// Run a `:command args…` line from the status prompt. Returns `false` when
 /// no command matches `name`, so the caller can report `unknown command`.
+///
+/// The lookup runs synchronously against `surface`; the action itself is
+/// deferred past the current dispatch (key handling holds the surface lease,
+/// so running it inline would panic). Visually this is identical — it runs
+/// before the next paint.
 pub fn execute_command(
-    surface: Entity<Surface>,
+    surface: &Surface,
+    entity: Entity<Surface>,
     window: &mut Window,
     cx: &mut App,
     input: &str,
@@ -124,13 +156,16 @@ pub fn execute_command(
         return false;
     }
     let args = split.map(str::to_string).collect::<Vec<_>>();
-    let action = surface.read(cx).palette_commands.iter().find_map(|cmd| {
-        (cmd.name == name).then(|| cmd.action.clone())
-    });
+    let action = surface
+        .palette_commands
+        .iter()
+        .find_map(|cmd| (cmd.name == name).then(|| cmd.action.clone()));
     let Some(action) = action else {
         return false;
     };
-    action(surface, window, cx, args);
+    window.defer(cx, move |window, cx| {
+        action(entity, window, cx, args);
+    });
     true
 }
 
@@ -191,7 +226,8 @@ fn builtin_commands() -> Vec<Cmd> {
             });
         }),
         Cmd::new("sessions", [], |surface, window, cx, _| {
-            open_sessions(surface, window, cx);
+            let entries = session_entries(&surface.read(cx));
+            open_sessions(entries, surface.clone(), window, cx);
         }),
         Cmd::new("detach", [], |surface, _, cx, _| {
             surface.update(cx, |surface, cx| {
@@ -231,10 +267,15 @@ fn builtin_commands() -> Vec<Cmd> {
             });
         }),
         Cmd::new("attach", [], |surface, window, cx, _| {
-            open_detached(surface, window, cx);
+            let entries = detached_entries(&surface.read(cx));
+            let current_tab = surface.read(cx).current_tab;
+            open_detached(entries, current_tab, surface.clone(), window, cx);
         }),
         Cmd::new("releases", [], |surface, window, cx, _| {
-            open_releases(surface, window, cx);
+            surface.update(cx, |surface, _| {
+                surface.ensure_releases_fetch();
+            });
+            open_releases(surface.clone(), window, cx);
         }),
         Cmd::new("ssh", [Arg::new("session")], |surface, _, cx, args| {
             surface.update(cx, |surface, cx| {
@@ -260,7 +301,7 @@ fn builtin_commands() -> Vec<Cmd> {
             });
         }),
         Cmd::new("open-in", [], |surface, window, cx, _| {
-            open_opener(surface, window, cx);
+            open_opener(surface.clone(), window, cx);
         }),
     ]
 }

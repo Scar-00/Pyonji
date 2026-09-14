@@ -166,18 +166,13 @@ impl Render for ReleasesView {
     }
 }
 
-/// Open the releases dialog, fetching in the background on first open.
-pub fn open_releases(surface: Entity<Surface>, window: &mut Window, cx: &mut App) {
-    let needs_fetch = surface.read(cx).releases.is_empty() && !surface.read(cx).releases_loading;
-    if needs_fetch {
-        surface.update(cx, |surface, _| {
-            surface.releases_loading = true;
-        });
-        fetch_releases_async(surface.read(cx).event_tx.clone());
-    }
-    let focus_back = surface.clone();
+/// Open the releases dialog. Fetching is triggered separately via
+/// [`Surface::ensure_releases_fetch`] (which needs `&mut`, so it lives with
+/// the callers), keeping this builder free of synchronous entity access.
+pub fn open_releases(entity: Entity<Surface>, window: &mut Window, cx: &mut App) {
+    let focus_back = entity.clone();
     window.open_dialog(cx, move |dialog, window, cx| {
-        let view = cx.new(|cx| ReleasesView::new(surface.clone(), cx));
+        let view = cx.new(|cx| ReleasesView::new(entity.clone(), cx));
         let focus = view.read(cx).focus_handle(cx);
         window.defer(cx, move |window, cx| {
             focus.focus(window, cx);

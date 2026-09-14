@@ -45,6 +45,23 @@ pub fn query_args(query: &str) -> Vec<String> {
     split.map(str::to_string).collect()
 }
 
+/// Complete a command line to the highlighted fuzzy match's name, dropping
+/// any partial args — the old palette's Tab behavior (`Head` + delete-to-end
+/// + insert name), shared by the palette dialog and the status prompt.
+pub fn complete_command_name(
+    commands: &[Cmd],
+    buffer: &str,
+    selected: usize,
+) -> Option<String> {
+    let filtered = filter_commands(commands, buffer);
+    if filtered.is_empty() {
+        return None;
+    }
+    filtered
+        .get(selected.min(filtered.len() - 1))
+        .map(|cmd| cmd.name.clone())
+}
+
 /// Open the command palette dialog.
 ///
 /// Typing filters the commands; Enter runs the highlighted one with the
@@ -53,13 +70,17 @@ pub fn query_args(query: &str) -> Vec<String> {
 /// Note: the ratatui palette's Tab-to-complete-name has no equivalent in the
 /// GPUI `Command` view, so it is intentionally not carried over. Everything
 /// else — fuzzy filtering, `<arg>` hints, arg parsing — is preserved.
-pub fn open_palette(surface: Entity<Surface>, window: &mut Window, cx: &mut App) {
-    let commands = surface.read(cx).palette_commands.clone();
+pub fn open_palette(
+    commands: Vec<Cmd>,
+    entity: Entity<Surface>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let state = cx.new(|cx| CommandState::new(window, cx));
     state.update(cx, |state, cx| state.set_query("", window, cx));
     window.open_dialog(cx, move |dialog, window, cx| {
         let dialog_state = state.clone();
-        let focus_back = surface.clone();
+        let focus_back = entity.clone();
         // Focus the search field on mount so typing filters the palette
         // instead of being sent to the pty.
         let focus_state = dialog_state.clone();
@@ -79,17 +100,19 @@ pub fn open_palette(surface: Entity<Surface>, window: &mut Window, cx: &mut App)
             }))
             .content({
                 let state = dialog_state.clone();
-                let surface = surface.clone();
+                let surface = entity.clone();
                 let items = items.clone();
                 move |content, _, _| {
                     let state_for_confirm = state.clone();
                     let surface = surface.clone();
+                    let confirm_items = items.clone();
                     let mut command = Command::new(&state)
                         .placeholder("Type a command, e.g. switch <tab>")
                         .bordered(true)
                         .on_confirm(move |index: IndexPath, window, cx| {
                             confirm_palette(
                                 surface.clone(),
+                                confirm_items.clone(),
                                 state_for_confirm.clone(),
                                 index,
                                 window,
@@ -112,6 +135,7 @@ pub fn open_palette(surface: Entity<Surface>, window: &mut Window, cx: &mut App)
 
 fn confirm_palette(
     surface: Entity<Surface>,
+    commands: Vec<Cmd>,
     state: Entity<CommandState>,
     index: IndexPath,
     window: &mut Window,
@@ -119,7 +143,9 @@ fn confirm_palette(
 ) {
     let query = state.read(cx).query(cx).to_string();
     let args = query_args(&query);
-    let action = surface.read(cx).palette_commands.get(index.row).map(|cmd| cmd.action.clone());
+    // Snapshot lookup: the dialog already captured the command list, so no
+    // entity access happens on the confirm path either.
+    let action = commands.get(index.row).map(|cmd| cmd.action.clone());
     window.close_dialog(cx);
     let Some(action) = action else {
         surface.update(cx, |surface, cx| {
@@ -168,6 +194,27 @@ mod tests {
         assert_eq!(query_args("switch 2"), vec!["2".to_string()]);
         assert_eq!(query_args("rename foo bar"), vec!["foo".to_string(), "bar".to_string()]);
         assert!(query_args("sessions").is_empty());
+    }
+
+    #[test]
+    fn tab_completion_takes_highlighted_match_name_only() {
+        let commands = test_commands();
+        // Partial name completes, dropping any partial args.
+        assert_eq!(
+            complete_command_name(&commands, "sw 2", 0).as_deref(),
+            Some("switch")
+        );
+        assert_eq!(
+            complete_command_name(&commands, "", 0).as_deref(),
+            Some("switch")
+        );
+        // An out-of-range highlight clamps to the last match.
+        assert_eq!(
+            complete_command_name(&commands, "sw", 99).as_deref(),
+            Some("switch")
+        );
+        // No match completes to nothing.
+        assert_eq!(complete_command_name(&commands, "zzz", 0), None);
     }
 
     #[test]
