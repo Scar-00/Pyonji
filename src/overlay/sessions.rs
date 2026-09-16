@@ -1,7 +1,9 @@
-use gpui::{App, Entity, Window, prelude::*};
-use gpui_component::{IndexPath, WindowExt as _, command::{Command, CommandItem, CommandState}};
+use gpui::{App, Entity, Window};
+use gpui_component::WindowExt as _;
 
 use crate::{Surface, terminal::SessionId};
+
+use super::search::{SearchItem, open_search_dialog};
 
 /// One row of the sessions dialog: which tab owns it and which session it
 /// focuses. Mirrors the ratatui `SessionsView` lines (`[tab]-id  title`).
@@ -12,14 +14,14 @@ pub(crate) struct SessionEntry {
     label: String,
 }
 
-pub(crate) fn session_entries(surface: &Surface) -> Vec<SessionEntry> {
+pub(crate) fn session_entries(workspace: &crate::workspace::Workspace) -> Vec<SessionEntry> {
     let mut entries = Vec::new();
-    for (tab_index, tab) in surface.tabs.iter().enumerate() {
+    for (tab_index, tab) in workspace.tabs.iter().enumerate() {
         let Some(tab) = tab.as_ref() else {
             continue;
         };
         for session in tab.sessions() {
-            let title = surface
+            let title = workspace
                 .session_manager
                 .session(session)
                 .map(|s| s.title())
@@ -35,77 +37,49 @@ pub(crate) fn session_entries(surface: &Surface) -> Vec<SessionEntry> {
 }
 
 /// Open the sessions dialog.
-///
-/// Enter switches to the entry's tab when it is not current (like the old
-/// `SessionsState::handle_events`) and focuses the session.
-pub fn open_sessions(
+pub fn open(
     entries: Vec<SessionEntry>,
     entity: Entity<Surface>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let state = cx.new(|cx| CommandState::new(window, cx));
-    state.update(cx, |state, cx| state.set_query("", window, cx));
-    window.open_dialog(cx, move |dialog, window, cx| {
-        let dialog_state = state.clone();
-        let focus_back = entity.clone();
-        let focus_state = dialog_state.clone();
-        window.defer(cx, move |window, cx| {
-            focus_state.update(cx, |state, cx| {
-                state.focus(window, cx);
-            });
-        });
-        let items = entries.clone();
-        dialog
-            .close_button(false)
-            .p_0()
-            .title("Sessions")
-            .on_close(window.listener_for(&focus_back, |surface, _, window, cx| {
-                window.focus(&surface.focus_handle, cx);
-            }))
-            .content({
-                let state = dialog_state.clone();
-                let surface = entity.clone();
-                let items = items.clone();
-                move |content, _, _| {
-                    let surface = surface.clone();
-                    let confirm_entries = items.clone();
-                    let mut command = Command::new(&state)
-                        .placeholder("Search sessions..")
-                        .bordered(true)
-                        .on_confirm(move |index: IndexPath, window, cx| {
-                            let entry = confirm_entries.get(index.row).cloned();
-                            window.close_dialog(cx);
-                            let Some(entry) = entry else {
-                                surface.update(cx, |surface, cx| {
-                                    window.focus(&surface.focus_handle, cx);
-                                    cx.notify();
-                                });
-                                return;
-                            };
-                            surface.update(cx, |surface, cx| {
-                                if entry.tab != surface.current_tab {
-                                    surface.switch_tab(entry.tab);
-                                }
-                                surface.set_active_session(entry.session);
-                                window.focus(&surface.focus_handle, cx);
-                                cx.notify();
-                            });
-                        });
-                    for entry in &items {
-                        command = command.item(CommandItem::new().label(entry.label.clone()));
-                    }
-                    content.child(command)
+    let items: Vec<SearchItem> = entries
+        .iter()
+        .map(|entry| SearchItem::new(entry.label.clone()))
+        .collect();
+    open_search_dialog(
+        Some("Sessions".into()),
+        "Search sessions..",
+        None,
+        items,
+        entity.clone(),
+        move |row, _, window, cx| {
+            let entry = entries.get(row).cloned();
+            window.close_dialog(cx);
+            let Some(entry) = entry else {
+                entity.update(cx, |surface, cx| {
+                    window.focus(&surface.focus_handle, cx);
+                    cx.notify();
+                });
+                return;
+            };
+            entity.update(cx, |surface, cx| {
+                if entry.tab != surface.workspace.current_tab {
+                    surface.switch_tab(entry.tab);
                 }
-            })
-    });
+                surface.workspace.set_active_session(entry.session);
+                window.focus(&surface.focus_handle, cx);
+                cx.notify();
+            });
+        },
+        window,
+        cx,
+    );
 }
-
 #[cfg(test)]
 mod tests {
     #[test]
     fn session_entry_label_format() {
-        // `[tab]-id  title` with a 1-based tab number, as in the old view.
         let label = format!("[{}]-{}    {}", 1, 42, "shell");
         assert_eq!(label, "[1]-42    shell");
     }

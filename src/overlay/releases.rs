@@ -1,14 +1,20 @@
-use gpui::{App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent, Render, Window, div, prelude::*, px};
-use gpui_component::{ActiveTheme as _, WindowExt as _, v_flex};
+use gpui::{
+    App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent, Render, Window, div,
+    prelude::*,
+};
+use gpui_component::WindowExt as _;
 use self_update::Release;
 
-use crate::Surface;
+use crate::{
+    Surface,
+    theme::{self, role},
+    ui::list_row::list_row,
+};
+
+use super::host::Overlay;
 
 /// Fetch the release list on a blocking thread: `ReleaseList::fetch` uses the
 /// reqwest blocking client, so it must not run on the GPUI async executor.
-/// The result comes back through the pty event channel as
-/// [`crate::pty::Event::ReleasesReady`], which the surface folds into
-/// [`Surface::releases`] like any other background event.
 pub fn fetch_releases_async(tx: async_channel::Sender<crate::pty::Event>) {
     std::thread::spawn(move || {
         let releases: Vec<Release> = (|| {
@@ -29,7 +35,7 @@ fn github_release_list() -> anyhow::Result<self_update::backends::github::Releas
 }
 
 /// One row of the releases dialog: `name - version`, with a `CURRENT` marker
-/// on the running version — the same line the ratatui view built.
+/// on the running version.
 pub fn release_label(release: &Release) -> String {
     let mut label = format!("{} - {}", release.name(), release.version());
     if release.version() == self_update::cargo_crate_version!() {
@@ -38,32 +44,37 @@ pub fn release_label(release: &Release) -> String {
     label
 }
 
-/// Releases dialog state.
+/// Releases dialog content component.
 ///
-/// List-only in this migration: it shows every published release and reports
-/// the highlighted one to the status bar on Enter. Downloading + self-replace
-/// (the old progress gauge) is intentionally deferred.
+/// Owns its selection and focus; release data lives in `OverlayHost`
+/// (the single owner), read here via entity — never duplicated.
 pub struct ReleasesView {
     surface: Entity<Surface>,
+    overlay_host: Entity<crate::overlay::OverlayHost>,
     focus: FocusHandle,
     selected: usize,
 }
 
 impl ReleasesView {
-    fn new(surface: Entity<Surface>, cx: &mut Context<Self>) -> Self {
+    fn new(
+        surface: Entity<Surface>,
+        overlay_host: Entity<crate::overlay::OverlayHost>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             surface,
+            overlay_host,
             focus: cx.focus_handle(),
             selected: 0,
         }
     }
 
     fn releases(&self, cx: &App) -> Vec<Release> {
-        self.surface.read(cx).releases.clone()
+        self.overlay_host.read(cx).releases_cloned()
     }
 
     fn loading(&self, cx: &App) -> bool {
-        self.surface.read(cx).releases_loading
+        self.overlay_host.read(cx).releases_loading()
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -84,18 +95,17 @@ impl ReleasesView {
                 cx.notify();
             }
             "enter" => {
-                let label = self
-                    .releases(cx)
-                    .get(self.selected)
-                    .map(release_label);
+                let label = self.releases(cx).get(self.selected).map(release_label);
                 window.prevent_default();
                 cx.stop_propagation();
                 window.close_dialog(cx);
                 if let Some(label) = label {
+                    let status_bar = self.surface.read(cx).status_bar.clone();
+                    status_bar.update(cx, |bar, cx| {
+                        bar.show_status_message(format!("selected {label}"), cx);
+                    });
                     self.surface.update(cx, |surface, cx| {
-                        surface.status.show_message(format!("selected {label}"));
                         window.focus(&surface.focus_handle, cx);
-                        cx.notify();
                     });
                 }
             }
@@ -121,69 +131,52 @@ impl Render for ReleasesView {
         let body: gpui::AnyElement = if loading && releases.is_empty() {
             div()
                 .w_full()
-                .py_6()
+                .py(theme::space::_6)
                 .text_center()
                 .text_sm()
-                .text_color(cx.theme().muted_foreground)
+                .text_color(role::muted())
                 .child("Fetching releases…")
                 .into_any_element()
         } else if releases.is_empty() {
             div()
                 .w_full()
-                .py_6()
+                .py(theme::space::_6)
                 .text_center()
                 .text_sm()
-                .text_color(cx.theme().muted_foreground)
+                .text_color(role::muted())
                 .child("No releases found")
                 .into_any_element()
         } else {
-            v_flex()
-                .gap_px()
+            gpui_component::v_flex()
+                .gap(theme::space::PX)
                 .children(releases.iter().enumerate().map(|(index, release)| {
-                    let is_selected = index == selected;
-                    div()
-                        .w_full()
-                        .px_2()
-                        .py_1()
-                        .rounded(cx.theme().radius)
-                        .when(is_selected, |this| {
-                            this.bg(cx.theme().accent)
-                                .text_color(cx.theme().accent_foreground)
-                        })
-                        .child(release_label(release))
+                    list_row(release_label(release), index == selected)
                 }))
                 .into_any_element()
         };
-        v_flex()
+        gpui_component::v_flex()
             .id("releases")
             .key_context("releases")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
-            .p_1()
-            .max_h(px(320.0))
+            .p(theme::space::_1)
+            .max_h(theme::size::OVERLAY_LIST_MAX_H)
             .overflow_hidden()
             .child(body)
     }
 }
 
-/// Open the releases dialog. Fetching is triggered separately via
-/// [`Surface::ensure_releases_fetch`] (which needs `&mut`, so it lives with
-/// the callers), keeping this builder free of synchronous entity access.
-pub fn open_releases(entity: Entity<Surface>, window: &mut Window, cx: &mut App) {
-    let focus_back = entity.clone();
-    window.open_dialog(cx, move |dialog, window, cx| {
-        let view = cx.new(|cx| ReleasesView::new(entity.clone(), cx));
+/// Open the releases dialog.
+pub fn open(entity: Entity<Surface>, window: &mut Window, cx: &mut App) {
+    Overlay::present(entity.clone(), window, cx, move |dialog, window, cx| {
+        let overlay_host = entity.read(cx).overlay_host.clone();
+        let view = cx.new(|cx| ReleasesView::new(entity.clone(), overlay_host, cx));
         let focus = view.read(cx).focus_handle(cx);
         window.defer(cx, move |window, cx| {
             focus.focus(window, cx);
         });
         dialog
-            .close_button(false)
-            .p_0()
             .title("Releases")
-            .on_close(window.listener_for(&focus_back, |surface, _, window, cx| {
-                window.focus(&surface.focus_handle, cx);
-            }))
             .content(move |content, _, _| content.child(view.clone()))
     });
 }
@@ -192,8 +185,6 @@ pub fn open_releases(entity: Entity<Surface>, window: &mut Window, cx: &mut App)
 mod tests {
     #[test]
     fn dialog_is_list_only_placeholder() {
-        // Download wiring is deferred; the dialog must exist and fetch must
-        // be constructible without a window.
         assert!(true);
     }
 }

@@ -26,7 +26,6 @@ use gpui::{
     SharedString, Subscription, Task, Window, div, prelude::*,
 };
 use gpui_component::{
-    ActiveTheme as _,
     highlighter::{Diagnostic, DiagnosticSeverity},
     input::{
         CompletionMenuPlacement, CompletionProvider, Editor, EditorState, HoverProvider, InputEvent,
@@ -821,13 +820,13 @@ impl Render for LuaSingleLineInput {
         let focused = self.is_focused(window, cx);
         div()
             .w_full()
-            .rounded(cx.theme().radius)
-            .bg(cx.theme().input_background())
+            .rounded(crate::theme::radius::SM)
+            .bg(crate::theme::role::input_bg())
             .border_1()
             .border_color(if focused {
-                cx.theme().ring
+                crate::theme::role::input_border_focus()
             } else {
-                cx.theme().border
+                crate::theme::role::input_border()
             })
             // Clicking anywhere in the frame focuses the text, like `Input`.
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {

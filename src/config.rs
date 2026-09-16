@@ -1,7 +1,7 @@
 use crate::overlay::{LuaAction, Screen};
 use crate::pty::{Event as PtyEvent, SshConnection};
-use crate::terminal::{SessionId, SplitDirection, Tab};
-use crate::{BuiltinAction, KeyAction, ResultExt, Surface};
+use crate::terminal::{SessionId, SplitDirection};
+use crate::{BuiltinAction, KeyAction, OpenLuaPrompt, OpenCommandPrompt, OpenRenamePrompt, ResultExt, ShowStatusMessage, Surface, ToggleFullscreen, ToggleStatusBar};
 use anyhow::{Context, Result};
 use gpui::{KeyDownEvent, Modifiers};
 use mlua::{FromLua, prelude::*};
@@ -18,6 +18,7 @@ use std::time::Duration;
 const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
 pub const LUA_MODULES: &[(&str, &str)] = &[("lua.keybind", include_str!("../resources/lua/keybind.lua"))];
 
+#[allow(unused_macros)]
 macro_rules! apply {
     ($this: ident.$field: ident, $table: expr) => {
         if let Ok(value) = $table.get(stringify!($field)).inspect_err(|e| tracing::error!(%e, "failed to get field `{}`", stringify!($field))) {
@@ -70,16 +71,10 @@ macro_rules! args {
 
 impl Surface {
     pub fn apply_config(&mut self) {
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_font_metrics(self.font_size, self.line_height);
-            if let Some(font_family) = self.font_family.as_deref() {
-                renderer.set_font_family(font_family);
-            }
-            renderer.evict_glyphs();
-        }
-        self.refresh_palette_commands();
-        // Rows/cols are driven by the GPUI layout (`sync_surface`), so there is
-        // no window size to poll here. Resizing happens on the next frame.
+        // Font metrics live in the terminal component; the renderer picks
+        // them up here. Rows/cols are driven by GPUI layout (`sync_surface`),
+        // palette/tabs sync to the bar every frame in `render`.
+        self.terminal.apply_font_metrics();
     }
 }
 
@@ -94,12 +89,15 @@ impl LuaUserData for Surface {
                     state |= KeyBinding::parse_mod(modifier)?;
                 }
                 let key = KeyBinding::parse_key(&key)?;
-                this.keymap
-                    .insert(KeyBinding { modifiers: state, key }, KeyAction::Custom(func.clone()));
+                this.input.keymap.insert(
+                    KeyBinding { modifiers: state, key },
+                    KeyAction::Custom(func.clone()),
+                );
             } else {
                 let (binding, func): (KeyBinding, LuaFunction) =
                     FromLuaMulti::from_lua_multi(args, lua)?;
-                this.keymap
+                this.input
+                    .keymap
                     .insert(binding, KeyAction::Custom(func));
             }
 
@@ -118,32 +116,43 @@ impl LuaUserData for Surface {
                             .collect::<LuaResult<Vec<_>>>()
                             .map(|names| (names, var_arg))
                     })?;
+                // Source of truth lives on Surface for sync Lua access;
+                // `render` syncs the copy into the StatusBar component.
                 this.registered_callbacks.push(LuaAction {
                     args,
                     is_var_arg,
                     name,
                     callback: func,
                 });
-                this.refresh_palette_commands();
                 Ok(())
             },
         );
         methods.add_method_mut("config", |lua, this, table: LuaTable| {
-            apply!(this.font_size, table, |font_size: f32| {
-                this.line_height = font_size * 1.1;
-                font_size
-            });
-            apply!(this.line_height, table, |line_height: f32| {
-                line_height * this.font_size
-            });
-            apply!(this.font_family, table);
-            apply!(this.fullscreen, table);
-            apply!(this.default_cwd, table);
-            apply!(this.action, table);
-            apply!(this.status_height, table, |status_height: f32| {
-                status_height.max(0.5)
-            });
-            this.ssh_sessions = util::collect_ssh_sessions(lua, &table);
+            if let Ok(font_size) = table.get::<f32>("font_size") {
+                this.terminal.line_height = font_size * 1.1;
+                this.terminal.font_size = font_size;
+            }
+            if let Ok(line_height) = table.get::<f32>("line_height") {
+                this.terminal.line_height = line_height * this.terminal.font_size;
+            }
+            if let Ok(font_family) = table.get::<Option<String>>("font_family") {
+                this.terminal.font_family = font_family;
+            }
+            if let Ok(fullscreen) = table.get::<bool>("fullscreen") {
+                this.fullscreen = fullscreen;
+            }
+            if let Ok(default_cwd) = table.get::<Option<PathBuf>>("default_cwd") {
+                this.workspace.default_cwd = default_cwd;
+            }
+            if let Ok(action) = table.get::<KeyBinding>("action") {
+                this.input.action = action;
+            }
+            if let Ok(status_height) = table.get::<f32>("status_height") {
+                // Owned synchronously by the terminal viewport (like the
+                // font metrics); `render` syncs a copy into the bar.
+                this.terminal.status_height = status_height.max(0.5);
+            }
+            this.workspace.ssh_sessions = util::collect_ssh_sessions(lua, &table);
 
             this.apply_config();
             Ok(())
@@ -174,12 +183,18 @@ impl LuaUserData for Surface {
         methods.add_function("attach", |lua, args: LuaMultiValue| {
             let (this, (session, tab)) = args!(args, lua, (SessionId, Option<usize>));
             callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
-                Ok(this.reattach_session(session, tab.unwrap_or(this.current_tab)))
+                Ok(this.reattach_session(session, tab.unwrap_or(this.workspace.current_tab)))
             })
         });
         methods.add_function("open_rename", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                this.open_rename_prompt();
+                let name = this
+                    .workspace
+                    .active_session()
+                    .and_then(|id| this.workspace.session_manager.session(id))
+                    .map(|s| s.title().to_owned())
+                    .unwrap_or_default();
+                this.queue_action(OpenRenamePrompt { name });
                 Ok(())
             })
         });
@@ -212,7 +227,11 @@ impl LuaUserData for Surface {
                 let Some(session) = session.or_else(|| this.active_session()) else {
                     return Ok(false);
                 };
-                let Some(term_session) = this.session_manager.session_mut(session) else {
+                let Some(term_session) = this
+                    .workspace
+                    .session_manager
+                    .session_mut(session)
+                else {
                     return Ok(false);
                 };
                 term_session.pty.kill();
@@ -274,7 +293,7 @@ impl LuaUserData for Surface {
                     let Some(active) = this.active_session() else {
                         return Ok(false);
                     };
-                    this.session_manager.send_text(active, &text);
+                    this.workspace.session_manager.send_text(active, &text);
                     Ok(true)
                 }
             })
@@ -284,7 +303,7 @@ impl LuaUserData for Surface {
             callable_action!(lua, this => {
                 let text = text.clone();
                 move |this: &mut Self| -> LuaResult<bool> {
-                    this.session_manager.send_text(session, &text);
+                    this.workspace.session_manager.send_text(session, &text);
                     Ok(true)
                 }
             })
@@ -303,38 +322,40 @@ impl LuaUserData for Surface {
         });
         methods.add_function("open_command", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                this.open_status_prompt();
+                this.queue_action(OpenCommandPrompt);
                 Ok(())
             })
         });
         methods.add_function("open_lua", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                this.open_lua_prompt();
+                this.queue_action(OpenLuaPrompt);
                 Ok(())
             })
         });
         methods.add_function("toggle_fullscreen", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<bool> {
-                // Applied on the next frame: `Surface::render` owns the GPUI
-                // `Window`, which Lua callbacks cannot reach directly.
-                this.fullscreen = !this.fullscreen;
-                this.pending_fullscreen_toggle = true;
-                Ok(this.fullscreen)
+                // The `ToggleFullscreen` handler flips `fullscreen` and the
+                // window together; predict the post-toggle value (the queue
+                // drains in order before any other Lua runs).
+                this.queue_action(ToggleFullscreen);
+                Ok(!this.fullscreen)
             })
         });
         methods.add_function("toggle_decorations", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
                 // GPUI manages window chrome itself; there is no runtime
                 // toggle. Stay honest instead of silently doing nothing.
-                this.status
-                    .show_message("window decorations toggle is not supported on GPUI".to_string());
+                // No window/cx here (Lua) — queue for `render` to dispatch.
+                this.queue_action(ShowStatusMessage {
+                    text: "window decorations toggle is not supported on GPUI".to_string(),
+                });
                 Ok(())
             })
         });
         methods.add_function("toggle_status_bar", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                this.status_bar_hidden = !this.status_bar_hidden;
-                this.resize_tab();
+                // No window/cx here — queue; the handler flips synchronously.
+                this.queue_action(ToggleStatusBar);
                 Ok(())
             })
         });
@@ -370,36 +391,16 @@ impl LuaUserData for Surface {
                 callable_action!(lua, this => {
                     let dir = dir.clone();
                     move |this: &mut Self| -> LuaResult<SessionId> {
-                        let session = this.session_manager.create_session(
-                            this.terminal_rows().max(1),
-                            this.cols.max(1),
-                            dir
-                                .as_deref()
-                                .map(Path::new)
-                                .or(this.default_cwd.as_deref()),
-                        )?;
-                        let target = tab
-                            .map(|tab| tab.min(this.tabs.len().saturating_sub(1)))
-                            .unwrap_or(this.current_tab);
-                        let tab = &mut this.tabs[target];
-                        let placed = if let Some(tab) = tab {
-                            let anchor = parent
-                                .filter(|anchor| tab.sessions().contains(anchor))
-                                .or_else(|| tab.active_session());
-                            match anchor {
-                                Some(anchor) => tab.split_on(anchor, direction, session),
-                                None => false,
-                            }
-                        } else {
-                            *tab = Some(Tab::new(session));
-                            true
-                        };
-                        if !placed {
-                            this.detached_sessions.push(session);
-                        }
-                        this.wheel_remainder = 0.0;
-                        this.resize_tab();
-                        Ok(session)
+                        let cols = this.terminal.cols;
+                        let rows = this.terminal_rows();
+                        this.workspace.create_session_placed(
+                            dir.as_deref().map(Path::new),
+                            tab,
+                            direction,
+                            parent,
+                            cols,
+                            rows,
+                        ).map_err(|e| mlua::Error::external(e))
                     }
                 })
             },
@@ -407,18 +408,22 @@ impl LuaUserData for Surface {
     }
 
     fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
-        fields.add_field_method_get("current_tab", |_, this| Ok(this.current_tab));
-        fields.add_field_method_get("font_size", |_, this| Ok(this.font_size));
-        fields.add_field_method_get("status_height", |_, this| Ok(this.status_height));
-        fields.add_field_method_get("line_height", |_, this| Ok(this.line_height));
-        fields.add_field_method_get("font_family", |_, this| Ok(this.font_family.clone()));
-        fields.add_field_method_get("rows", |_, this| Ok(this.rows));
-        fields.add_field_method_get("cols", |_, this| Ok(this.cols));
+        fields.add_field_method_get("current_tab", |_, this| Ok(this.workspace.current_tab));
+        fields.add_field_method_get("font_size", |_, this| Ok(this.terminal.font_size));
+        fields.add_field_method_get("status_height", |_, this| {
+            Ok(this.terminal.status_height)
+        });
+        fields.add_field_method_get("line_height", |_, this| Ok(this.terminal.line_height));
+        fields.add_field_method_get("font_family", |_, this| {
+            Ok(this.terminal.font_family.clone())
+        });
+        fields.add_field_method_get("rows", |_, this| Ok(this.terminal.rows));
+        fields.add_field_method_get("cols", |_, this| Ok(this.terminal.cols));
         fields.add_field_method_get("active_session", |lua, this| {
             this.active_session().into_lua(lua)
         });
         fields.add_field_method_get("tab_count", |_, this| {
-            Ok(this.tabs.iter().flatten().count())
+            Ok(this.workspace.tabs.iter().flatten().count())
         });
         fields.add_field_method_get("detached_sessions", |lua, this| {
             let table = lua.create_table()?;
@@ -429,7 +434,7 @@ impl LuaUserData for Surface {
         });
         fields.add_field_method_get("ssh_sessions", |lua, this| {
             let table = lua.create_table()?;
-            for (index, session) in this.ssh_sessions.iter().enumerate() {
+            for (index, session) in this.workspace.ssh_sessions.iter().enumerate() {
                 let entry = lua.create_table()?;
                 entry.raw_set("name", session.name.clone())?;
                 entry.raw_set("user_name", session.user_name.clone())?;
@@ -440,7 +445,7 @@ impl LuaUserData for Surface {
         });
 
         fields.add_field_method_get("sessions", |lua, this| {
-            let tabs = this.tabs.iter().filter_map(|tab| {
+            let tabs = this.workspace.tabs.iter().filter_map(|tab| {
                 lua.create_sequence_from(tab.as_ref()?.sessions()).ok()
             });
             lua.create_sequence_from(tabs)
@@ -485,8 +490,8 @@ pub fn load(this: &mut Surface) {
     _ = util::create_config_if_missing(&path)
         .inspect_err(|e| tracing::error!(%e, "failed to create default config"));
 
-    this.ssh_sessions.clear();
-    this.keymap = Surface::default_keymap();
+    this.workspace.ssh_sessions.clear();
+    this.input.keymap = Surface::default_keymap();
     this.registered_callbacks.clear();
     let lua = this.lua.clone();
     with_env(this, |_| {
@@ -494,17 +499,22 @@ pub fn load(this: &mut Surface) {
         chunk.exec()
     })
     .into_log();
-    let action_key = this.action.clone();
+    let action_key = this.input.action.clone();
     let overridden = matches!(
-        this.keymap.get(&action_key),
+        this.input.keymap.get(&action_key),
         Some(KeyAction::Custom(_))
     );
     if !overridden {
-        this.keymap
+        this.input
+            .keymap
             .retain(|_, v| !matches!(v, KeyAction::Builtin(BuiltinAction::Action)));
-        this.keymap.insert(action_key, KeyAction::Builtin(BuiltinAction::Action));
+        this.input
+            .keymap
+            .insert(action_key, KeyAction::Builtin(BuiltinAction::Action));
     }
-    this.refresh_palette_commands();
+    // Palette/tabs/ssh sync to the StatusBar every frame in `render`; no
+    // explicit refresh needed here (keeps `load` synchronous for the file
+    // watcher and Lua without a window/cx).
 }
 
 pub fn with_env<R>(this: &mut Surface, f: impl FnOnce(LuaAnyUserData) -> LuaResult<R>) -> Result<R> {

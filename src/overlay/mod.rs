@@ -1,16 +1,17 @@
 mod detached;
+mod host;
+mod host_entity;
 mod opener;
 mod palette;
 mod releases;
+mod search;
 mod sessions;
 
-pub use detached::open_detached;
 pub(crate) use detached::detached_entries;
-pub use opener::open_opener;
-#[allow(unused_imports)]
-pub use palette::{complete_command_name, filter_commands, open_palette};
-pub use releases::{fetch_releases_async, open_releases};
-pub use sessions::open_sessions;
+pub use host::Overlay;
+pub use host_entity::OverlayHost;
+pub use palette::{complete_command_name, filter_commands};
+pub use releases::fetch_releases_async;
 pub(crate) use sessions::session_entries;
 
 use std::rc::Rc;
@@ -23,8 +24,6 @@ use crate::{ResultExt, Surface, config};
 ///
 /// Kept from the ratatui implementation so Lua (`py:open_*`), the status
 /// `:sessions`-style commands, and keybindings keep working unchanged.
-/// Each variant now opens a GPUI dialog instead of switching a fullscreen
-/// terminal screen.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
 pub enum Screen {
     CmdPalette,
@@ -32,41 +31,6 @@ pub enum Screen {
     Detached,
     Releases,
     Opener,
-}
-
-/// Open the dialog for `screen` on `window`.
-///
-/// `surface` is a plain borrow for snapshotting dialog data — never an entity
-/// access: this runs from render and from key handling, and key handling runs
-/// under the surface's update lease, where any `Entity<Surface>` read/update
-/// would panic ("already being updated"). Entity handles travel only into
-/// deferred closures (dialog confirm callbacks), which run lease-free.
-pub fn open_screen(
-    screen: Screen,
-    surface: &mut Surface,
-    entity: Entity<Surface>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    // Every dialog takes owned snapshots, never entity access: this runs from
-    // render (lease-free) and from key handling (leased), and only the owned
-    // form is safe in both.
-    match screen {
-        Screen::CmdPalette => open_palette(surface.palette_commands.clone(), entity, window, cx),
-        Screen::Sessions => open_sessions(session_entries(surface), entity, window, cx),
-        Screen::Detached => open_detached(
-            detached_entries(surface),
-            surface.current_tab,
-            entity,
-            window,
-            cx,
-        ),
-        Screen::Releases => {
-            surface.ensure_releases_fetch();
-            open_releases(entity, window, cx);
-        }
-        Screen::Opener => open_opener(entity, window, cx),
-    }
 }
 
 #[derive(Clone)]
@@ -127,22 +91,36 @@ impl Eq for Cmd {}
 
 /// All commands currently available: builtins, one `ssh: <name>` per
 /// configured SSH session, and every Lua-registered action.
-pub fn commands_for(surface: &Surface) -> Vec<Cmd> {
+///
+/// Takes explicit slices so callers (Workspace, StatusBar) don't need to
+/// hand over the whole `Surface`.
+pub fn commands_for(
+    ssh_sessions: &[crate::pty::SshConnection],
+    registered_callbacks: &[LuaAction],
+) -> Vec<Cmd> {
     let mut commands = builtin_commands();
-    commands.extend(commands_from_ssh_sessions(&surface.ssh_sessions));
-    commands.extend(commands_from_lua_actions(&surface.registered_callbacks));
+    commands.extend(commands_from_ssh_sessions(ssh_sessions));
+    commands.extend(commands_from_lua_actions(registered_callbacks));
+    commands
+}
+
+/// Build command list from parts owned by StatusBar and Workspace.
+pub fn commands_for_surface(
+    _status: &crate::status::StatusBar,
+    registered_callbacks: &[LuaAction],
+    _lua: &mlua::Lua,
+    ssh_sessions: &[crate::pty::SshConnection],
+) -> Vec<Cmd> {
+    let mut commands = builtin_commands();
+    commands.extend(commands_from_ssh_sessions(ssh_sessions));
+    commands.extend(commands_from_lua_actions(registered_callbacks));
     commands
 }
 
 /// Run a `:command args…` line from the status prompt. Returns `false` when
 /// no command matches `name`, so the caller can report `unknown command`.
-///
-/// The lookup runs synchronously against `surface`; the action itself is
-/// deferred past the current dispatch (key handling holds the surface lease,
-/// so running it inline would panic). Visually this is identical — it runs
-/// before the next paint.
 pub fn execute_command(
-    surface: &Surface,
+    commands: &[Cmd],
     entity: Entity<Surface>,
     window: &mut Window,
     cx: &mut App,
@@ -156,8 +134,7 @@ pub fn execute_command(
         return false;
     }
     let args = split.map(str::to_string).collect::<Vec<_>>();
-    let action = surface
-        .palette_commands
+    let action = commands
         .iter()
         .find_map(|cmd| (cmd.name == name).then(|| cmd.action.clone()));
     let Some(action) = action else {
@@ -174,7 +151,7 @@ fn builtin_commands() -> Vec<Cmd> {
         Cmd::new("close", [Arg::new("tab")], |surface, _, cx, args| {
             surface.update(cx, |surface, cx| {
                 let Some(tab) = args.first() else {
-                    if let Some(session) = surface.active_session() {
+                    if let Some(session) = surface.workspace.active_session() {
                         surface.close_session(session);
                     }
                     cx.notify();
@@ -186,7 +163,12 @@ fn builtin_commands() -> Vec<Cmd> {
                 if tab == 0 || tab > 9 {
                     return;
                 }
-                let Some(tab) = surface.tabs.get(tab - 1).and_then(Option::as_ref) else {
+                let Some(tab) = surface
+                    .workspace
+                    .tabs
+                    .get(tab - 1)
+                    .and_then(Option::as_ref)
+                else {
                     return;
                 };
                 let Some(session) = tab.sessions().first().copied() else {
@@ -198,14 +180,14 @@ fn builtin_commands() -> Vec<Cmd> {
         }),
         Cmd::new("next", [], |surface, _, cx, _| {
             surface.update(cx, |surface, cx| {
-                let index = surface.next_tab_index();
+                let index = surface.workspace.next_tab_index();
                 surface.switch_tab(index);
                 cx.notify();
             });
         }),
         Cmd::new("prev", [], |surface, _, cx, _| {
             surface.update(cx, |surface, cx| {
-                let index = surface.previous_tab_index();
+                let index = surface.workspace.previous_tab_index();
                 surface.switch_tab(index);
                 cx.notify();
             });
@@ -226,8 +208,8 @@ fn builtin_commands() -> Vec<Cmd> {
             });
         }),
         Cmd::new("sessions", [], |surface, window, cx, _| {
-            let entries = session_entries(&surface.read(cx));
-            open_sessions(entries, surface.clone(), window, cx);
+            let entries = session_entries(&surface.read(cx).workspace);
+            sessions::open(entries, surface.clone(), window, cx);
         }),
         Cmd::new("detach", [], |surface, _, cx, _| {
             surface.update(cx, |surface, cx| {
@@ -241,8 +223,11 @@ fn builtin_commands() -> Vec<Cmd> {
                 if name.is_empty() {
                     return;
                 }
-                if let Some(session) = surface.active_session()
-                    && let Some(session) = surface.session_manager.session_mut(session)
+                if let Some(session) = surface.workspace.active_session()
+                    && let Some(session) = surface
+                        .workspace
+                        .session_manager
+                        .session_mut(session)
                 {
                     session.rename(name);
                 }
@@ -260,22 +245,25 @@ fn builtin_commands() -> Vec<Cmd> {
                 if tab == 0 || tab > 9 {
                     return;
                 }
-                if let Some(session) = surface.active_session() {
+                if let Some(session) = surface.workspace.active_session() {
                     surface.move_session_to_tab(session, tab - 1);
                 }
                 cx.notify();
             });
         }),
         Cmd::new("attach", [], |surface, window, cx, _| {
-            let entries = detached_entries(&surface.read(cx));
-            let current_tab = surface.read(cx).current_tab;
-            open_detached(entries, current_tab, surface.clone(), window, cx);
+            let entries = detached_entries(&surface.read(cx).workspace);
+            let current_tab = surface.read(cx).workspace.current_tab;
+            detached::open(entries, current_tab, surface.clone(), window, cx);
         }),
         Cmd::new("releases", [], |surface, window, cx, _| {
-            surface.update(cx, |surface, _| {
-                surface.ensure_releases_fetch();
+            surface.update(cx, |surface, cx| {
+                let tx = surface.event_tx.clone();
+                surface
+                    .overlay_host
+                    .update(cx, |host, _| host.ensure_releases_fetch(tx));
             });
-            open_releases(surface.clone(), window, cx);
+            releases::open(surface.clone(), window, cx);
         }),
         Cmd::new("ssh", [Arg::new("session")], |surface, _, cx, args| {
             surface.update(cx, |surface, cx| {
@@ -283,6 +271,7 @@ fn builtin_commands() -> Vec<Cmd> {
                     return;
                 };
                 let Some(connection) = surface
+                    .workspace
                     .ssh_sessions
                     .iter()
                     .find(|s| s.name == *name)
@@ -295,13 +284,12 @@ fn builtin_commands() -> Vec<Cmd> {
             });
         }),
         Cmd::new("reload-config", [], |surface, _, cx, _| {
-            surface.update(cx, |surface, cx| {
+            surface.update(cx, |surface, _cx| {
                 config::load(surface);
-                cx.notify();
             });
         }),
         Cmd::new("open-in", [], |surface, window, cx, _| {
-            open_opener(surface.clone(), window, cx);
+            opener::open(surface.clone(), window, cx);
         }),
     ]
 }
@@ -362,4 +350,15 @@ pub struct LuaAction {
     pub is_var_arg: bool,
     pub name: String,
     pub callback: mlua::Function,
+}
+
+impl Clone for LuaAction {
+    fn clone(&self) -> Self {
+        Self {
+            args: self.args.clone(),
+            is_var_arg: self.is_var_arg,
+            name: self.name.clone(),
+            callback: self.callback.clone(),
+        }
+    }
 }
