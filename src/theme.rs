@@ -3,8 +3,14 @@
 //! All painted chrome (status bar, completion menu, overlay lists, input
 //! frames) should use these constants so colors and spacing can be tuned in
 //! one place without touching component logic.
+//!
+//! [`PyonjiTheme`] additionally publishes the palette as a GPUI global (see
+//! [`PyonjiActiveTheme`]) and projects the shared subset onto the kept
+//! `gpui-component` theme plus the `gpui-base` layer, so the styled views we
+//! still borrow (`Root` dialog stack, `Command` palette, `Input`/`Editor`
+//! views) follow the same palette.
 
-use gpui::{Pixels, Rgba, px, rgb};
+use gpui::{App, Global, Hsla, Pixels, Rgba, px, rgb};
 
 /// Catppuccin Mocha palette (hex without alpha).
 #[allow(dead_code)]
@@ -136,5 +142,85 @@ pub mod role {
 
     pub fn menu_border() -> Rgba {
         paint(color::SURFACE0)
+    }
+}
+
+/// The palette as a GPUI global, built from the [`color`] constants above.
+///
+/// Plain `role::*` fns remain the call-site API for Pyonji-owned chrome;
+/// this struct exists so the palette can also be projected onto the kept
+/// component theme (and through it the base layer) in one place.
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct PyonjiTheme {
+    pub background: Hsla,
+    pub surface: Hsla,
+    pub foreground: Hsla,
+    pub muted: Hsla,
+    pub muted_foreground: Hsla,
+    pub accent: Hsla,
+    pub accent_foreground: Hsla,
+    pub border: Hsla,
+    pub message: Hsla,
+    pub message_foreground: Hsla,
+}
+
+impl Global for PyonjiTheme {}
+
+impl PyonjiTheme {
+    pub fn dark() -> Self {
+        let hex = |hex: u32| gpui::rgb_to_hsla(gpui::rgb(hex));
+        Self {
+            background: hex(color::WINDOW),
+            surface: hex(color::BASE),
+            foreground: hex(color::TEXT),
+            muted: hex(color::SURFACE0),
+            muted_foreground: hex(color::OVERLAY2),
+            accent: hex(color::LAVENDER),
+            accent_foreground: hex(color::BASE),
+            border: hex(color::SURFACE0),
+            message: hex(color::MAUVE),
+            message_foreground: hex(color::CRUST),
+        }
+    }
+
+    /// Install the theme and project the shared subset onto the kept
+    /// component theme (dialog/`Command`/`Input` chrome) plus the base
+    /// layer underneath it.
+    ///
+    /// Call after `gpui_component::init(cx)` + `Theme::change(...)`, which
+    /// own the initial global setup.
+    pub fn apply(cx: &mut App) {
+        let theme = Self::dark();
+        cx.set_global(theme.clone());
+
+        let component = gpui_component::Theme::global_mut(cx);
+        component.background = theme.surface;
+        component.foreground = theme.foreground;
+        component.accent = theme.accent;
+        component.accent_foreground = theme.accent_foreground;
+        component.muted = theme.muted;
+        component.muted_foreground = theme.muted_foreground;
+        component.border = theme.border;
+        component.popover = theme.surface;
+        component.popover_foreground = theme.foreground;
+        gpui_component::Theme::sync_base(cx);
+    }
+}
+
+/// Access to the active [`PyonjiTheme`] through an application context.
+///
+/// Mirrors `gpui-component`'s `ActiveTheme`: implemented for `App` and
+/// reached through deref from `Context`/`Window`, so `cx.pyonji()` works in
+/// `render` and event handlers.
+#[allow(dead_code)]
+pub trait PyonjiActiveTheme {
+    fn theme(&self) -> &PyonjiTheme;
+}
+
+impl PyonjiActiveTheme for App {
+    #[inline(always)]
+    fn theme(&self) -> &PyonjiTheme {
+        self.global::<PyonjiTheme>()
     }
 }

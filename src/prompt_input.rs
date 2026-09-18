@@ -15,7 +15,11 @@ use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, Render,
     SharedString, Subscription, Window, div, prelude::*,
 };
-use gpui_component::input::{Input, InputEvent, InputState};
+// Engine (state/events) comes from the base crate; only the rendered `Input`
+// view is still the styled component one (borderless/chromeless here, framed
+// by `prompt_frame`).
+use gpui_base::input::{InputEvent, InputState};
+use gpui_component::input::Input;
 
 /// Events emitted by [`CommandPrompt`].
 #[derive(Debug, Clone)]
@@ -67,7 +71,7 @@ pub struct CommandPrompt {
 impl CommandPrompt {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Command — Enter to run")
+            InputState::new(window, cx).placeholder("Command - Enter to run")
         });
         let subscription = cx.subscribe_in(&state, window, Self::on_input_event);
         Self {
@@ -310,7 +314,7 @@ mod tests {
             });
         });
         vcx.run_until_parked();
-        vcx.dispatch_action(gpui_component::input::Enter {
+        vcx.dispatch_action(gpui_base::input::Enter {
             secondary: false,
             shift: false,
         });

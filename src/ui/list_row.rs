@@ -1,11 +1,12 @@
-use gpui::{Context, IntoElement, Render, SharedString, Window, div, prelude::*};
+use gpui::{IntoElement, SharedString, div, prelude::*};
 
 use crate::theme::{self, role};
 
 /// One selectable row used by completion menus and overlay lists.
 ///
-/// Owns its label and selection so overlay lists and menus share one
-/// component instead of ad-hoc divs.
+/// Snapshot view (no own state): constructed per-frame from entity state,
+/// like `ChatHistory` in t3chat. Holds an owned label + selection flag.
+#[derive(IntoElement)]
 pub struct ListRow {
     label: SharedString,
     selected: bool,
@@ -20,23 +21,23 @@ impl ListRow {
     }
 }
 
-impl Render for ListRow {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        list_row(self.label.clone(), self.selected)
+impl RenderOnce for ListRow {
+    fn render(self, _window: &mut gpui::Window, _cx: &mut gpui::App) -> impl IntoElement {
+        div()
+            .w_full()
+            .px(theme::space::_2)
+            .py(theme::space::_1)
+            .rounded(theme::radius::SM)
+            .when(self.selected, |this| {
+                this.bg(role::accent()).text_color(role::accent_fg())
+            })
+            .when(!self.selected, |this| this.text_color(role::text()))
+            .child(self.label)
     }
 }
 
 /// One selectable row used by completion menus and overlay lists.
-pub fn list_row(label: impl Into<SharedString>, selected: bool) -> impl IntoElement {
-    let label = label.into();
-    div()
-        .w_full()
-        .px(theme::space::_2)
-        .py(theme::space::_1)
-        .rounded(theme::radius::SM)
-        .when(selected, |this| {
-            this.bg(role::accent()).text_color(role::accent_fg())
-        })
-        .when(!selected, |this| this.text_color(role::text()))
-        .child(label)
+#[allow(dead_code)]
+pub fn list_row(label: impl Into<SharedString>, selected: bool) -> ListRow {
+    ListRow::new(label, selected)
 }

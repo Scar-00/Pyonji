@@ -1,17 +1,24 @@
-//! Single-line Lua input with built-in Lua LSP support.
+//! Single-line Lua input with Lua-aware helpers.
 //!
-//! The shared editing engine only offers language-server features on the
-//! multi-line [`EditorState`], while [`InputState`] is strictly single-line
-//! with no LSP. This module bridges the gap: an [`EditorState`] locked to
-//! Lua and forced to a single line, with completion / hover / diagnostics
-//! providers backed directly by an embedded `mlua` state. No external
-//! `lua-language-server` binary is needed.
+//! Built on the shared single-line engine ([`InputState`] + the borderless
+//! `Input` view), exactly like the command/rename prompts: the engine owns
+//! text, cursor, selection, IME, clipboard and key handling, while an
+//! embedded `mlua` state ([`LuaLspStore`]) backs evaluation plus pure
+//! completion/hover/syntax helpers. No external `lua-language-server`
+//! binary is needed.
 //!
 //! ```ignore
 //! let input = cx.new(|cx| LuaSingleLineInput::new(window, cx));
 //! // ... later, in `Render`:
 //! div().child(input.clone())
 //! ```
+//!
+//! Differences from the previous `Editor`-based version: the single-line
+//! engine has no LSP slots, so there is no built-in completion popover,
+//! hover card, or inline diagnostic display. The host (status bar) already
+//! renders its own completion menu from [`lua_match_labels`] and disabled
+//! the built-in popover anyway; [`check_syntax`] and [`LuaLspStore::diagnostic`]
+//! remain as pure APIs for host-driven error display.
 //!
 //! Ported from the prototype with two additions (`LuaLspStore::new_with_lua`
 //! for sharing host state, `SubmitRequested` for host-owned evaluation). The
@@ -23,18 +30,18 @@ use std::{ops::Range, rc::Rc};
 
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, Render,
-    SharedString, Subscription, Task, Window, div, prelude::*,
+    SharedString, Subscription, Window, div, prelude::*,
 };
-use gpui_component::{
-    highlighter::{Diagnostic, DiagnosticSeverity},
-    input::{
-        CompletionMenuPlacement, CompletionProvider, Editor, EditorState, HoverProvider, InputEvent,
-        Position, Rope, RopeExt as _,
-    },
+use gpui_component::input::Input;
+// Engine (state, events) comes from the base crate; only the rendered `Input`
+// view above is still the styled component one (borderless/chromeless here,
+// framed by the host div). Completion/hover/syntax helpers below are plain
+// functions over the shared Lua state, not editor LSP slots.
+use gpui_base::input::{
+    Diagnostic, DiagnosticSeverity, InputEvent, InputState, Position, Rope, RopeExt as _,
 };
 use lsp_types::{
-    CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, Documentation,
-    Hover, HoverContents, InlineCompletionContext, InlineCompletionResponse, MarkupContent,
+    CompletionItem, CompletionItemKind, Documentation, Hover, HoverContents, MarkupContent,
     MarkupKind,
 };
 use mlua::{Lua, MultiValue, Table, Value};
@@ -498,9 +505,9 @@ fn lua_hover(lua: &Lua, text: &Rope, offset: usize) -> Option<Hover> {
 /// mlua-backed language support for the single-line Lua input.
 ///
 /// Held in an `Rc` and shared between the [`LuaSingleLineInput`] view (for
-/// diagnostics and evaluation) and the editor's LSP slots (for completion
-/// and hover). Everything runs synchronously on the UI thread against the
-/// embedded Lua state, so there is no server process to manage.
+/// evaluation) and the host's own completion menu (via [`lua_match_labels`]
+/// and [`LuaLspStore::lua`]). Everything runs synchronously on the UI thread
+/// against the embedded Lua state, so there is no server process to manage.
 pub struct LuaLspStore {
     lua: Lua,
 }
@@ -545,66 +552,6 @@ impl Default for LuaLspStore {
     }
 }
 
-impl CompletionProvider for LuaLspStore {
-    fn completions(
-        &self,
-        text: &Rope,
-        offset: usize,
-        _trigger: CompletionContext,
-        _window: &mut Window,
-        _cx: &mut App,
-    ) -> Task<anyhow::Result<CompletionResponse>> {
-        let offset = offset.min(text.len());
-        let before = text.slice(..offset).to_string();
-        let (_, prefix) = split_completion_target(&before);
-        let prefix_start = offset - prefix.len();
-        let mut items = lua_completions(&self.lua, &before);
-        // Replace only the unfinished name so `table.ins` completes to
-        // `table.insert` instead of clobbering the table path.
-        let range = lsp_types::Range {
-            start: text.offset_to_position(prefix_start),
-            end: text.offset_to_position(offset),
-        };
-        for item in &mut items {
-            item.text_edit = Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
-                range,
-                new_text: item.label.clone(),
-            }));
-        }
-        Task::ready(Ok(CompletionResponse::Array(items)))
-    }
-
-    fn inline_completion(
-        &self,
-        _rope: &Rope,
-        _offset: usize,
-        _trigger: InlineCompletionContext,
-        _window: &mut Window,
-        _cx: &mut App,
-    ) -> Task<anyhow::Result<InlineCompletionResponse>> {
-        Task::ready(Ok(InlineCompletionResponse::Array(vec![])))
-    }
-
-    fn is_completion_trigger(&self, _offset: usize, new_text: &str, _cx: &mut App) -> bool {
-        !new_text.is_empty()
-            && new_text
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':'))
-    }
-}
-
-impl HoverProvider for LuaLspStore {
-    fn hover(
-        &self,
-        text: &Rope,
-        offset: usize,
-        _window: &mut Window,
-        _cx: &mut App,
-    ) -> Task<anyhow::Result<Option<Hover>>> {
-        Task::ready(Ok(lua_hover(&self.lua, text, offset)))
-    }
-}
-
 /// Result of pressing Enter in a [`LuaSingleLineInput`].
 #[derive(Debug, Clone)]
 pub struct LuaSubmit {
@@ -630,14 +577,13 @@ pub enum LuaInputEvent {
 
 /// A single-line text input for Lua with built-in LSP support.
 ///
-/// Backed by an [`EditorState`] configured for Lua (`language("lua")`,
-/// `submit_on_enter(true)`, no line numbers / folding / indent guides /
-/// wrapping / search) so it gets tree-sitter highlighting plus the
-/// completion, hover, and diagnostics of [`LuaLspStore`]. Newlines can never
-/// survive: Enter submits instead of inserting one, and pasted line breaks
-/// are flattened to spaces on change.
+/// Backed by a single-line [`InputState`]; the [`LuaLspStore`] supplies Lua
+/// evaluation plus completion/hover/syntax helpers consumed by the host's
+/// own menu and (via [`LuaLspStore::diagnostic`]) error display. Newlines
+/// can never survive: Enter submits instead of inserting one, and pasted
+/// line breaks are flattened to spaces on change.
 pub struct LuaSingleLineInput {
-    state: Entity<EditorState>,
+    state: Entity<InputState>,
     lsp: Rc<LuaLspStore>,
     evaluate_on_enter: bool,
     _subscriptions: Vec<Subscription>,
@@ -663,28 +609,10 @@ impl LuaSingleLineInput {
         cx: &mut Context<Self>,
     ) -> Self {
         let lsp = Rc::new(LuaLspStore::new_with_lua(lua));
-        let completion: Rc<dyn CompletionProvider> = lsp.clone();
-        let hover: Rc<dyn HoverProvider> = lsp.clone();
         let state = cx.new(|cx| {
-            EditorState::new(window, cx)
-                .language("lua")
-                .line_number(false)
-                .folding(false)
-                .indent_guides(false)
-                .soft_wrap(false)
-                .searchable(false)
-                .submit_on_enter(true)
-                .placeholder("Lua expression — Enter to run")
+            InputState::new(window, cx).placeholder("Lua expression — Enter to run")
         });
-        state.update(cx, |state, cx| {
-            state.lsp_mut().completion_provider = Some(completion);
-            state.lsp_mut().hover_provider = Some(hover);
-            // The bar is docked at the bottom of the window: open the
-            // completion list above the input so it is not clipped.
-            state.lsp_mut().completion_menu.placement = CompletionMenuPlacement::Above;
-            cx.notify();
-        });
-        let _subscriptions = vec![cx.subscribe_in(&state, window, Self::on_editor_event)];
+        let _subscriptions = vec![cx.subscribe_in(&state, window, Self::on_input_event)];
         Self {
             state,
             lsp,
@@ -699,9 +627,9 @@ impl LuaSingleLineInput {
         self.evaluate_on_enter
     }
 
-    fn on_editor_event(
+    fn on_input_event(
         &mut self,
-        state: &Entity<EditorState>,
+        state: &Entity<InputState>,
         event: &InputEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -709,22 +637,11 @@ impl LuaSingleLineInput {
         match event {
             InputEvent::Change => {
                 // `set_value` below does not re-emit, so this cannot recurse.
-                let text = state.read(cx).text().to_string();
+                let text = state.read(cx).value().to_string();
                 if text.contains(['\n', '\r']) {
                     let cleaned: SharedString = flatten_newlines(&text).into();
                     state.update(cx, |state, cx| state.set_value(cleaned, window, cx));
                 }
-                let diagnostic = state.read(cx).text().clone();
-                let diagnostic = check_syntax(&self.lsp.lua, &diagnostic);
-                state.update(cx, |state, cx| {
-                    if let Some(set) = state.diagnostics_mut() {
-                        set.clear();
-                        if let Some(diagnostic) = diagnostic {
-                            set.extend([diagnostic]);
-                        }
-                    }
-                    cx.notify();
-                });
                 cx.emit(LuaInputEvent::Change);
             }
             InputEvent::PressEnter { shift: false, .. } => {
@@ -752,8 +669,8 @@ impl LuaSingleLineInput {
         }
     }
 
-    /// The underlying editor state, for advanced use (selection, focus, …).
-    pub fn editor(&self) -> &Entity<EditorState> {
+    /// The underlying input state, for advanced use (selection, focus, …).
+    pub fn state(&self) -> &Entity<InputState> {
         &self.state
     }
 
@@ -790,17 +707,6 @@ impl LuaSingleLineInput {
         self.state.update(cx, |state, cx| state.focus(window, cx));
     }
 
-    /// Drop the editor's built-in completion popover. Hosts that render
-    /// their own menu (like the status bar, which shares one menu design
-    /// across Lua and command modes) call this once; hover, diagnostics,
-    /// and evaluation are unaffected.
-    pub fn disable_builtin_completion(&self, cx: &mut App) {
-        self.state.update(cx, |state, cx| {
-            state.lsp_mut().completion_provider = None;
-            cx.notify();
-        });
-    }
-
     /// Whether the input currently holds keyboard focus.
     pub fn is_focused(&self, window: &Window, cx: &App) -> bool {
         self.state.read(cx).focus_handle(cx).is_focused(window)
@@ -833,7 +739,11 @@ impl Render for LuaSingleLineInput {
                 this.focus(window, cx);
                 cx.notify();
             }))
-            .child(Editor::new(&self.state).px_1().text_sm().appearance(false).bordered(false))
+            .child(
+                div()
+                    .flex_1()
+                    .child(Input::new(&self.state).appearance(false).bordered(false).text_sm()),
+            )
     }
 }
 
@@ -843,31 +753,12 @@ mod tests {
 
     #[gpui::test]
     fn single_line_enforces_newlines_and_submits(cx: &mut gpui::TestAppContext) {
-        use gpui_component::input::Enter;
+        use gpui_base::input::Enter;
         use std::{cell::RefCell, rc::Rc};
 
         cx.update(gpui_component::init);
         let submitted: Rc<RefCell<Vec<LuaSubmit>>> = Rc::new(RefCell::new(Vec::new()));
         let (view, vcx) = cx.add_window_view(LuaSingleLineInput::new);
-
-        // LSP providers are wired at construction.
-        vcx.update(|_, cx| {
-            let editor = view.read(cx).editor().clone();
-            let state = editor.read(cx);
-            assert!(
-                state.lsp().completion_provider.is_some(),
-                "completion provider must be built in"
-            );
-            assert!(
-                state.lsp().hover_provider.is_some(),
-                "hover provider must be built in"
-            );
-            assert_eq!(
-                state.lsp().completion_menu.placement,
-                CompletionMenuPlacement::Above,
-                "the bottom-docked bar must open completions above the input"
-            );
-        });
 
         let _sub = vcx.update(|_, cx| {
             cx.subscribe(&view, {
@@ -886,14 +777,22 @@ mod tests {
         });
         vcx.run_until_parked();
 
-        // Pasted line breaks are flattened through the Change path.
+        // The single-line engine strips line breaks on insert; the widget's
+        // `set_value` flattens them to spaces first, so host-driven fills
+        // (history, completion) stay readable.
         vcx.update(|window, cx| {
-            let editor = view.read(cx).editor().clone();
-            editor.update(cx, |state, cx| {
+            let state = view.read(cx).state().clone();
+            state.update(cx, |state, cx| {
                 state.replace_all("a\nb\r\nc", window, cx);
             });
         });
         vcx.run_until_parked();
+        vcx.update(|_, cx| {
+            assert_eq!(view.read(cx).value(cx).as_ref(), "abc");
+        });
+        vcx.update(|window, cx| {
+            view.update(cx, |input, cx| input.set_value("a\nb\r\nc", window, cx));
+        });
         vcx.update(|_, cx| {
             assert_eq!(view.read(cx).value(cx).as_ref(), "a b c");
         });

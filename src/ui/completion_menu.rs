@@ -1,14 +1,16 @@
-use gpui::{App, Context, IntoElement, Render, Window, anchored, deferred, div, prelude::*};
+use gpui::{IntoElement, anchored, deferred, div, prelude::*};
 
 use crate::{
     theme::{self, role},
-    ui::list_row::list_row,
+    ui::list_row::ListRow,
 };
 
-/// Completion menu component: constrained popover anchored above the bar.
+/// Completion menu snapshot: constrained popover anchored above the bar.
 ///
-/// Owns its items and selection; renders nothing when empty so callers can
+/// Snapshot view (no own state): constructed per-frame from entity state,
+/// like `ChatHistory` in t3chat. Renders nothing when empty so callers can
 /// always include it.
+#[derive(IntoElement)]
 pub struct CompletionMenu {
     items: Vec<String>,
     selected: usize,
@@ -20,44 +22,37 @@ impl CompletionMenu {
     }
 }
 
-impl Render for CompletionMenu {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        completion_menu(&self.items, self.selected)
+impl RenderOnce for CompletionMenu {
+    fn render(self, _window: &mut gpui::Window, _cx: &mut gpui::App) -> impl IntoElement {
+        if self.items.is_empty() {
+            return div().into_any_element();
+        }
+        let selected = self.selected.min(self.items.len() - 1);
+        deferred(
+            anchored()
+                .anchor(gpui::Anchor::BottomLeft)
+                .child(
+                    div()
+                        .id("completion-menu")
+                        .max_w(theme::size::COMPLETION_MAX_W)
+                        .rounded(theme::radius::LG)
+                        .border_1()
+                        .border_color(role::menu_border())
+                        .bg(role::menu_bg())
+                        .py(theme::space::_1)
+                        .px(theme::space::_1)
+                        .children(self.items.into_iter().enumerate().map(|(index, hint)| {
+                            ListRow::new(hint, index == selected)
+                        })),
+                ),
+        )
+        .priority_auto()
+        .into_any_element()
     }
 }
 
 /// Constrained completion popover anchored above the status bar.
-pub fn completion_menu(items: &[String], selected: usize) -> impl IntoElement {
-    if items.is_empty() {
-        return div().into_any_element();
-    }
-    let selected = selected.min(items.len() - 1);
-    deferred(
-        anchored()
-            .anchor(gpui::Anchor::BottomLeft)
-            .child(
-                div()
-                    .id("completion-menu")
-                    .max_w(theme::size::COMPLETION_MAX_W)
-                    .rounded(theme::radius::LG)
-                    .border_1()
-                    .border_color(role::menu_border())
-                    .bg(role::menu_bg())
-                    .py(theme::space::_1)
-                    .px(theme::space::_1)
-                    .children(items.iter().enumerate().map(|(index, hint)| {
-                        list_row(hint.clone(), index == selected)
-                    })),
-            ),
-    )
-    .priority_auto()
-    .into_any_element()
-}
-
 #[allow(dead_code)]
-fn _list_row_compat(hint: String, selected: bool) -> impl IntoElement {
-    list_row(hint, selected)
+pub fn completion_menu(items: &[String], selected: usize) -> CompletionMenu {
+    CompletionMenu::new(items.to_vec(), selected)
 }
-
-#[allow(dead_code)]
-fn _app(_: &App) {}

@@ -2,16 +2,17 @@ use gpui::{
     App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent, Render, Window, div,
     prelude::*,
 };
+use gpui_base::v_flex;
 use gpui_component::WindowExt as _;
 use self_update::Release;
 
 use crate::{
     Surface,
     theme::{self, role},
-    ui::list_row::list_row,
+    ui::list_row::ListRow,
 };
 
-use super::host::Overlay;
+use super::Overlay;
 
 /// Fetch the release list on a blocking thread: `ReleaseList::fetch` uses the
 /// reqwest blocking client, so it must not run on the GPUI async executor.
@@ -46,35 +47,33 @@ pub fn release_label(release: &Release) -> String {
 
 /// Releases dialog content component.
 ///
-/// Owns its selection and focus; release data lives in `OverlayHost`
-/// (the single owner), read here via entity — never duplicated.
+/// Owns its selection and focus; release data lives in `Overlay`
+/// (the single orchestrator owner), read here via entity — never duplicated.
 pub struct ReleasesView {
     surface: Entity<Surface>,
-    overlay_host: Entity<crate::overlay::OverlayHost>,
     focus: FocusHandle,
     selected: usize,
 }
 
 impl ReleasesView {
-    fn new(
-        surface: Entity<Surface>,
-        overlay_host: Entity<crate::overlay::OverlayHost>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub(crate) fn new(surface: Entity<Surface>, cx: &mut Context<Self>) -> Self {
         Self {
             surface,
-            overlay_host,
             focus: cx.focus_handle(),
             selected: 0,
         }
     }
 
+    fn overlay(&self, cx: &App) -> Entity<Overlay> {
+        self.surface.read(cx).overlay.clone()
+    }
+
     fn releases(&self, cx: &App) -> Vec<Release> {
-        self.overlay_host.read(cx).releases_cloned()
+        self.overlay(cx).read(cx).releases_cloned()
     }
 
     fn loading(&self, cx: &App) -> bool {
-        self.overlay_host.read(cx).releases_loading()
+        self.overlay(cx).read(cx).releases_loading()
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -147,14 +146,14 @@ impl Render for ReleasesView {
                 .child("No releases found")
                 .into_any_element()
         } else {
-            gpui_component::v_flex()
+            v_flex()
                 .gap(theme::space::PX)
                 .children(releases.iter().enumerate().map(|(index, release)| {
-                    list_row(release_label(release), index == selected)
+                    ListRow::new(release_label(release), index == selected)
                 }))
                 .into_any_element()
         };
-        gpui_component::v_flex()
+        v_flex()
             .id("releases")
             .key_context("releases")
             .track_focus(&self.focus)
@@ -166,19 +165,30 @@ impl Render for ReleasesView {
     }
 }
 
-/// Open the releases dialog.
-pub fn open(entity: Entity<Surface>, window: &mut Window, cx: &mut App) {
-    Overlay::present(entity.clone(), window, cx, move |dialog, window, cx| {
-        let overlay_host = entity.read(cx).overlay_host.clone();
-        let view = cx.new(|cx| ReleasesView::new(entity.clone(), overlay_host, cx));
+impl ReleasesView {
+    /// Refresh transient state (selection, release fetch) and present the
+    /// reused view. Release data itself stays live: render reads it from
+    /// the `Overlay` orchestrator, never duplicated.
+    pub(crate) fn show(view: Entity<Self>, window: &mut Window, cx: &mut App) {
+        let surface = view.read(cx).surface.clone();
+        let tx = surface.read(cx).event_tx.clone();
+        let overlay = surface.read(cx).overlay.clone();
+        overlay.update(cx, |overlay, _| overlay.ensure_releases_fetch(tx));
+        view.update(cx, |this, cx| {
+            this.selected = 0;
+            cx.notify();
+        });
         let focus = view.read(cx).focus_handle(cx);
         window.defer(cx, move |window, cx| {
             focus.focus(window, cx);
         });
-        dialog
-            .title("Releases")
-            .content(move |content, _, _| content.child(view.clone()))
-    });
+        Overlay::present(surface, window, cx, move |dialog, _, _| {
+            let content = view.clone();
+            dialog
+                .title("Releases")
+                .content(move |content_, _, _| content_.child(content.clone()))
+        });
+    }
 }
 
 #[cfg(test)]

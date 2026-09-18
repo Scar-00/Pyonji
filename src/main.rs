@@ -35,21 +35,15 @@ use clap::Parser;
 use gpui::{
     Action, App, Bounds, ClipboardItem, Context, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, TextInputConfiguration, UTF16Selection, Window, actions, canvas, container_query, div, point, prelude::*, px, size
 };
-use gpui_component::{Root, Theme, ThemeMode, v_flex};
+use gpui_base::v_flex;
+use gpui_component::{Root, Theme, ThemeMode};
 use mlua::{
     Lua, LuaOptions, StdLib,
     prelude::{LuaFunction, LuaMultiValue, LuaTable},
 };
 
 use crate::{
-    config::KeyBinding,
-    input::{InputManager, bare_key, digit_index},
-    overlay::{LuaAction, Overlay, OverlayHost, Screen},
-    pty::{Event as PtyEvent, SshConnection},
-    status::Mode,
-    terminal::{SessionId, SplitDirection, TerminalSession},
-    ui::{status_bar::StatusBar, TerminalState},
-    workspace::Workspace,
+    config::KeyBinding, input::{InputManager, bare_key, digit_index}, lua_input::LuaSingleLineInput, overlay::{LuaAction, Overlay, Screen}, pty::{Event as PtyEvent, SshConnection}, terminal::{SessionId, SplitDirection, TerminalSession}, ui::{TerminalState, status_bar::{StatusBar, StatusBarState}}, workspace::Workspace
 };
 
 // Actions for the Lua status prompt, scoped to the `status-lua` key context
@@ -128,8 +122,8 @@ pub struct Surface {
     /// Keymap and transient key modes.
     pub input: InputManager,
 
-    pub status_bar: Entity<StatusBar>,
-    pub overlay_host: Entity<OverlayHost>,
+    pub status_bar: Entity<StatusBarState>,
+    pub overlay: Entity<Overlay>,
 
     /// Lua-queued UI intents. Constructing an action needs no window or
     /// app context, so Lua without either can still request UI work;
@@ -279,6 +273,7 @@ fn main() -> Result<()> {
                 },
                 |window, cx| {
                     Theme::change(ThemeMode::Dark, Some(window), cx);
+                    crate::theme::PyonjiTheme::apply(cx);
                     let surface = cx.new(|cx| {
                         Surface::new(window, cx, initial_path, lua, event_tx, event_rx)
                     });
@@ -336,10 +331,11 @@ impl Surface {
         let terminal = TerminalState::new();
         let input = InputManager::new();
         let line_height = terminal.line_height;
+        let lua_for_bar = lua.clone();
         let status_bar = cx.new(|cx| {
-            StatusBar::new(window, cx, lua.clone(), &[], line_height)
+            StatusBarState::new(window, cx, lua_for_bar, &[], line_height)
         });
-        let overlay_host = cx.new(|_cx| OverlayHost::new());
+        let overlay = cx.new(|_cx| Overlay::new());
         let surface = Self {
             focus_handle,
             lua,
@@ -349,7 +345,7 @@ impl Surface {
             terminal,
             input,
             status_bar: status_bar.clone(),
-            overlay_host: overlay_host.clone(),
+            overlay: overlay.clone(),
             pending_actions: Vec::new(),
             registered_callbacks: Vec::new(),
             fullscreen: false,
@@ -360,7 +356,7 @@ impl Surface {
         // provide. Subscribe here so Surface performs evaluation with its
         // Lua state and updates history/messages via the bar.
         let editor = surface.status_bar.read(cx).lua_editor();
-        cx.subscribe_in(&editor, window, |surface: &mut Surface, _: &Entity<crate::lua_input::LuaSingleLineInput>, event: &crate::lua_input::LuaInputEvent, window: &mut Window, cx: &mut Context<Surface>| {
+        cx.subscribe_in(&editor, window, |surface: &mut Surface, _: &Entity<LuaSingleLineInput>, event: &crate::lua_input::LuaInputEvent, window: &mut Window, cx: &mut Context<Surface>| {
             if let crate::lua_input::LuaInputEvent::SubmitRequested(code) = event {
                 let code = code.clone();
                 surface.submit_lua_from_editor(&code, window, cx);
@@ -486,7 +482,7 @@ impl Surface {
                 self.show_status_message(text.replace(['\n', '\r'], " "), cx);
             }
             PtyEvent::ReleasesReady(releases) => {
-                self.overlay_host
+                self.overlay
                     .update(cx, |host, _| host.set_releases(releases));
             }
             PtyEvent::Exit => {
@@ -537,7 +533,7 @@ impl Surface {
     /// Evaluate one Lua line with the `py` environment, formatting the
     /// result like the REPL. Errors become their message.
     pub fn evaluate_lua(&mut self, expr: &str) -> String {
-        use mlua::prelude::{LuaFunction, LuaValue};
+        use mlua::prelude::{LuaValue};
         let lua = self.lua.clone();
         let out = crate::config::with_env(self, |_| {
             let value = lua.load(expr).eval::<LuaValue>()?;
@@ -1996,15 +1992,18 @@ impl Render for Surface {
 
         let bounds_entity = cx.entity();
         let ime_entity = bounds_entity.clone();
-        let status_bar = self.status_bar.clone();
         v_flex()
             .id("main")
             .bg(theme::role::window_bg())
             .track_focus(&self.focus_handle)
             .key_context("terminal")
             .on_action(cx.listener(|_, action: &OpenOverlay, window, cx| {
-                let entity = cx.entity();
-                Overlay::open(action.screen, entity, window, cx);
+                let surface = cx.entity();
+                let overlay = surface.read(cx).overlay.clone();
+                let screen = action.screen;
+                overlay.update(cx, |overlay, cx| {
+                    overlay.open(surface.clone(), screen, window, cx);
+                });
             }))
             .on_action(cx.listener(|this, _: &OpenCommandPrompt, _, cx| {
                 this.open_status_prompt(cx);
@@ -2137,7 +2136,7 @@ impl Render for Surface {
                         .size_full(),
                     ),
             )
-            .child(status_bar)
+            .child(StatusBar::new(&self.status_bar))
     }
 }
 
@@ -2216,6 +2215,7 @@ mod tests {
 #[cfg(test)]
 mod prompt_key_tests {
     use super::*;
+    use crate::status::Mode;
 
     #[gpui::test]
     async fn lua_trigger_does_not_leak(cx: &mut gpui::TestAppContext) {
@@ -2387,6 +2387,7 @@ mod status_height_tests {
 #[cfg(test)]
 mod prompt_completion_tests {
     use super::*;
+    use crate::status::Mode;
 
     #[gpui::test]
     async fn command_tab_accepts_highlight(cx: &mut gpui::TestAppContext) {

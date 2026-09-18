@@ -1,18 +1,18 @@
 mod detached;
 mod host;
-mod host_entity;
 mod opener;
 mod palette;
 mod releases;
 mod search;
 mod sessions;
 
-pub(crate) use detached::detached_entries;
+pub(crate) use detached::DetachedView;
 pub use host::Overlay;
-pub use host_entity::OverlayHost;
-pub use palette::{complete_command_name, filter_commands};
-pub use releases::fetch_releases_async;
-pub(crate) use sessions::session_entries;
+pub use opener::OpenerView;
+pub use palette::{PaletteView, complete_command_name, filter_commands};
+pub use releases::{ReleasesView, fetch_releases_async};
+pub use search::{SearchDialog, SearchDialogEvent, SearchItem};
+pub(crate) use sessions::SessionsView;
 
 use std::rc::Rc;
 
@@ -208,8 +208,10 @@ fn builtin_commands() -> Vec<Cmd> {
             });
         }),
         Cmd::new("sessions", [], |surface, window, cx, _| {
-            let entries = session_entries(&surface.read(cx).workspace);
-            sessions::open(entries, surface.clone(), window, cx);
+            let overlay = surface.read(cx).overlay.clone();
+            overlay.update(cx, |overlay, cx| {
+                overlay.open(surface.clone(), Screen::Sessions, window, cx);
+            });
         }),
         Cmd::new("detach", [], |surface, _, cx, _| {
             surface.update(cx, |surface, cx| {
@@ -252,18 +254,16 @@ fn builtin_commands() -> Vec<Cmd> {
             });
         }),
         Cmd::new("attach", [], |surface, window, cx, _| {
-            let entries = detached_entries(&surface.read(cx).workspace);
-            let current_tab = surface.read(cx).workspace.current_tab;
-            detached::open(entries, current_tab, surface.clone(), window, cx);
+            let overlay = surface.read(cx).overlay.clone();
+            overlay.update(cx, |overlay, cx| {
+                overlay.open(surface.clone(), Screen::Detached, window, cx);
+            });
         }),
         Cmd::new("releases", [], |surface, window, cx, _| {
-            surface.update(cx, |surface, cx| {
-                let tx = surface.event_tx.clone();
-                surface
-                    .overlay_host
-                    .update(cx, |host, _| host.ensure_releases_fetch(tx));
+            let overlay = surface.read(cx).overlay.clone();
+            overlay.update(cx, |overlay, cx| {
+                overlay.open(surface.clone(), Screen::Releases, window, cx);
             });
-            releases::open(surface.clone(), window, cx);
         }),
         Cmd::new("ssh", [Arg::new("session")], |surface, _, cx, args| {
             surface.update(cx, |surface, cx| {
@@ -289,7 +289,10 @@ fn builtin_commands() -> Vec<Cmd> {
             });
         }),
         Cmd::new("open-in", [], |surface, window, cx, _| {
-            opener::open(surface.clone(), window, cx);
+            let overlay = surface.read(cx).overlay.clone();
+            overlay.update(cx, |overlay, cx| {
+                overlay.open(surface.clone(), Screen::Opener, window, cx);
+            });
         }),
     ]
 }

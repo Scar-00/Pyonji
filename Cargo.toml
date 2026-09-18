@@ -53,6 +53,7 @@ gpui_platform = { git = "https://github.com/gpui-ce/gpui-ce", package = "gpui_ce
 gpui_tokio = { git = "https://github.com/gpui-ce/gpui-ce", package = "gpui_ce_tokio" }
 gpui_wgpu = { git = "https://github.com/gpui-ce/gpui-ce", package = "gpui_ce_wgpu" }
 gpui_ce_components = { path = "../oss/gpui-component/crates/ui/" }
+gpui_ce_components_base = { path = "../oss/gpui-component/crates/base/" }
 gpui_ce_components_assets = { path = "../oss/gpui-component/crates/assets/" }
 
 [dev-dependencies]
@@ -60,3 +61,31 @@ gpui = { git = "https://github.com/gpui-ce/gpui-ce", features = ["test-support"]
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.30"
+
+# Local patch for the gpui-ce MSAA validation crash (see
+# `vendor/gpui-ce/README.md`): redirects every package from the gpui-ce git
+# source at this directory, so the whole graph — including the crates pulled
+# in via the `../oss/gpui-component` path deps — builds against the patched
+# copy with identical versions. Drop this table once the git source is
+# bumped past upstream fix 8e36ac0 *and* `../oss/gpui-component` supports
+# the new API.
+[patch."https://github.com/gpui-ce/gpui-ce"]
+gpui-ce = { path = "vendor/gpui-ce/crates/gpui" }
+gpui_ce_apple = { path = "vendor/gpui-ce/crates/gpui_apple" }
+gpui_ce_collections = { path = "vendor/gpui-ce/crates/gpui_collections" }
+gpui_ce_derive_refineable = { path = "vendor/gpui-ce/crates/gpui_derive_refineable" }
+gpui_ce_linux = { path = "vendor/gpui-ce/crates/gpui_linux" }
+gpui_ce_macos = { path = "vendor/gpui-ce/crates/gpui_macos" }
+gpui_ce_macros = { path = "vendor/gpui-ce/crates/gpui_macros" }
+gpui_ce_media = { path = "vendor/gpui-ce/crates/gpui_media" }
+gpui_ce_platform = { path = "vendor/gpui-ce/crates/gpui_platform" }
+gpui_ce_refineable = { path = "vendor/gpui-ce/crates/gpui_refineable" }
+gpui_ce_render = { path = "vendor/gpui-ce/crates/gpui_render" }
+gpui_ce_scheduler = { path = "vendor/gpui-ce/crates/gpui_scheduler" }
+gpui_ce_shared_string = { path = "vendor/gpui-ce/crates/gpui_shared_string" }
+gpui_ce_sum_tree = { path = "vendor/gpui-ce/crates/gpui_sum_tree" }
+gpui_ce_tokio = { path = "vendor/gpui-ce/crates/gpui_tokio" }
+gpui_ce_util = { path = "vendor/gpui-ce/crates/gpui_ce_util" }
+gpui_ce_web = { path = "vendor/gpui-ce/crates/gpui_web" }
+gpui_ce_wgpu = { path = "vendor/gpui-ce/crates/gpui_wgpu" }
+gpui_ce_windows = { path = "vendor/gpui-ce/crates/gpui_windows" }

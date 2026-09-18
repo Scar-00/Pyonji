@@ -4,15 +4,16 @@ use gpui::{
     App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent, Render, Window,
     prelude::*,
 };
+use gpui_base::v_flex;
 use gpui_component::WindowExt as _;
 
 use crate::{
     Surface,
     theme,
-    ui::list_row::list_row,
+    ui::list_row::ListRow,
 };
 
-use super::host::Overlay;
+use super::Overlay;
 
 /// One row of the opener: a directory the user can descend into, or the
 /// parent (`..`) to go up.
@@ -32,7 +33,7 @@ pub struct OpenerView {
 }
 
 impl OpenerView {
-    fn new(surface: Entity<Surface>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(surface: Entity<Surface>, cx: &mut Context<Self>) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let mut this = Self {
             surface,
@@ -156,7 +157,7 @@ impl Focusable for OpenerView {
 impl Render for OpenerView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.selected;
-        gpui_component::v_flex()
+        v_flex()
             .id("opener")
             .key_context("opener")
             .track_focus(&self.focus)
@@ -169,24 +170,32 @@ impl Render for OpenerView {
                 self.entries
                     .iter()
                     .enumerate()
-                    .map(|(index, entry)| list_row(entry.name.clone(), index == selected)),
+                    .map(|(index, entry)| ListRow::new(entry.name.clone(), index == selected)),
             )
     }
 }
 
-/// Open the directory picker.
-pub fn open(surface: Entity<Surface>, window: &mut Window, cx: &mut App) {
-    Overlay::present(surface.clone(), window, cx, move |dialog, window, cx| {
-        let view = cx.new(|cx| OpenerView::new(surface.clone(), cx));
+impl OpenerView {
+    /// Refresh the listing (keeping the retained cwd) and present the
+    /// reused view.
+    pub(crate) fn show(view: Entity<Self>, window: &mut Window, cx: &mut App) {
+        view.update(cx, |this, cx| {
+            this.refresh();
+            cx.notify();
+        });
+        let surface = view.read(cx).surface.clone();
         let focus = view.read(cx).focus_handle(cx);
         window.defer(cx, move |window, cx| {
             focus.focus(window, cx);
         });
         let cwd = view.read(cx).cwd.clone();
-        dialog
-            .title(format!("Opener - {}", cwd.display()))
-            .content(move |content, _, _| content.child(view.clone()))
-    });
+        Overlay::present(surface, window, cx, move |dialog, _, _| {
+            let content = view.clone();
+            dialog
+                .title(format!("Opener - {}", cwd.display()))
+                .content(move |content_, _, _| content_.child(content.clone()))
+        });
+    }
 }
 
 #[cfg(test)]

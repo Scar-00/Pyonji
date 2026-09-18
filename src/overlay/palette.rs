@@ -1,9 +1,9 @@
-use gpui::{App, Entity, Window};
-use gpui_component::WindowExt as _;
+use gpui::{App, Context, Entity, IntoElement, Render, Window, prelude::*};
+use gpui_component::{WindowExt as _, command::CommandState};
 
 use crate::{Surface, overlay::Cmd};
 
-use super::search::{SearchItem, open_search_dialog};
+use super::{SearchDialog, SearchDialogEvent, SearchItem};
 
 /// Fuzzy-filter `commands` by the name part of `query` (everything before the
 /// first space — the trailing words are the command's args).
@@ -57,30 +57,80 @@ pub fn complete_command_name(
         .map(|cmd| cmd.name.clone())
 }
 
-/// Open the command palette dialog.
-pub fn open(
+/// Command palette screen: owns its dialog entity plus the commands behind
+/// the rows. Constructed once, held by the `Overlay` orchestrator
+/// (`ActiveScreen::Palette`); `show` refreshes the snapshot and presents.
+pub struct PaletteView {
+    surface: Entity<Surface>,
+    dialog: Entity<SearchDialog>,
     commands: Vec<Cmd>,
-    entity: Entity<Surface>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let items: Vec<SearchItem> = commands
-        .iter()
-        .map(|cmd| SearchItem::new(cmd.hint()).with_keywords([cmd.name.clone()]))
-        .collect();
-    let commands_for_confirm = commands;
-    open_search_dialog(
-        None,
-        "Type a command, e.g. switch <tab>",
-        None,
-        items,
-        entity.clone(),
-        move |row, query, window, cx| {
-            confirm_palette(entity.clone(), &commands_for_confirm, row, &query, window, cx);
-        },
-        window,
-        cx,
-    );
+}
+
+impl PaletteView {
+    pub(crate) fn new(
+        surface: Entity<Surface>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let query = cx.new(|cx| CommandState::new(window, cx));
+        let dialog = cx.new(|_| {
+            SearchDialog::new(
+                None,
+                "Type a command, e.g. switch <tab>".to_string(),
+                None,
+                query,
+            )
+        });
+        cx.subscribe_in(&dialog, window, Self::on_confirm).detach();
+        Self {
+            surface,
+            dialog,
+            commands: Vec::new(),
+        }
+    }
+
+    /// Refresh the command snapshot and present the reused dialog.
+    pub(crate) fn show(view: Entity<Self>, window: &mut Window, cx: &mut App) {
+        view.update(cx, |this, cx| {
+            this.commands = this
+                .surface
+                .read(cx)
+                .status_bar
+                .read(cx)
+                .palette_commands()
+                .to_vec();
+            let items: Vec<SearchItem> = this
+                .commands
+                .iter()
+                .map(|cmd| SearchItem::new(cmd.hint()).with_keywords([cmd.name.clone()]))
+                .collect();
+            SearchDialog::show(this.dialog.clone(), items, this.surface.clone(), window, cx);
+        });
+    }
+
+    fn on_confirm(
+        &mut self,
+        _: &Entity<SearchDialog>,
+        event: &SearchDialogEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let SearchDialogEvent::Confirm { row, query } = event;
+        confirm_palette(
+            self.surface.clone(),
+            &self.commands,
+            *row,
+            query,
+            window,
+            cx,
+        );
+    }
+}
+
+impl Render for PaletteView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.dialog.clone()
+    }
 }
 fn confirm_palette(
     surface: Entity<Surface>,
