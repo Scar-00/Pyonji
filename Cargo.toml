@@ -55,6 +55,8 @@ gpui_wgpu = { git = "https://github.com/gpui-ce/gpui-ce", package = "gpui_ce_wgp
 gpui_ce_components = { path = "../oss/gpui-component/crates/ui/" }
 gpui_ce_components_base = { path = "../oss/gpui-component/crates/base/" }
 gpui_ce_components_assets = { path = "../oss/gpui-component/crates/assets/" }
+gpui_ce_components_macros = { path = "../oss/gpui-component/crates/macros/" }
+rust-embed = "8.11.0"
 
 [dev-dependencies]
 gpui = { git = "https://github.com/gpui-ce/gpui-ce", features = ["test-support"], package = "gpui-ce" }

@@ -11,9 +11,12 @@
     clippy::type_complexity
 )]
 
+mod assets;
 mod pty;
 mod terminal;
 mod renderer;
+
+use assets::{GlobalAssets, PyonjiAssetsSource};
 
 use pty::Event;
 use renderer::{*, Pane as RendererPane};
@@ -25,7 +28,10 @@ use async_channel::{Receiver, Sender};
 use clap::Parser;
 use gpui::{prelude::*, *};
 use gpui_base::*;
-use gpui_component::{Root, ThemeMode, WindowExt, notification::Notification};
+use gpui_component::{
+    Root, ThemeMode, WindowExt,
+    notification::{Notification, NotificationType},
+};
 use gpui_wgpu::WgpuContextHandle;
 use smallvec::{SmallVec, smallvec};
 use tracing_subscriber::prelude::*;
@@ -49,7 +55,10 @@ fn main() {
         }
     };
 
-    gpui_platform::application().with_assets(gpui_component_assets::Assets).run(|cx| {
+    gpui_platform::application().with_assets(GlobalAssets::new([
+        Box::new(gpui_component_assets::Assets),
+        Box::new(PyonjiAssetsSource),
+    ])).run(|cx| {
         gpui_component::init(cx);
         Theme::init(cx);
 
@@ -105,6 +114,24 @@ impl Pyonji {
         let lua = Lua::new();
         let (tx, rx) = async_channel::unbounded();
 
+        // Route Lua `print(...)` into the event loop so it can surface as an
+        // info notification (mirrors main2's print override).
+        {
+            let tx = tx.clone();
+            if let Ok(print) = lua.create_function(move |lua, args: mlua::MultiValue| {
+                let tostring: mlua::Function = lua.globals().get("tostring")?;
+                let mut parts = Vec::new();
+                for value in args {
+                    let text: String = tostring.call(value)?;
+                    parts.push(text);
+                }
+                _ = tx.try_send(Event::LuaPrint(parts.join("\t")));
+                Ok(())
+            }) {
+                _ = lua.globals().set("print", print);
+            }
+        }
+
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
 
@@ -142,7 +169,7 @@ impl Pyonji {
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 if let Ok(event) = rx.recv().await {
-                    _ = this.update_in(cx, |this, _, cx| {
+                    _ = this.update_in(cx, |this, window, cx| {
                         match event {
                             Event::Closed(id) => {
                                 if this.close_session(id, cx) && this.session_manager.is_empty() {
@@ -164,7 +191,12 @@ impl Pyonji {
                                 //config::load(self);
                                 cx.notify();
                             }
-                            Event::LuaPrint(text) => {}
+                            Event::LuaPrint(text) => {
+                                let text = text.replace(['\n', '\r'], " ");
+                                if !text.is_empty() {
+                                    window.dispatch_action(Box::new(PushInfo::new(text)), cx);
+                                }
+                            }
                             Event::Exit => {
                                 cx.quit();
                             }
@@ -195,12 +227,54 @@ impl Pyonji {
     }
 
     fn on_error(&mut self, error: &PushError, window: &mut Window, cx: &mut Context<Self>) {
+        Self::push_note(
+            NotificationType::Error,
+            "Error",
+            error.string.clone(),
+            error.autohide,
+            window,
+            cx,
+        );
+    }
+
+    fn on_warning(&mut self, warning: &PushWarning, window: &mut Window, cx: &mut Context<Self>) {
+        Self::push_note(
+            NotificationType::Warning,
+            "Warning",
+            warning.string.clone(),
+            warning.autohide,
+            window,
+            cx,
+        );
+    }
+
+    fn on_info(&mut self, info: &PushInfo, window: &mut Window, cx: &mut Context<Self>) {
+        // Infos (including Lua `print` output) always auto-dismiss.
+        Self::push_note(
+            NotificationType::Info,
+            "Info",
+            info.string.clone(),
+            true,
+            window,
+            cx,
+        );
+    }
+
+    fn push_note(
+        kind: NotificationType,
+        title: impl Into<SharedString>,
+        message: impl Into<SharedString>,
+        autohide: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let note = Notification::new()
-            .bg(cx.theme().background)
-            .title("Error")
-            .autohide(false)
+            .with_type(kind)
+            .bg(cx.theme().surface)
+            .title(title)
+            .autohide(autohide)
             .placement(Anchor::TopRight)
-            .message(error.string.clone());
+            .message(message);
 
         window.push_notification(note, cx);
     }
@@ -357,6 +431,8 @@ impl Render for Pyonji {
             .bg(theme.background)
             .text_color(cx.theme().text)
             .on_action(cx.listener(Self::on_error))
+            .on_action(cx.listener(Self::on_warning))
+            .on_action(cx.listener(Self::on_info))
             .child(
                 v_flex()
                     .size_full()
@@ -585,11 +661,58 @@ impl Render for Terminal {
 #[action(no_json)]
 struct PushError {
     string: SharedString,
+    autohide: bool,
 }
 
 impl PushError {
     fn new(v: impl ToString) -> Self {
-        Self{ string: v.to_string().into() }
+        Self {
+            string: v.to_string().into(),
+            autohide: false,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn autohide(mut self, autohide: bool) -> Self {
+        self.autohide = autohide;
+        self
+    }
+}
+
+#[derive(Action, Clone, PartialEq)]
+#[action(no_json)]
+struct PushWarning {
+    string: SharedString,
+    autohide: bool,
+}
+
+impl PushWarning {
+    #[allow(dead_code)]
+    fn new(v: impl ToString) -> Self {
+        Self {
+            string: v.to_string().into(),
+            autohide: true,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn autohide(mut self, autohide: bool) -> Self {
+        self.autohide = autohide;
+        self
+    }
+}
+
+#[derive(Action, Clone, PartialEq)]
+#[action(no_json)]
+struct PushInfo {
+    string: SharedString,
+}
+
+impl PushInfo {
+    fn new(v: impl ToString) -> Self {
+        Self {
+            string: v.to_string().into(),
+        }
     }
 }
 
@@ -608,6 +731,7 @@ impl Global for Theme {}
 
 pub struct Theme {
     background: Rgba,
+    surface: Rgba,
     text: Rgba,
 }
 
@@ -619,6 +743,7 @@ impl Theme {
     fn new() -> Self {
         Self {
             background: Rgba::new(24.0 / 255.0, 24.0 / 255.0, 24.0 / 255.0, 1.0),
+            surface: Rgba::new(30.0 / 255.0, 30.0 / 255.0, 46.0 / 255.0, 1.0),
             text: Rgba::new(0.9, 0.9, 0.9, 1.0),
         }
     }
