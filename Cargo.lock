@@ -4270,6 +4270,7 @@ dependencies = [
  "anyhow",
  "bstr",
  "either",
+ "futures-util",
  "inventory",
  "libc",
  "mlua-sys",

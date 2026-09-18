@@ -28,7 +28,6 @@ pub enum Event {
     ProgramChanged((SessionId, String)),
     ConfigChanged,
     LuaPrint(String),
-    ReleasesReady(Vec<self_update::Release>),
     Exit,
 }
 
