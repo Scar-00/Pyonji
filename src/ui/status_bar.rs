@@ -99,7 +99,6 @@ impl Render for StatusBar {
             .w_full()
             .px_1()
             .py_0p5()
-            .gap_1()
             .bg(theme.surface)
             .text_color(theme.text)
             .items_center()
@@ -133,7 +132,7 @@ impl RenderOnce for SessionView {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let py = util::read!(self.pyonji, cx);
-        h_flex().children(py.tabs.iter().enumerate().filter_map(|(i, tab)| {
+        h_flex().gap_1().children(py.tabs.iter().enumerate().filter_map(|(i, tab)| {
             let id = tab.as_ref().and_then(|tab| tab.active_session())?;
             let title = py.session_manager.session(id)?.title();
             let label = format!("[{i}] - {title}");
@@ -142,14 +141,14 @@ impl RenderOnce for SessionView {
                     .items_center()
                     .justify_center()
                     .px_1()
-                    .child(label)
                     .map(|this| {
                         if py.current_tab == Some(i) {
-                            this.bg(theme.selected)
+                            this.bg(theme.selected).font_bold()
                         } else {
                             this.bg(theme.unselected)
                         }
-                    }),
+                    })
+                    .child(label),
             )
         }))
     }
@@ -261,7 +260,11 @@ impl RenderOnce for LuaView {
                             .history
                             .get(this.lua_history.index)
                             .cloned()?;
-                        this.lua_history.index = this.lua_history.index.saturating_add(1).min(this.lua_history.history.len());
+                        this.lua_history.index = this
+                            .lua_history
+                            .index
+                            .saturating_add(1)
+                            .min(this.lua_history.history.len());
                         Some(history)
                     })
                 };

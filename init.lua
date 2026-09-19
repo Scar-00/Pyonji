@@ -1,4 +1,19 @@
---[[local function replace_root(dir)
+---@alias Os
+---| 'windows'
+---| 'linux'
+---| 'macos'
+---| 'unknown'
+
+---@return Os
+function Os()
+    local current_os = os.getenv("OS") or "";
+    if string.match(current_os, "Windows") then
+        return 'windows';
+    end
+    return 'unknown';
+end
+
+local function replace_root(dir)
     local active = py.active_session;
     local main = py:create_session(dir, 1);
     py:close(active);
@@ -87,33 +102,3 @@ function NextFreeTab()
     end
     return nil;
 end
-
----@alias Os
----| 'windows'
----| 'linux'
----| 'macos'
----| 'unknown'
-
----@return Os
-function Os()
-    local current_os = os.getenv("OS") or "";
-    if string.match(current_os, "Windows") then
-        return 'windows';
-    end
-    return 'unknown';
-end
-]]--
-
-py:config({
-    font_family = "Iosevka",
-    font_size = 38.0,
-    line_height = 1.1,
-    fullscreen = false,
-    ssh_sessions = {
-        {
-            name = "ive",
-            ip = "192.168.178.20",
-        }
-    },
-    status_height = 0.75,
-});

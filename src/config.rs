@@ -1,5 +1,6 @@
 use crate::Pyonji;
 use crate::pty::{Event as PtyEvent, SshConnection};
+use crate::terminal::{SessionId, SplitDirection, Tab as TerminalTab};
 use crate::util::UnsafeRefMut;
 use anyhow::{Context as _, Result};
 use async_channel::Sender;
@@ -10,7 +11,7 @@ use path_absolutize::*;
 use std::fmt::Debug;
 use std::io::Write;
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
@@ -145,6 +146,256 @@ impl LuaUserData for LuaProxy {
             }
             Ok(())
         });
+        methods.add_function("create_session", |lua, args: LuaMultiValue| {
+            let (this, (dir, tab, direction, parent)) = args!(
+                args,
+                lua,
+                (
+                    Option<String>,
+                    Option<usize>,
+                    Option<String>,
+                    Option<SessionId>
+                )
+            );
+            let direction = match direction.as_deref().map(str::to_lowercase).as_deref() {
+                Some("horizontal") | Some("h") => SplitDirection::Horizontal,
+                _ => SplitDirection::Vertical,
+            };
+            callable_action!(lua, this => {
+                let dir = dir.clone();
+                move |this: &mut Self| -> LuaResult<SessionId> {
+                    let slot = match tab.or(this.py.current_tab) {
+                        Some(slot) if slot < this.py.tabs.len() => slot,
+                        _ => return Err(mlua::Error::external("tab index out of range")),
+                    };
+                    let cwd = this.py.default_cwd.clone();
+                    let owned_dir = dir.clone().map(PathBuf::from);
+                    let path = owned_dir.as_deref().or(cwd.as_deref());
+                    let id = this
+                        .py
+                        .session_manager
+                        .create_session(20, 80, path)
+                        .map_err(mlua::Error::external)?;
+                    if this.py.tabs[slot].is_none() {
+                        this.py.tabs[slot] = Some(TerminalTab::new(id));
+                    } else {
+                        let placed = this.py.tabs[slot]
+                            .as_mut()
+                            .map(|tab| match parent.filter(|id| tab.sessions().contains(id)) {
+                                Some(at) => tab.split_on(at, direction, id),
+                                None => tab.split_active(direction, id),
+                            })
+                            .unwrap_or(false);
+                        if !placed {
+                            this.py.session_manager.remove_session(id);
+                            return Err(mlua::Error::external("failed to place session"));
+                        }
+                    }
+                    Ok(id)
+                }
+            })
+        });
+        methods.add_function("close", |lua, args: LuaMultiValue| {
+            let (this, (session,)) = args!(args, lua, (Option<SessionId>,));
+            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
+                let Some(id) = session.or_else(|| this.py.active_session()) else {
+                    return Ok(false);
+                };
+                if this.py.session_manager.session(id).is_none() {
+                    return Ok(false);
+                }
+                if let Some(term_session) = this.py.session_manager.session_mut(id) {
+                    term_session.pty.kill();
+                }
+                remove_session_from_tabs(&mut this.py, id);
+                this.py.session_manager.remove_session(id);
+                this.py.detached_sessions.retain(|detached| *detached != id);
+                Ok(true)
+            })
+        });
+        methods.add_function("switch_tab", |lua, args: LuaMultiValue| {
+            let (this, (tab,)) = args!(args, lua, (usize,));
+            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
+                let py = &mut this.py;
+                if tab >= py.tabs.len() || py.tabs[tab].is_none() {
+                    return Ok(false);
+                }
+                py.current_tab = Some(tab);
+                py.wheel_remainder = 0.0;
+                Ok(true)
+            })
+        });
+        methods.add_function("next_tab", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<usize> {
+                let py = &mut this.py;
+                let live: Vec<usize> = (0..py.tabs.len())
+                    .filter(|&index| py.tabs[index].is_some())
+                    .collect();
+                let next = match live.as_slice() {
+                    [] => py.current_tab.unwrap_or(0),
+                    live => match py
+                        .current_tab
+                        .and_then(|current| live.iter().position(|&index| index == current))
+                    {
+                        Some(pos) => live[(pos + 1) % live.len()],
+                        None => live[0],
+                    },
+                };
+                if !live.is_empty() {
+                    py.current_tab = Some(next);
+                    py.wheel_remainder = 0.0;
+                }
+                Ok(next)
+            })
+        });
+        methods.add_function("prev_tab", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<usize> {
+                let py = &mut this.py;
+                let live: Vec<usize> = (0..py.tabs.len())
+                    .filter(|&index| py.tabs[index].is_some())
+                    .collect();
+                let prev = match live.as_slice() {
+                    [] => py.current_tab.unwrap_or(0),
+                    live => match py
+                        .current_tab
+                        .and_then(|current| live.iter().position(|&index| index == current))
+                    {
+                        Some(pos) => live[(pos + live.len() - 1) % live.len()],
+                        None => live[live.len() - 1],
+                    },
+                };
+                if !live.is_empty() {
+                    py.current_tab = Some(prev);
+                    py.wheel_remainder = 0.0;
+                }
+                Ok(prev)
+            })
+        });
+        methods.add_function("move_to", |lua, args: LuaMultiValue| {
+            let (this, (tab,)) = args!(args, lua, (Option<usize>,));
+            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
+                let Some(target) = tab else {
+                    return Ok(false);
+                };
+                if target >= this.py.tabs.len() {
+                    return Ok(false);
+                }
+                let Some(session) = this.py.active_session() else {
+                    return Ok(false);
+                };
+                let py = &mut this.py;
+                remove_session_from_tabs(py, session);
+                if py.tabs[target].is_none() {
+                    py.tabs[target] = Some(TerminalTab::new(session));
+                } else if let Some(tab) = py.tabs[target].as_mut() {
+                    tab.split_active(SplitDirection::Vertical, session);
+                }
+                py.current_tab = Some(target);
+                py.wheel_remainder = 0.0;
+                Ok(true)
+            })
+        });
+        methods.add_function("split", |lua, args: LuaMultiValue| {
+            let (this, direction) = args!(args, lua, String);
+            let direction = match direction.to_lowercase().as_str() {
+                "horizontal" | "h" => SplitDirection::Horizontal,
+                _ => SplitDirection::Vertical,
+            };
+            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<Option<SessionId>> {
+                let Some(current) = this.py.current_tab else {
+                    return Ok(None);
+                };
+                if this.py.active_session().is_none() {
+                    return Ok(None);
+                }
+                let cwd = this.py.default_cwd.clone();
+                let id = match this.py.session_manager.create_session(20, 80, cwd.as_deref()) {
+                    Ok(id) => id,
+                    Err(_) => return Ok(None),
+                };
+                let placed = this.py.tabs[current]
+                    .as_mut()
+                    .map(|tab| tab.split_active(direction, id))
+                    .unwrap_or(false);
+                if !placed {
+                    this.py.session_manager.remove_session(id);
+                    return Ok(None);
+                }
+                Ok(Some(id))
+            })
+        });
+        methods.add_function("focus_next_pane", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<Option<SessionId>> {
+                let Some(current) = this.py.current_tab else {
+                    return Ok(None);
+                };
+                Ok(this.py.tabs[current].as_mut().and_then(|tab| tab.focus_next()))
+            })
+        });
+        methods.add_function("detach", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<bool> {
+                let Some(session) = this.py.active_session() else {
+                    return Ok(false);
+                };
+                if !this.py.detached_sessions.contains(&session) {
+                    this.py.detached_sessions.push(session);
+                }
+                remove_session_from_tabs(&mut this.py, session);
+                Ok(true)
+            })
+        });
+        methods.add_function("attach", |lua, args: LuaMultiValue| {
+            let (this, (session, tab)) = args!(args, lua, (SessionId, Option<usize>));
+            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
+                if this.py.session_manager.session(session).is_none() {
+                    return Ok(false);
+                }
+                let Some(target) = tab.or(this.py.current_tab) else {
+                    return Ok(false);
+                };
+                if target >= this.py.tabs.len() {
+                    return Ok(false);
+                }
+                let py = &mut this.py;
+                py.detached_sessions.retain(|detached| *detached != session);
+                remove_session_from_tabs(py, session);
+                if py.tabs[target].is_none() {
+                    py.tabs[target] = Some(TerminalTab::new(session));
+                } else if let Some(tab) = py.tabs[target].as_mut() {
+                    tab.split_active(SplitDirection::Vertical, session);
+                }
+                py.current_tab = Some(target);
+                py.wheel_remainder = 0.0;
+                Ok(true)
+            })
+        });
+        methods.add_function("rename", |lua, args: LuaMultiValue| {
+            let (this, (rest,)) = args!(args, lua, (LuaMultiValue,));
+            let (session, name) = {
+                let with_session: LuaResult<(SessionId, String)> =
+                    FromLuaMulti::from_lua_multi(rest.clone(), lua);
+                match with_session {
+                    Ok((session, name)) => (Some(session), name),
+                    Err(_) => {
+                        let (name,) = FromLuaMulti::from_lua_multi(rest, lua)?;
+                        (None, name)
+                    }
+                }
+            };
+            callable_action!(lua, this => {
+                let name = name.clone();
+                move |this: &mut Self| -> LuaResult<bool> {
+                    let Some(session) = session.or_else(|| this.py.active_session()) else {
+                        return Ok(false);
+                    };
+                    let Some(term_session) = this.py.session_manager.session_mut(session) else {
+                        return Ok(false);
+                    };
+                    term_session.rename(name.clone());
+                    Ok(true)
+                }
+            })
+        });
     }
 
     fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
@@ -191,6 +442,38 @@ impl LuaUserData for LuaProxy {
             Ok(outer)
         });
     }
+}
+
+fn remove_session_from_tabs(py: &mut Pyonji, session: SessionId) {
+    let current = py.current_tab;
+    let mut emptied_current = false;
+    for (index, tab) in py.tabs.iter_mut().enumerate() {
+        let Some(tab_state) = tab.as_mut() else {
+            continue;
+        };
+        if !tab_state.remove_session(session) {
+            continue;
+        }
+        if tab_state.is_empty() {
+            *tab = None;
+            emptied_current |= Some(index) == current;
+        }
+    }
+    if !emptied_current {
+        return;
+    }
+    let Some(closed) = current else {
+        return;
+    };
+    if let Some(tab) = (0..py.tabs.len())
+        .map(|offset| (closed + py.tabs.len() - 1 - offset) % py.tabs.len())
+        .find(|&tab| py.tabs[tab].is_some())
+    {
+        py.current_tab = Some(tab);
+        py.wheel_remainder = 0.0;
+        return;
+    }
+    py.current_tab = Some(closed.min(py.tabs.len().saturating_sub(1)));
 }
 
 fn config_value<T: FromLua>(lua: &Lua, table: &LuaTable, key: &str) -> Option<T> {

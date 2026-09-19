@@ -20,9 +20,9 @@ mod ui;
 mod util;
 
 use assets::{GlobalAssets, PyonjiAsset, PyonjiAssetsSource};
-
 use pty::Event;
 use terminal::{Tab as TerminalTab, *};
+use ui::Overlay;
 use ui::Terminal;
 
 use std::{array, path::PathBuf, sync::Arc};
@@ -41,10 +41,16 @@ use tracing_subscriber::prelude::*;
 
 use crate::{
     pty::SshConnection,
-    ui::{StatusBar, StatusBarEvent, StatusBarMode},
+    ui::{OverlayScreen, StatusBar, StatusBarEvent, StatusBarMode},
 };
 
-actions!([EnterRename, EnterLuaRepl]);
+actions!([
+    EnterRename,
+    EnterLuaRepl,
+    OpenPalette,
+    OpenReleases,
+    OpenSessions
+]);
 
 #[derive(clap::Parser)]
 struct Cli {
@@ -100,6 +106,7 @@ struct Pyonji {
     //views
     terminal: Entity<Terminal>,
     status_bar: Entity<StatusBar>,
+    overlay: Entity<Overlay>,
 
     //jobs
     _event_loop_task: Task<()>,
@@ -153,6 +160,9 @@ impl Pyonji {
         cx.bind_keys([
             KeyBinding::new("ctrl-b r", EnterRename, Some(Self::TERMINAL_CONTEXT)),
             KeyBinding::new("ctrl-b l", EnterLuaRepl, Some(Self::TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-shift-f", OpenPalette, Some(Self::TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-shift-r", OpenReleases, Some(Self::TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-shift-s", OpenSessions, Some(Self::TERMINAL_CONTEXT)),
             KeyBinding::new("ctrl-b 1", SwitchTab(0), Some(Self::TERMINAL_CONTEXT)),
             KeyBinding::new("ctrl-b 2", SwitchTab(1), Some(Self::TERMINAL_CONTEXT)),
             KeyBinding::new("ctrl-b 3", SwitchTab(2), Some(Self::TERMINAL_CONTEXT)),
@@ -174,6 +184,7 @@ impl Pyonji {
 
             terminal: cx.new(|cx| Terminal::new(py.clone(), cx)),
             status_bar: Self::setup_status_bar(window, cx),
+            overlay: cx.new(|cx| Overlay::new(py.clone(), window, cx)),
 
             _event_loop_task: Self::spawn_event_loop(rx, window, cx),
             _subscriptions: smallvec![],
@@ -202,7 +213,7 @@ impl Pyonji {
                 }
                 StatusBarEvent::Renamed(id, title) => {
                     if let Some(session) = this.session_manager.session_mut(*id) {
-                        session.set_title(title.clone());
+                        session.rename(title.clone());
                     }
                 }
                 StatusBarEvent::ExecLua(code) => {
@@ -310,38 +321,14 @@ impl Pyonji {
         });
     }
 
-    fn on_enter_lua(&mut self, _: &EnterLuaRepl, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_enter_lua(&mut self, _: &EnterLuaRepl, _: &mut Window, cx: &mut Context<Self>) {
         self.status_bar.update(cx, |this, cx| {
             this.set_mode(StatusBarMode::Lua, cx);
         });
     }
 
     fn on_switch_tab(&mut self, tab: &SwitchTab, _: &mut Window, cx: &mut Context<Self>) {
-        let tab = tab.0;
-        let terminal = self.terminal.read(cx);
-        if tab >= self.tabs.len() {
-            return;
-        }
-        if self.tabs[tab].is_none() {
-            let id = match self.session_manager.create_session(
-                terminal.rows.max(1),
-                terminal.cols.max(1),
-                self.default_cwd.as_deref(),
-            ) {
-                Ok(id) => id,
-                Err(error) => {
-                    tracing::error!(error = ?error, "failed to create tab session");
-                    return;
-                }
-            };
-            self.tabs[tab] = Some(TerminalTab::new(id));
-        }
-
-        self.current_tab = Some(tab);
-        self.wheel_remainder = 0.0;
-        self.resize_tab(tab, cx);
-        //self.update_ime_cursor_area();
-        cx.notify();
+        self.switch_tab(tab.0, cx);
     }
 
     fn on_error(&mut self, error: &PushError, window: &mut Window, cx: &mut Context<Self>) {
@@ -498,6 +485,33 @@ impl Pyonji {
         true
     }
 
+    pub fn switch_tab(&mut self, tab: usize, cx: &mut Context<Self>) {
+        let terminal = self.terminal.read(cx);
+        if tab >= self.tabs.len() {
+            return;
+        }
+        if self.tabs[tab].is_none() {
+            let id = match self.session_manager.create_session(
+                terminal.rows.max(1),
+                terminal.cols.max(1),
+                self.default_cwd.as_deref(),
+            ) {
+                Ok(id) => id,
+                Err(error) => {
+                    tracing::error!(error = ?error, "failed to create tab session");
+                    return;
+                }
+            };
+            self.tabs[tab] = Some(TerminalTab::new(id));
+        }
+
+        self.current_tab = Some(tab);
+        self.wheel_remainder = 0.0;
+        self.resize_tab(tab, cx);
+        //self.update_ime_cursor_area();
+        cx.notify();
+    }
+
     fn switch_to_previous_live_tab_or_stay(&mut self, closed_tab: usize, cx: &mut Context<Self>) {
         if let Some(tab) = (0..self.tabs.len())
             .map(|offset| (closed_tab + self.tabs.len() - 1 - offset) % self.tabs.len())
@@ -598,12 +612,27 @@ impl Render for Pyonji {
                             .on_action(cx.listener(Self::on_enter_rename))
                             .on_action(cx.listener(Self::on_enter_lua))
                             .on_action(cx.listener(Self::on_switch_tab))
-                            .child(self.terminal.clone()),
+                            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
+                                this.overlay.update(cx, |this, cx| {
+                                    this.open(OverlayScreen::Palette, window, cx);
+                                });
+                            }))
+                            .on_action(cx.listener(|this, _: &OpenReleases, window, cx| {
+                                this.overlay.update(cx, |this, cx| {
+                                    this.open(OverlayScreen::Releases, window, cx);
+                                });
+                            }))
+                            .on_action(cx.listener(|this, _: &OpenSessions, window, cx| {
+                                this.overlay.update(cx, |this, cx| {
+                                    this.open(OverlayScreen::Sessions, window, cx);
+                                });
+                            }))
+                            .child(self.terminal.clone())
+                            .children(Root::render_dialog_layer(window, cx)),
                     )
                     .child(self.status_bar.clone()),
             )
             .children(Root::render_sheet_layer(window, cx))
-            .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
     }
 }

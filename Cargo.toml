@@ -52,8 +52,8 @@ gpui = { git = "https://github.com/gpui-ce/gpui-ce", features = ["custom-gpu"], 
 gpui_platform = { git = "https://github.com/gpui-ce/gpui-ce", package = "gpui_ce_platform" }
 gpui_tokio = { git = "https://github.com/gpui-ce/gpui-ce", package = "gpui_ce_tokio" }
 gpui_wgpu = { git = "https://github.com/gpui-ce/gpui-ce", package = "gpui_ce_wgpu" }
-gpui_ce_components = { path = "../oss/gpui-component/crates/ui/" }
-gpui_ce_components_base = { path = "../oss/gpui-component/crates/base/" }
+gpui_ce_components = { path = "../oss/gpui-component/crates/ui/", features = ["inspector"] }
+gpui_ce_components_base = { path = "../oss/gpui-component/crates/base/", features = ["inspector"] }
 gpui_ce_components_assets = { path = "../oss/gpui-component/crates/assets/" }
 gpui_ce_components_macros = { path = "../oss/gpui-component/crates/macros/" }
 rust-embed = "8.11.0"
