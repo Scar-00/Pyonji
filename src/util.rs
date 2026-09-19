@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 use anyhow::{Context as _, Result};
 use std::{
     any::Any,
@@ -217,3 +218,13 @@ mod test {
         assert_eq!(vec.len(), 101);
     }
 }*/
+
+macro_rules! read {
+    ($path: expr, $cx: ident) => {{
+        let v = $path
+            .upgrade()
+            .expect("child survived longer then parent view");
+        v.read($cx)
+    }};
+}
+pub(crate) use read;

@@ -16,13 +16,14 @@ mod config;
 mod pty;
 mod renderer;
 mod terminal;
+mod ui;
 mod util;
 
 use assets::{GlobalAssets, PyonjiAsset, PyonjiAssetsSource};
 
 use pty::Event;
-use renderer::{Pane as RendererPane, *};
 use terminal::{Tab as TerminalTab, *};
+use ui::Terminal;
 
 use std::{array, path::PathBuf, sync::Arc};
 
@@ -34,12 +35,16 @@ use gpui_component::{
     Icon, Root, ThemeMode, WindowExt,
     notification::{Notification, NotificationType},
 };
-use gpui_wgpu::{WgpuContextHandle, WgpuRenderTarget};
 use mlua::prelude::*;
 use smallvec::{SmallVec, smallvec};
 use tracing_subscriber::prelude::*;
 
-use crate::pty::SshConnection;
+use crate::{
+    pty::SshConnection,
+    ui::{StatusBar, StatusBarEvent, StatusBarMode},
+};
+
+actions!([EnterRename, EnterLuaRepl]);
 
 #[derive(clap::Parser)]
 struct Cli {
@@ -94,6 +99,7 @@ struct Pyonji {
 
     //views
     terminal: Entity<Terminal>,
+    status_bar: Entity<StatusBar>,
 
     //jobs
     _event_loop_task: Task<()>,
@@ -116,6 +122,8 @@ impl Pyonji {
     };
     const ICON: &[u8] = include_bytes!("../resources/icon.ico");
     const INITIAL_SIZE: (f32, f32) = (1280.0, 720.0);
+
+    const TERMINAL_CONTEXT: &str = "terminal";
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cli = Cli::parse();
@@ -142,7 +150,13 @@ impl Pyonji {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
 
-        cx.bind_keys([KeyBinding::new("ctrl-a", PushError::new("test"), None)]);
+        cx.bind_keys([
+            KeyBinding::new("ctrl-b r", EnterRename, Some(Self::TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-b l", EnterLuaRepl, Some(Self::TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-b 1", SwitchTab(0), Some(Self::TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-b 2", SwitchTab(1), Some(Self::TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-b 3", SwitchTab(2), Some(Self::TERMINAL_CONTEXT)),
+        ]);
 
         let py = cx.weak_entity();
         Self::spawn_inital_session(window, cx);
@@ -159,6 +173,7 @@ impl Pyonji {
             wheel_remainder: 0.0,
 
             terminal: cx.new(|cx| Terminal::new(py.clone(), cx)),
+            status_bar: Self::setup_status_bar(window, cx),
 
             _event_loop_task: Self::spawn_event_loop(rx, window, cx),
             _subscriptions: smallvec![],
@@ -169,6 +184,43 @@ impl Pyonji {
             default_cwd: None,
             ssh_sessions: vec![],
         }
+    }
+
+    fn setup_status_bar(window: &mut Window, cx: &mut Context<Self>) -> Entity<StatusBar> {
+        let py = cx.weak_entity();
+        let bar = cx.new(|cx| StatusBar::new(py, cx));
+        cx.subscribe_in(
+            &bar,
+            window,
+            |this, status_bar, ev: &StatusBarEvent, window, cx| match ev {
+                StatusBarEvent::Dismiss => {
+                    status_bar.update(cx, |this, cx| {
+                        this.set_mode(StatusBarMode::Sessions, cx);
+                        this.reset_history();
+                    });
+                    window.focus(&this.focus_handle, cx);
+                }
+                StatusBarEvent::Renamed(id, title) => {
+                    if let Some(session) = this.session_manager.session_mut(*id) {
+                        session.set_title(title.clone());
+                    }
+                }
+                StatusBarEvent::ExecLua(code) => {
+                    let lua = this.lua.clone();
+                    let res = config::with_env(this, cx, |_| lua.load(code).exec());
+                    this.status_bar.update(cx, |this, cx| {
+                        this.push_lua_history(code.clone());
+                        this.reset_history();
+                        cx.notify();
+                    });
+                    if let Err(e) = res {
+                        window.dispatch_action(Box::new(PushError::new(e)), cx);
+                    }
+                }
+            },
+        )
+        .detach();
+        bar
     }
 
     fn spawn_event_loop(
@@ -239,6 +291,57 @@ impl Pyonji {
                 .unwrap()
         })
         .detach()
+    }
+
+    fn on_enter_rename(&mut self, _: &EnterRename, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.active_session() else {
+            return;
+        };
+        let Some(inital) = self.session_manager.session(session) else {
+            return;
+        };
+        let inital = inital.title();
+        let mode = StatusBarMode::Rename {
+            inital: inital.to_string(),
+            session,
+        };
+        self.status_bar.update(cx, |this, cx| {
+            this.set_mode(mode, cx);
+        });
+    }
+
+    fn on_enter_lua(&mut self, _: &EnterLuaRepl, window: &mut Window, cx: &mut Context<Self>) {
+        self.status_bar.update(cx, |this, cx| {
+            this.set_mode(StatusBarMode::Lua, cx);
+        });
+    }
+
+    fn on_switch_tab(&mut self, tab: &SwitchTab, _: &mut Window, cx: &mut Context<Self>) {
+        let tab = tab.0;
+        let terminal = self.terminal.read(cx);
+        if tab >= self.tabs.len() {
+            return;
+        }
+        if self.tabs[tab].is_none() {
+            let id = match self.session_manager.create_session(
+                terminal.rows.max(1),
+                terminal.cols.max(1),
+                self.default_cwd.as_deref(),
+            ) {
+                Ok(id) => id,
+                Err(error) => {
+                    tracing::error!(error = ?error, "failed to create tab session");
+                    return;
+                }
+            };
+            self.tabs[tab] = Some(TerminalTab::new(id));
+        }
+
+        self.current_tab = Some(tab);
+        self.wheel_remainder = 0.0;
+        self.resize_tab(tab, cx);
+        //self.update_ime_cursor_area();
+        cx.notify();
     }
 
     fn on_error(&mut self, error: &PushError, window: &mut Window, cx: &mut Context<Self>) {
@@ -469,264 +572,45 @@ impl Pyonji {
     }
 }
 
-impl Pyonji {
-    pub fn exec_lua(
-        &self,
-        cx: &mut Context<Self>,
-        f: impl 'static + AsyncFn(WeakEntity<Self>, &mut AsyncApp, Lua),
-    ) {
-        let lua = self.lua.clone();
-        cx.spawn(async move |this, cx| {
-            f(this, cx, lua).await;
-        })
-        .detach();
-    }
-}
-
 impl Render for Pyonji {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        window.request_animation_frame();
+        //window.request_animation_frame();
         v_flex()
             .id("main-view")
             .track_focus(&self.focus_handle)
             .size_full()
             .bg(theme.background)
-            .text_color(cx.theme().text)
+            .text_color(theme.text)
             .on_action(cx.listener(Self::on_error))
             .on_action(cx.listener(Self::on_warning))
             .on_action(cx.listener(Self::on_info))
             .on_action(cx.listener(Self::on_lua_print))
-            .child(v_flex().size_full().p_2().child(self.terminal.clone()))
+            .child(
+                v_flex()
+                    .size_full()
+                    .p_2()
+                    .child(
+                        div()
+                            .size_full()
+                            .track_focus(&self.focus_handle)
+                            .key_context(Self::TERMINAL_CONTEXT)
+                            .on_action(cx.listener(Self::on_enter_rename))
+                            .on_action(cx.listener(Self::on_enter_lua))
+                            .on_action(cx.listener(Self::on_switch_tab))
+                            .child(self.terminal.clone()),
+                    )
+                    .child(self.status_bar.clone()),
+            )
             .children(Root::render_sheet_layer(window, cx))
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
     }
 }
 
-struct LuaProxy {
-    pyonji: WeakEntity<Pyonji>,
-    cx: AsyncWindowContext,
-}
-
-impl LuaUserData for LuaProxy {
-    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("test", |_, this, _: ()| {
-            let t = this.pyonji.read_with(&this.cx, |this, _| this.line_height);
-            println!("test: {t:?}");
-            Ok(())
-        })
-    }
-}
-
-struct Terminal {
-    pyonji: WeakEntity<Pyonji>,
-
-    context: Option<gpui_wgpu::WgpuContextHandle>,
-    target: Option<gpui_wgpu::WgpuRenderTarget>,
-    renderer: Option<Renderer>,
-
-    //metrics
-    scale: f32,
-    bounds: Bounds<Pixels>,
-    rows: u16,
-    cols: u16,
-
-    ime_preedit: Option<String>,
-}
-
-impl Terminal {
-    pub fn new(pyonji: WeakEntity<Pyonji>, _cx: &mut Context<Self>) -> Self {
-        Self {
-            pyonji,
-
-            context: None,
-            target: None,
-            renderer: None,
-
-            scale: 0.0,
-            bounds: Bounds::default(),
-            rows: 20,
-            cols: 80,
-
-            ime_preedit: None,
-        }
-    }
-
-    fn on_prepaint(&mut self, bounds: Bounds<Pixels>, _: &mut Window, cx: &mut Context<Self>) {
-        if self.bounds != bounds {
-            self.bounds = bounds;
-            cx.notify();
-        }
-    }
-
-    fn clear_gpu_resources(&mut self) {
-        self.context = None;
-        self.target = None;
-        self.renderer = None;
-    }
-
-    fn ensure_context(&mut self, window: &mut Window) -> Option<WgpuContextHandle> {
-        let context = WgpuContextHandle::from_window(window)?;
-        if self
-            .context
-            .as_ref()
-            .is_some_and(|previous| !context.is_same_device(previous))
-        {
-            self.clear_gpu_resources();
-        }
-        if context.device_lost() {
-            self.clear_gpu_resources();
-            return None;
-        }
-        self.context = Some(context.clone());
-        Some(context)
-    }
-
-    fn sync_surface(
-        &mut self,
-        content_size: Size<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(context) = self.ensure_context(window) else {
-            return;
-        };
-        let scale_factor = window.scale_factor();
-        self.scale = scale_factor;
-        let target_size = size(
-            DevicePixels((f32::from(content_size.width) * scale_factor).round() as i32),
-            DevicePixels((f32::from(content_size.height) * scale_factor).round() as i32),
-        );
-        let target_size = size(
-            target_size.width.max(gpui::DevicePixels(1)),
-            target_size.height.max(gpui::DevicePixels(1)),
-        );
-
-        match self.target.as_mut() {
-            Some(target) => target.resize(&context, target_size),
-            None => {
-                self.target = Some(WgpuRenderTarget::new(&context, target_size));
-            }
-        }
-
-        let Some(target) = self.target.as_ref() else {
-            return;
-        };
-
-        let Some(pyonji) = self.pyonji.upgrade() else {
-            return;
-        };
-
-        if self.renderer.is_none() {
-            let pyonji = pyonji.read(cx);
-            let queue = context.queue().clone();
-            let device = context.device().clone();
-            self.renderer = Renderer::new(
-                queue,
-                device,
-                target.format(),
-                pyonji.font_family.as_deref(),
-                pyonji.font_size,
-                pyonji.font_size * pyonji.line_height,
-            )
-            .ok();
-        }
-
-        let font_size = pyonji.read(cx).font_size;
-        let cols = ((target_size.width.0 as f32 / (font_size / 2.0)) as u16).max(1);
-        let rows =
-            ((target_size.height.0 as f32 / font_size * pyonji.read(cx).line_height) as u16).max(1);
-        if cols != self.cols || rows != self.rows {
-            self.cols = cols;
-            self.rows = rows;
-            pyonji.update(cx, |this, _| {
-                for (id, geometry) in this.tab_layouts(cols, rows) {
-                    this.session_manager
-                        .resize_session(id, geometry.rows, geometry.cols);
-                }
-            });
-        }
-    }
-
-    fn paint(&mut self, cx: &mut Context<Self>) {
-        let Some(pyonji) = self.pyonji.upgrade() else {
-            println!("failed to upgrade py");
-            return;
-        };
-        let pyonji = pyonji.read(cx);
-        let Some(target) = self.target.as_ref() else {
-            println!("target is none");
-            return;
-        };
-        let panes = pyonji.tab_layouts(self.rows, self.cols);
-        let active = pyonji.active_session();
-        let dividers = pyonji.tab_dividers(self.rows, self.cols);
-        let ime_preedit = self.ime_preedit(pyonji);
-
-        let mut pane_data = Vec::with_capacity(panes.len());
-        for (session_id, geometry) in panes {
-            let Some(session) = pyonji.session_manager.session(session_id) else {
-                continue;
-            };
-            pane_data.push(RendererPane {
-                screen: session.vt.screen(),
-                cursor_style: &session.cursor_style,
-                geometry,
-                is_active: Some(session_id) == active,
-            });
-        }
-        let Some(renderer) = self.renderer.as_mut() else {
-            return;
-        };
-        let target_size = target.size();
-        let size = [target_size.width.0 as u32, target_size.height.0 as u32];
-        _ = renderer.render(
-            target.view(),
-            &pane_data,
-            &dividers,
-            ime_preedit.as_ref(),
-            size,
-        );
-    }
-
-    fn ime_preedit(&self, pyonji: &Pyonji) -> Option<ImePreedit> {
-        let text = self.ime_preedit.clone()?;
-        let active_session = pyonji.active_session()?;
-        let session = pyonji.session_manager.session(active_session)?;
-        let (_, geometry) = pyonji
-            .tab_layouts(self.rows, self.cols)
-            .into_iter()
-            .find(|(session_id, _)| *session_id == active_session)?;
-        let (row, col) = session.vt.screen().cursor_position();
-
-        Some(ImePreedit {
-            text,
-            geometry,
-            row,
-            col,
-        })
-    }
-}
-
-impl Render for Terminal {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        container_query(cx.processor(|this, size: Size<Pixels>, window, cx| {
-            this.sync_surface(size, window, cx);
-            this.paint(cx);
-            div()
-                .size_full()
-                .on_prepaint(cx.processor(Self::on_prepaint))
-                .children(this.target.as_ref().map(|target| {
-                    target
-                        .surface()
-                        .object_fit(gpui::ObjectFit::Fill)
-                        .size_full()
-                }))
-        }))
-        .size_full()
-    }
-}
+#[derive(Action, Clone, PartialEq)]
+#[action(no_json)]
+struct SwitchTab(usize);
 
 #[derive(Action, Clone, PartialEq)]
 #[action(no_json)]
@@ -819,6 +703,8 @@ pub struct Theme {
     background: Rgba,
     surface: Rgba,
     text: Rgba,
+    selected: Rgba,
+    unselected: Rgba,
 }
 
 impl Theme {
@@ -831,6 +717,8 @@ impl Theme {
             background: Rgba::new(24.0 / 255.0, 24.0 / 255.0, 24.0 / 255.0, 1.0),
             surface: Rgba::new(30.0 / 255.0, 30.0 / 255.0, 46.0 / 255.0, 1.0),
             text: Rgba::new(0.9, 0.9, 0.9, 1.0),
+            selected: Rgba::new(58.0 / 255.0, 58.0 / 255.0, 92.0 / 255.0, 1.0),
+            unselected: Rgba::new(40.0 / 255.0, 40.0 / 255.0, 40.0 / 255.0, 1.0),
         }
     }
 }

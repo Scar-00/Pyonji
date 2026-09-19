@@ -1,6 +1,5 @@
 use crate::Pyonji;
 use crate::pty::{Event as PtyEvent, SshConnection};
-use crate::terminal::{SessionId, SplitDirection};
 use crate::util::UnsafeRefMut;
 use anyhow::{Context as _, Result};
 use async_channel::Sender;
@@ -11,7 +10,7 @@ use path_absolutize::*;
 use std::fmt::Debug;
 use std::io::Write;
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
@@ -114,13 +113,222 @@ struct LuaProxy {
 
 impl LuaUserData for LuaProxy {
     fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method_mut("foo", |_, this, _: ()| {
-            let LuaProxy { py, cx } = this;
-            println!("line = {}", py.line_height);
-            println!("id = {}", cx.entity_id());
+        methods.add_method_mut("config", |lua, this, table: LuaTable| {
+            let font_size: Option<f32> = config_value(lua, &table, "font_size");
+            if font_size.is_some_and(|size| size <= 0.0) {
+                tracing::error!("invalid `font_size` (must be positive), ignoring");
+            }
+            let line_height: Option<f32> = config_value(lua, &table, "line_height");
+            if line_height.is_some_and(|height| height <= 0.0) {
+                tracing::error!("invalid `line_height` (must be positive), ignoring");
+            }
+            let font_family: Option<Option<String>> =
+                config_option_value(lua, &table, "font_family");
+            let default_cwd: Option<Option<String>> =
+                config_option_value(lua, &table, "default_cwd");
+            let ssh_sessions = config_ssh_sessions(lua, &table);
+
+            if let Some(size) = font_size.filter(|size| *size > 0.0) {
+                this.py.font_size = size;
+            }
+            if let Some(height) = line_height.filter(|height| *height > 0.0) {
+                this.py.line_height = height;
+            }
+            if let Some(family) = font_family {
+                this.py.font_family = family;
+            }
+            if let Some(cwd) = default_cwd {
+                this.py.default_cwd = cwd.map(PathBuf::from);
+            }
+            if let Some(sessions) = ssh_sessions {
+                this.py.ssh_sessions = sessions;
+            }
             Ok(())
         });
     }
+
+    fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("font_size", |_, this| Ok(this.py.font_size));
+        fields.add_field_method_get("line_height", |_, this| Ok(this.py.line_height));
+        fields.add_field_method_get("font_family", |_, this| Ok(this.py.font_family.clone()));
+        fields.add_field_method_get("default_cwd", |_, this| {
+            Ok(this
+                .py
+                .default_cwd
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()))
+        });
+        fields.add_field_method_get("current_tab", |_, this| Ok(this.py.current_tab));
+        fields.add_field_method_get("active_session", |_, this| Ok(this.py.active_session()));
+        fields.add_field_method_get("tab_count", |_, this| {
+            Ok(this.py.tabs.iter().flatten().count())
+        });
+        fields.add_field_method_get("detached_sessions", |lua, this| {
+            lua.create_sequence_from(this.py.detached_sessions.clone())
+        });
+        fields.add_field_method_get("ssh_sessions", |lua, this| {
+            let table = lua.create_table()?;
+            for (index, session) in this.py.ssh_sessions.iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.set("name", session.name.clone())?;
+                entry.set("user_name", session.user_name.clone())?;
+                entry.set("ip", session.ip.to_string())?;
+                table.raw_set(index + 1, entry)?;
+            }
+            Ok(table)
+        });
+        fields.add_field_method_get("sessions", |lua, this| {
+            let outer = lua.create_table()?;
+            for (index, sessions) in this
+                .py
+                .tabs
+                .iter()
+                .filter_map(|tab| tab.as_ref().map(|tab| tab.sessions()))
+                .enumerate()
+            {
+                outer.raw_set(index + 1, lua.create_sequence_from(sessions)?)?;
+            }
+            Ok(outer)
+        });
+    }
+}
+
+fn config_value<T: FromLua>(lua: &Lua, table: &LuaTable, key: &str) -> Option<T> {
+    if !table.contains_key(key).unwrap_or(false) {
+        return None;
+    }
+    let value: LuaValue = table.get(key).unwrap_or(LuaValue::Nil);
+    resolve_value(lua, value, key)
+}
+
+fn config_option_value<T: FromLua>(lua: &Lua, table: &LuaTable, key: &str) -> Option<Option<T>> {
+    if !table.contains_key(key).unwrap_or(false) {
+        return None;
+    }
+    let value: LuaValue = table.get(key).unwrap_or(LuaValue::Nil);
+    match value {
+        LuaValue::Nil => Some(None),
+        LuaValue::Function(func) => match func.call::<LuaValue>(()) {
+            Ok(LuaValue::Nil) => Some(None),
+            Ok(value) => match T::from_lua(value, lua) {
+                Ok(resolved) => Some(Some(resolved)),
+                Err(error) => {
+                    tracing::error!(%error, key, "invalid config value");
+                    None
+                }
+            },
+            Err(error) => {
+                tracing::error!(%error, key, "config value function failed");
+                None
+            }
+        },
+        value => match T::from_lua(value, lua) {
+            Ok(resolved) => Some(Some(resolved)),
+            Err(error) => {
+                tracing::error!(%error, key, "invalid config value");
+                None
+            }
+        },
+    }
+}
+
+fn resolve_value<T: FromLua>(lua: &Lua, value: LuaValue, key: &str) -> Option<T> {
+    match value {
+        LuaValue::Nil => None,
+        LuaValue::Function(func) => match func.call::<LuaValue>(()) {
+            Ok(LuaValue::Nil) => None,
+            Ok(value) => match T::from_lua(value, lua) {
+                Ok(resolved) => Some(resolved),
+                Err(error) => {
+                    tracing::error!(%error, key, "invalid config value");
+                    None
+                }
+            },
+            Err(error) => {
+                tracing::error!(%error, key, "config value function failed");
+                None
+            }
+        },
+        value => match T::from_lua(value, lua) {
+            Ok(resolved) => Some(resolved),
+            Err(error) => {
+                tracing::error!(%error, key, "invalid config value");
+                None
+            }
+        },
+    }
+}
+
+fn config_ssh_sessions(lua: &Lua, table: &LuaTable) -> Option<Vec<SshConnection>> {
+    if !table.contains_key("ssh_sessions").unwrap_or(false) {
+        return None;
+    }
+    let value: LuaValue = table.get("ssh_sessions").unwrap_or(LuaValue::Nil);
+    let value = match value {
+        LuaValue::Nil => return Some(Vec::new()),
+        LuaValue::Function(func) => match func.call::<LuaValue>(()) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(%error, "config value function failed for `ssh_sessions`");
+                return None;
+            }
+        },
+        value => value,
+    };
+    let entries = match Vec::<LuaValue>::from_lua(value, lua) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::error!(%error, "invalid `ssh_sessions` (expected a list of tables)");
+            return None;
+        }
+    };
+    let mut sessions = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.into_iter().enumerate() {
+        let entry = match entry {
+            LuaValue::Function(func) => match func.call::<LuaValue>(()) {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::error!(%error, index, "ssh session function failed, skipping entry");
+                    continue;
+                }
+            },
+            entry => entry,
+        };
+        let LuaValue::Table(entry) = entry else {
+            tracing::error!(index, "ssh session entry is not a table, skipping");
+            continue;
+        };
+        let name: Option<String> = entry
+            .get::<LuaValue>("name")
+            .ok()
+            .and_then(|value| resolve_value(lua, value, "ssh_sessions[].name"));
+        let Some(name) = name else {
+            tracing::error!(index, "ssh session entry misses `name`, skipping");
+            continue;
+        };
+        let user_name: Option<String> = entry
+            .get::<LuaValue>("user_name")
+            .ok()
+            .and_then(|value| resolve_value(lua, value, "ssh_sessions[].user_name"));
+        let ip: Option<String> = entry
+            .get::<LuaValue>("ip")
+            .ok()
+            .and_then(|value| resolve_value(lua, value, "ssh_sessions[].ip"));
+        let Some(ip) = ip else {
+            tracing::error!(index, "ssh session entry misses `ip`, skipping");
+            continue;
+        };
+        let Ok(ip) = IpAddr::from_str(&ip) else {
+            tracing::error!(index, ip, "ssh session entry has an invalid `ip`, skipping");
+            continue;
+        };
+        sessions.push(SshConnection {
+            user_name: user_name.unwrap_or_else(|| name.clone()),
+            name,
+            ip,
+        });
+    }
+    Some(sessions)
 }
 /*
 impl LuaUserData for Pyonji {

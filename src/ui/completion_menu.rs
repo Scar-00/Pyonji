@@ -1,15 +1,5 @@
-use gpui::{IntoElement, anchored, deferred, div, prelude::*};
+/*use gpui::{IntoElement, anchored, deferred, div, prelude::*};
 
-use crate::{
-    theme::{self, role},
-    ui::list_row::ListRow,
-};
-
-/// Completion menu snapshot: constrained popover anchored above the bar.
-///
-/// Snapshot view (no own state): constructed per-frame from entity state,
-/// like `ChatHistory` in t3chat. Renders nothing when empty so callers can
-/// always include it.
 #[derive(IntoElement)]
 pub struct CompletionMenu {
     items: Vec<String>,
@@ -55,4 +45,4 @@ impl RenderOnce for CompletionMenu {
 #[allow(dead_code)]
 pub fn completion_menu(items: &[String], selected: usize) -> CompletionMenu {
     CompletionMenu::new(items.to_vec(), selected)
-}
+}*/

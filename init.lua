@@ -104,4 +104,16 @@ function Os()
 end
 ]]--
 
-py:foo();
+py:config({
+    font_family = "Iosevka",
+    font_size = 38.0,
+    line_height = 1.1,
+    fullscreen = false,
+    ssh_sessions = {
+        {
+            name = "ive",
+            ip = "192.168.178.20",
+        }
+    },
+    status_height = 0.75,
+});
