@@ -9,8 +9,6 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender};
 
-use crate::ResultExt;
-
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct UnsafeRefMut<T>(*mut T);
@@ -61,7 +59,7 @@ impl<Idx, T: IndexMut<Idx>> IndexMut<Idx> for UnsafeRefMut<T> {
         <T as IndexMut<Idx>>::index_mut(self, index)
     }
 }
-
+/*
 pub struct Worker {
     thread: JoinHandle<()>,
     tx: Sender<Box<dyn Fn() -> Box<dyn Any + Send> + Send>>,
@@ -218,4 +216,4 @@ mod test {
         println!("vec = {vec:?}");
         assert_eq!(vec.len(), 101);
     }
-}
+}*/

@@ -1,9 +1,10 @@
-use crate::overlay::{LuaAction, Screen};
+use crate::Pyonji;
 use crate::pty::{Event as PtyEvent, SshConnection};
 use crate::terminal::{SessionId, SplitDirection};
-use crate::{BuiltinAction, KeyAction, OpenLuaPrompt, OpenCommandPrompt, OpenRenamePrompt, ResultExt, ShowStatusMessage, Surface, ToggleFullscreen, ToggleStatusBar};
-use anyhow::{Context, Result};
-use gpui::{KeyDownEvent, Modifiers};
+use crate::util::UnsafeRefMut;
+use anyhow::{Context as _, Result};
+use async_channel::Sender;
+use gpui::{App, Context, Entity, EntityId, KeyDownEvent, Modifiers, WeakEntity};
 use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
 use path_absolutize::*;
@@ -16,7 +17,8 @@ use std::thread;
 use std::time::Duration;
 
 const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
-pub const LUA_MODULES: &[(&str, &str)] = &[("lua.keybind", include_str!("../resources/lua/keybind.lua"))];
+pub const LUA_MODULES: &[(&str, &str)] =
+    &[("lua.keybind", include_str!("../resources/lua/keybind.lua"))];
 
 #[allow(unused_macros)]
 macro_rules! apply {
@@ -42,12 +44,11 @@ macro_rules! callable_action {
                 .next()
                 .unwrap_or(LuaValue::Nil))
         } else {
-            let func = $lua.create_function(move |_, this: LuaAnyUserData| {
-                this.borrow_mut_scoped($body)?
-            })?;
+            let func = $lua
+                .create_function(move |_, this: LuaAnyUserData| this.borrow_mut_scoped($body)?)?;
             Ok(LuaValue::Function(func))
         }
-    }}
+    }};
 }
 
 macro_rules! args {
@@ -55,9 +56,7 @@ macro_rules! args {
         let mut args = $args;
         let first = args.pop_front();
         let this = match first {
-            Some(first) if first.is_userdata() => {
-                Some(LuaAnyUserData::from_lua(first, $lua)?)
-            }
+            Some(first) if first.is_userdata() => Some(LuaAnyUserData::from_lua(first, $lua)?),
             Some(first) => {
                 args.push_front(first);
                 None
@@ -69,18 +68,64 @@ macro_rules! args {
     }};
 }
 
-impl Surface {
+/*impl Surface {
     pub fn apply_config(&mut self) {
         // Font metrics live in the terminal component; the renderer picks
         // them up here. Rows/cols are driven by GPUI layout (`sync_surface`),
         // palette/tabs sync to the bar every frame in `render`.
         self.terminal.apply_font_metrics();
     }
+}#*/
+
+pub struct ProxyContext<T> {
+    app: UnsafeRefMut<App>,
+    entity_state: WeakEntity<T>,
 }
 
-impl LuaUserData for Surface {
+impl<T: 'static> ProxyContext<T> {
+    fn new(cx: &mut Context<T>) -> Self {
+        Self {
+            app: UnsafeRefMut::new(cx),
+            entity_state: cx.weak_entity(),
+        }
+    }
+
+    fn entity_id(&self) -> EntityId {
+        self.entity_state.entity_id()
+    }
+
+    /// Returns a handle to the entity belonging to this context.
+    fn entity(&self) -> Entity<T> {
+        self.weak_entity()
+            .upgrade()
+            .expect("The entity must be alive if we have a entity context")
+    }
+
+    /// Returns a weak handle to the entity belonging to this context.
+    fn weak_entity(&self) -> WeakEntity<T> {
+        self.entity_state.clone()
+    }
+}
+
+struct LuaProxy {
+    py: UnsafeRefMut<Pyonji>,
+    cx: ProxyContext<Pyonji>,
+}
+
+impl LuaUserData for LuaProxy {
     fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method_mut("bind", |lua, this, args: LuaMultiValue| {
+        methods.add_method_mut("foo", |_, this, _: ()| {
+            let LuaProxy { py, cx } = this;
+            println!("line = {}", py.line_height);
+            println!("id = {}", cx.entity_id());
+            Ok(())
+        });
+    }
+}
+/*
+impl LuaUserData for Pyonji {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        /*methods.add_method_mut("bind", |lua, this, args: LuaMultiValue| {
             if args.front().is_some_and(|arg| arg.is_table()) {
                 let (mods, key, func): (Vec<String>, String, LuaFunction) =
                     FromLuaMulti::from_lua_multi(args, lua)?;
@@ -102,7 +147,7 @@ impl LuaUserData for Surface {
             }
 
             Ok(())
-        });
+        });*/
         methods.add_method_mut(
             "register",
             |lua, this, (name, func): (String, LuaFunction)| {
@@ -129,49 +174,44 @@ impl LuaUserData for Surface {
         );
         methods.add_method_mut("config", |lua, this, table: LuaTable| {
             if let Ok(font_size) = table.get::<f32>("font_size") {
-                this.terminal.line_height = font_size * 1.1;
-                this.terminal.font_size = font_size;
+                this.font_size = font_size;
             }
             if let Ok(line_height) = table.get::<f32>("line_height") {
-                this.terminal.line_height = line_height * this.terminal.font_size;
+                this.line_height = line_height;
             }
             if let Ok(font_family) = table.get::<Option<String>>("font_family") {
-                this.terminal.font_family = font_family;
+                this.font_family = font_family;
             }
-            if let Ok(fullscreen) = table.get::<bool>("fullscreen") {
+            /*if let Ok(fullscreen) = table.get::<bool>("fullscreen") {
                 this.fullscreen = fullscreen;
-            }
+            }*/
             if let Ok(default_cwd) = table.get::<Option<PathBuf>>("default_cwd") {
-                this.workspace.default_cwd = default_cwd;
+                this.default_cwd = default_cwd;
             }
-            if let Ok(action) = table.get::<KeyBinding>("action") {
+            /*if let Ok(action) = table.get::<KeyBinding>("action") {
                 this.input.action = action;
-            }
-            if let Ok(status_height) = table.get::<f32>("status_height") {
+            }*/
+            /*if let Ok(status_height) = table.get::<f32>("status_height") {
                 // Owned synchronously by the terminal viewport (like the
                 // font metrics); `render` syncs a copy into the bar.
                 this.terminal.status_height = status_height.max(0.5);
-            }
-            this.workspace.ssh_sessions = util::collect_ssh_sessions(lua, &table);
+            }*/
+            this.ssh_sessions = util::collect_ssh_sessions(lua, &table);
 
-            this.apply_config();
             Ok(())
         });
         methods.add_function("open_palette", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                this.request_overlay(Screen::CmdPalette);
                 Ok(())
             })
         });
         methods.add_function("open_sessions", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                this.request_overlay(Screen::Sessions);
                 Ok(())
             })
         });
         methods.add_function("open_detached", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                this.request_overlay(Screen::Detached);
                 Ok(())
             })
         });
@@ -451,9 +491,9 @@ impl LuaUserData for Surface {
             lua.create_sequence_from(tabs)
         });
     }
-}
+}*/
 
-pub fn watch(tx: async_channel::Sender<PtyEvent>) {
+pub fn watch(tx: Sender<PtyEvent>) {
     let Some(path) = util::config_path() else {
         return;
     };
@@ -471,7 +511,8 @@ pub fn watch(tx: async_channel::Sender<PtyEvent>) {
                 if let Ok(ev) = ev
                     && let EventKind::Modify(_) = ev.kind
                 {
-                    _ = tx.send_blocking(PtyEvent::ConfigChanged);
+                    tx.force_send(PtyEvent::ConfigChanged)
+                        .expect("event tx closed");
                 }
             }
             Ok(())
@@ -482,7 +523,7 @@ pub fn watch(tx: async_channel::Sender<PtyEvent>) {
     });
 }
 
-pub fn load(this: &mut Surface) {
+pub fn load(this: &mut Pyonji, cx: &mut Context<Pyonji>) {
     let Some(path) = util::config_path() else {
         return;
     };
@@ -490,16 +531,15 @@ pub fn load(this: &mut Surface) {
     _ = util::create_config_if_missing(&path)
         .inspect_err(|e| tracing::error!(%e, "failed to create default config"));
 
-    this.workspace.ssh_sessions.clear();
-    this.input.keymap = Surface::default_keymap();
-    this.registered_callbacks.clear();
+    //this.workspace.ssh_sessions.clear();
+    //this.input.keymap = Surface::default_keymap();
+    //this.registered_callbacks.clear();
     let lua = this.lua.clone();
-    with_env(this, |_| {
+    _ = with_env(this, cx, |_| {
         let chunk = lua.load(path);
         chunk.exec()
-    })
-    .into_log();
-    let action_key = this.input.action.clone();
+    });
+    /*let action_key = this.input.action.clone();
     let overridden = matches!(
         this.input.keymap.get(&action_key),
         Some(KeyAction::Custom(_))
@@ -515,12 +555,21 @@ pub fn load(this: &mut Surface) {
     // Palette/tabs/ssh sync to the StatusBar every frame in `render`; no
     // explicit refresh needed here (keeps `load` synchronous for the file
     // watcher and Lua without a window/cx).
+    */
 }
 
-pub fn with_env<R>(this: &mut Surface, f: impl FnOnce(LuaAnyUserData) -> LuaResult<R>) -> Result<R> {
+pub fn with_env<R>(
+    this: &mut Pyonji,
+    cx: &mut Context<Pyonji>,
+    f: impl FnOnce(LuaAnyUserData) -> LuaResult<R>,
+) -> Result<R> {
     let lua = this.lua.clone();
+    let mut proxy = LuaProxy {
+        py: UnsafeRefMut::new(this),
+        cx: ProxyContext::new(cx),
+    };
     let res = lua.scope(|scope| {
-        let app = scope.create_userdata_ref_mut(this)?;
+        let app = scope.create_userdata_ref_mut(&mut proxy)?;
         lua.globals().set("py", app.clone())?;
         let ret = f(app);
         lua.globals().remove("py")?;
@@ -721,7 +770,12 @@ impl KeyBinding {
         let binding = binding.as_ref();
         let (binding, modifiers) = Self::parse_mods(binding)?;
         let key = if !matches!(
-            (modifiers.control, modifiers.alt, modifiers.shift, modifiers.platform),
+            (
+                modifiers.control,
+                modifiers.alt,
+                modifiers.shift,
+                modifiers.platform
+            ),
             (false, false, false, false)
         ) && let Some(delim) = binding.chars().position(|c| c == '-')
         {
@@ -731,10 +785,7 @@ impl KeyBinding {
         };
         let key = Self::parse_key(key)?;
 
-        Ok(Self {
-            modifiers,
-            key,
-        })
+        Ok(Self { modifiers, key })
     }
 
     fn parse_mods(binding: &str) -> Result<(&str, Modifiers)> {
@@ -792,9 +843,9 @@ impl KeyBinding {
     pub fn parse_key(key: &str) -> Result<String> {
         let key = key.to_lowercase();
         let canonical = match key.as_str() {
-            "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m"
-            | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z"
-            | "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => key,
+            "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n"
+            | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" | "0" | "1"
+            | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => key,
             "up" | "arrowup" => "up".to_string(),
             "down" | "arrowdown" => "down".to_string(),
             "left" | "arrowleft" => "left".to_string(),
@@ -830,7 +881,11 @@ impl KeyBinding {
 
     /// Digit value for `1`–`9` bindings (tab selection), if this is one.
     pub fn digit_index(&self) -> Option<usize> {
-        if self.modifiers.control || self.modifiers.alt || self.modifiers.shift || self.modifiers.platform {
+        if self.modifiers.control
+            || self.modifiers.alt
+            || self.modifiers.shift
+            || self.modifiers.platform
+        {
             return None;
         }
         match self.key.as_str() {

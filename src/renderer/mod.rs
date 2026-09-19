@@ -7,8 +7,8 @@ use anyhow::Result;
 use unicode_segmentation::UnicodeSegmentation;
 use vt100::Screen;
 use wgpu::{
-    Device, LoadOp, Operations, Queue, RenderPassColorAttachment, RenderPassDescriptor, StoreOp,
-    TextureFormat, TextureView, CommandEncoderDescriptor
+    CommandEncoderDescriptor, Device, LoadOp, Operations, Queue, RenderPassColorAttachment,
+    RenderPassDescriptor, StoreOp, TextureFormat, TextureView,
 };
 
 use crate::terminal::{CursorState, Divider, PaneGeometry, SplitDirection};

@@ -1,4 +1,4 @@
-local function replace_root(dir)
+--[[local function replace_root(dir)
     local active = py.active_session;
     local main = py:create_session(dir, 1);
     py:close(active);
@@ -80,17 +80,6 @@ py:config({
     status_height = 0.75,
 });
 
---[[Workspaces = {};
-
-local function create_workspace(name)
-    local workspace = { tabs = py.sessions };
-    for _, tab in pairs(py.sessions) do
-        for _, session in tab do
-            py:detach(session);
-        end
-    end
-end]]--
-
 function NextFreeTab()
     local tab_count = #py.sessions;
     if tab_count < 9 then
@@ -113,3 +102,6 @@ function Os()
     end
     return 'unknown';
 end
+]]--
+
+py:foo();

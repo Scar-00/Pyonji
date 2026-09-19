@@ -12,15 +12,17 @@
 )]
 
 mod assets;
+mod config;
 mod pty;
-mod terminal;
 mod renderer;
+mod terminal;
+mod util;
 
-use assets::{GlobalAssets, PyonjiAssetsSource};
+use assets::{GlobalAssets, PyonjiAsset, PyonjiAssetsSource};
 
 use pty::Event;
-use renderer::{*, Pane as RendererPane};
-use terminal::{*, Tab as TerminalTab};
+use renderer::{Pane as RendererPane, *};
+use terminal::{Tab as TerminalTab, *};
 
 use std::{array, path::PathBuf, sync::Arc};
 
@@ -29,13 +31,15 @@ use clap::Parser;
 use gpui::{prelude::*, *};
 use gpui_base::*;
 use gpui_component::{
-    Root, ThemeMode, WindowExt,
+    Icon, Root, ThemeMode, WindowExt,
     notification::{Notification, NotificationType},
 };
-use gpui_wgpu::WgpuContextHandle;
+use gpui_wgpu::{WgpuContextHandle, WgpuRenderTarget};
+use mlua::prelude::*;
 use smallvec::{SmallVec, smallvec};
 use tracing_subscriber::prelude::*;
-use mlua::prelude::*;
+
+use crate::pty::SshConnection;
 
 #[derive(clap::Parser)]
 struct Cli {
@@ -55,22 +59,24 @@ fn main() {
         }
     };
 
-    gpui_platform::application().with_assets(GlobalAssets::new([
-        Box::new(gpui_component_assets::Assets),
-        Box::new(PyonjiAssetsSource),
-    ])).run(|cx| {
-        gpui_component::init(cx);
-        Theme::init(cx);
+    gpui_platform::application()
+        .with_assets(GlobalAssets::new([
+            Box::new(gpui_component_assets::Assets),
+            Box::new(PyonjiAssetsSource),
+        ]))
+        .run(|cx| {
+            gpui_component::init(cx);
+            Theme::init(cx);
 
-        let window_options = Pyonji::window_options(cx);
-        cx.open_window(window_options, |window, cx| {
-            gpui_component::Theme::change(ThemeMode::Dark, Some(window), cx);
+            let window_options = Pyonji::window_options(cx);
+            cx.open_window(window_options, |window, cx| {
+                gpui_component::Theme::change(ThemeMode::Dark, Some(window), cx);
 
-            let py = cx.new(|cx| Pyonji::new(window, cx));
-            cx.new(|cx| Root::new(py, window, cx))
-        })
-        .expect("open window");
-    });
+                let py = cx.new(|cx| Pyonji::new(window, cx));
+                cx.new(|cx| Root::new(py, window, cx))
+            })
+            .expect("open window");
+        });
 }
 
 struct Pyonji {
@@ -97,6 +103,8 @@ struct Pyonji {
     font_family: Option<String>,
     font_size: f32,
     line_height: f32,
+    default_cwd: Option<PathBuf>,
+    ssh_sessions: Vec<SshConnection>,
 }
 
 impl Pyonji {
@@ -113,9 +121,6 @@ impl Pyonji {
         let cli = Cli::parse();
         let lua = Lua::new();
         let (tx, rx) = async_channel::unbounded();
-
-        // Route Lua `print(...)` into the event loop so it can surface as an
-        // info notification (mirrors main2's print override).
         {
             let tx = tx.clone();
             if let Ok(print) = lua.create_function(move |lua, args: mlua::MultiValue| {
@@ -132,14 +137,13 @@ impl Pyonji {
             }
         }
 
+        config::watch(tx.clone());
+
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
 
-        cx.bind_keys([
-            KeyBinding::new("ctrl-a", PushError::new("test"), None),
-        ]);
+        cx.bind_keys([KeyBinding::new("ctrl-a", PushError::new("test"), None)]);
 
-        //_ = lua.globals().set("py", LuaProxy(cx.weak_entity()));
         let py = cx.weak_entity();
         Self::spawn_inital_session(window, cx);
         Self {
@@ -162,15 +166,21 @@ impl Pyonji {
             font_family: None,
             font_size: 38.0,
             line_height: 1.1,
+            default_cwd: None,
+            ssh_sessions: vec![],
         }
     }
 
-    fn spawn_event_loop(rx: Receiver<Event>, window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
+    fn spawn_event_loop(
+        rx: Receiver<Event>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 if let Ok(event) = rx.recv().await {
-                    _ = this.update_in(cx, |this, window, cx| {
-                        match event {
+                    _ = this
+                        .update_in(cx, |this, window, cx| match event {
                             Event::Closed(id) => {
                                 if this.close_session(id, cx) && this.session_manager.is_empty() {
                                     cx.quit();
@@ -188,20 +198,20 @@ impl Pyonji {
                                 }
                             }
                             Event::ConfigChanged => {
-                                //config::load(self);
+                                config::load(this, cx);
                                 cx.notify();
                             }
                             Event::LuaPrint(text) => {
-                                let text = text.replace(['\n', '\r'], " ");
+                                let text = text.replace(['\r'], " ");
                                 if !text.is_empty() {
-                                    window.dispatch_action(Box::new(PushInfo::new(text)), cx);
+                                    window.dispatch_action(Box::new(PushLuaPrint::new(text)), cx);
                                 }
                             }
                             Event::Exit => {
                                 cx.quit();
                             }
-                        }
-                    }).unwrap();
+                        })
+                        .unwrap();
                 }
             }
         })
@@ -209,19 +219,24 @@ impl Pyonji {
 
     fn spawn_inital_session(window: &mut Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| {
-            _ = this.update_in(cx, |this, window, cx| {
-                let res = this.session_manager.create_session(20, 80, this.cli.path.as_deref());
-                match res {
-                    Ok(id) => {
-                        this.tabs[0] = Some(TerminalTab::new(id));
-                        this.current_tab = Some(0);
-                        cx.notify();
+            _ = this
+                .update_in(cx, |this, window, cx| {
+                    config::load(this, cx);
+                    let res = this
+                        .session_manager
+                        .create_session(20, 80, this.cli.path.as_deref());
+                    match res {
+                        Ok(id) => {
+                            this.tabs[0] = Some(TerminalTab::new(id));
+                            this.current_tab = Some(0);
+                            cx.notify();
+                        }
+                        Err(e) => {
+                            window.dispatch_action(Box::new(PushError::new(e.to_string())), cx);
+                        }
                     }
-                    Err(e) => {
-                        window.dispatch_action(Box::new(PushError::new(e.to_string())), cx);
-                    }
-                }
-            }).unwrap()
+                })
+                .unwrap()
         })
         .detach()
     }
@@ -249,7 +264,6 @@ impl Pyonji {
     }
 
     fn on_info(&mut self, info: &PushInfo, window: &mut Window, cx: &mut Context<Self>) {
-        // Infos (including Lua `print` output) always auto-dismiss.
         Self::push_note(
             NotificationType::Info,
             "Info",
@@ -260,6 +274,22 @@ impl Pyonji {
         );
     }
 
+    fn on_lua_print(&mut self, print: &PushLuaPrint, window: &mut Window, cx: &mut Context<Self>) {
+        fn lua_icon(cx: &App) -> Icon {
+            Icon::new(PyonjiAsset::Lua).text_color(gpui_component::ActiveTheme::theme(cx).info)
+        }
+
+        let note = Notification::new()
+            .icon(lua_icon(cx))
+            .bg(cx.theme().surface)
+            .title("Lua")
+            .autohide(true)
+            .placement(Anchor::TopRight)
+            .message(print.string.clone());
+
+        window.push_notification(note, cx);
+    }
+
     fn push_note(
         kind: NotificationType,
         title: impl Into<SharedString>,
@@ -268,8 +298,26 @@ impl Pyonji {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        fn notification_icon(kind: NotificationType, cx: &App) -> Icon {
+            let theme = gpui_component::ActiveTheme::theme(cx);
+            match kind {
+                NotificationType::Error => {
+                    Icon::new(PyonjiAsset::NotificationError).text_color(theme.danger)
+                }
+                NotificationType::Warning => {
+                    Icon::new(PyonjiAsset::NotificationWarning).text_color(theme.warning)
+                }
+                NotificationType::Success => {
+                    Icon::new(PyonjiAsset::NotificationSuccess).text_color(theme.success)
+                }
+                NotificationType::Info => {
+                    Icon::new(PyonjiAsset::NotificationInfo).text_color(theme.info)
+                }
+            }
+        }
+
         let note = Notification::new()
-            .with_type(kind)
+            .icon(notification_icon(kind, cx))
             .bg(cx.theme().surface)
             .title(title)
             .autohide(autohide)
@@ -318,7 +366,8 @@ impl Pyonji {
             return false;
         }
         self.session_manager.remove_session(session);
-        self.detached_sessions.retain(|detached| *detached != session);
+        self.detached_sessions
+            .retain(|detached| *detached != session);
 
         let mut removed_current_tab = false;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
@@ -420,6 +469,20 @@ impl Pyonji {
     }
 }
 
+impl Pyonji {
+    pub fn exec_lua(
+        &self,
+        cx: &mut Context<Self>,
+        f: impl 'static + AsyncFn(WeakEntity<Self>, &mut AsyncApp, Lua),
+    ) {
+        let lua = self.lua.clone();
+        cx.spawn(async move |this, cx| {
+            f(this, cx, lua).await;
+        })
+        .detach();
+    }
+}
+
 impl Render for Pyonji {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -433,28 +496,28 @@ impl Render for Pyonji {
             .on_action(cx.listener(Self::on_error))
             .on_action(cx.listener(Self::on_warning))
             .on_action(cx.listener(Self::on_info))
-            .child(
-                v_flex()
-                    .size_full()
-                    .p_2()
-                    .child(self.terminal.clone())
-            )
+            .on_action(cx.listener(Self::on_lua_print))
+            .child(v_flex().size_full().p_2().child(self.terminal.clone()))
             .children(Root::render_sheet_layer(window, cx))
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
     }
 }
 
-/*struct LuaProxy(WeakEntity<Pyonji>);
+struct LuaProxy {
+    pyonji: WeakEntity<Pyonji>,
+    cx: AsyncWindowContext,
+}
 
 impl LuaUserData for LuaProxy {
     fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
-        methods.add_async_method("test", |_, this, _: ()| async move {
-            println!("called test");
+        methods.add_method("test", |_, this, _: ()| {
+            let t = this.pyonji.read_with(&this.cx, |this, _| this.line_height);
+            println!("test: {t:?}");
             Ok(())
         })
     }
-}*/
+}
 
 struct Terminal {
     pyonji: WeakEntity<Pyonji>,
@@ -520,15 +583,20 @@ impl Terminal {
         Some(context)
     }
 
-    fn sync_surface(&mut self, content_size: Size<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    fn sync_surface(
+        &mut self,
+        content_size: Size<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(context) = self.ensure_context(window) else {
             return;
         };
         let scale_factor = window.scale_factor();
         self.scale = scale_factor;
         let target_size = size(
-            gpui::DevicePixels((f32::from(content_size.width) * scale_factor).round() as i32),
-            gpui::DevicePixels((f32::from(content_size.height) * scale_factor).round() as i32),
+            DevicePixels((f32::from(content_size.width) * scale_factor).round() as i32),
+            DevicePixels((f32::from(content_size.height) * scale_factor).round() as i32),
         );
         let target_size = size(
             target_size.width.max(gpui::DevicePixels(1)),
@@ -538,7 +606,7 @@ impl Terminal {
         match self.target.as_mut() {
             Some(target) => target.resize(&context, target_size),
             None => {
-                self.target = Some(gpui_wgpu::WgpuRenderTarget::new(&context, target_size));
+                self.target = Some(WgpuRenderTarget::new(&context, target_size));
             }
         }
 
@@ -567,14 +635,14 @@ impl Terminal {
 
         let font_size = pyonji.read(cx).font_size;
         let cols = ((target_size.width.0 as f32 / (font_size / 2.0)) as u16).max(1);
-        let rows = ((target_size.height.0 as f32 / font_size * pyonji.read(cx).line_height) as u16).max(1);
+        let rows =
+            ((target_size.height.0 as f32 / font_size * pyonji.read(cx).line_height) as u16).max(1);
         if cols != self.cols || rows != self.rows {
             self.cols = cols;
             self.rows = rows;
             pyonji.update(cx, |this, _| {
                 for (id, geometry) in this.tab_layouts(cols, rows) {
-                    this
-                        .session_manager
+                    this.session_manager
                         .resize_session(id, geometry.rows, geometry.cols);
                 }
             });
@@ -650,7 +718,10 @@ impl Render for Terminal {
                 .size_full()
                 .on_prepaint(cx.processor(Self::on_prepaint))
                 .children(this.target.as_ref().map(|target| {
-                    target.surface().object_fit(gpui::ObjectFit::Fill).size_full()
+                    target
+                        .surface()
+                        .object_fit(gpui::ObjectFit::Fill)
+                        .size_full()
                 }))
         }))
         .size_full()
@@ -709,6 +780,21 @@ struct PushInfo {
 }
 
 impl PushInfo {
+    #[allow(dead_code)]
+    fn new(v: impl ToString) -> Self {
+        Self {
+            string: v.to_string().into(),
+        }
+    }
+}
+
+#[derive(Action, Clone, PartialEq)]
+#[action(no_json)]
+struct PushLuaPrint {
+    string: SharedString,
+}
+
+impl PushLuaPrint {
     fn new(v: impl ToString) -> Self {
         Self {
             string: v.to_string().into(),
@@ -748,5 +834,3 @@ impl Theme {
         }
     }
 }
-
-

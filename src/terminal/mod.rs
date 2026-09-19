@@ -797,13 +797,7 @@ impl TerminalSession {
         }
     }
 
-    pub fn handle_mouse_down(
-        &mut self,
-        button: MouseButton,
-        mods: &Modifiers,
-        col: u16,
-        row: u16,
-    ) {
+    pub fn handle_mouse_down(&mut self, button: MouseButton, mods: &Modifiers, col: u16, row: u16) {
         let mode = self.vt.screen().mouse_protocol_mode();
         if mode == vt100::MouseProtocolMode::None {
             self.mouse_pressed_button = None;
@@ -814,13 +808,7 @@ impl TerminalSession {
         self.last_mouse_cell = Some((col, row));
     }
 
-    pub fn handle_mouse_up(
-        &mut self,
-        button: MouseButton,
-        mods: &Modifiers,
-        col: u16,
-        row: u16,
-    ) {
+    pub fn handle_mouse_up(&mut self, button: MouseButton, mods: &Modifiers, col: u16, row: u16) {
         let mode = self.vt.screen().mouse_protocol_mode();
         if mode == vt100::MouseProtocolMode::None {
             self.mouse_pressed_button = None;
