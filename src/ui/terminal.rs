@@ -2,7 +2,7 @@ use crate::Pyonji;
 use crate::renderer::{Pane as RendererPane, *};
 
 use gpui::*;
-use gpui_base::ElementExt as _;
+use gpui_base::{ElementExt as _, StyledExt};
 use gpui_wgpu::{WgpuContextHandle, WgpuRenderTarget};
 
 pub struct Terminal {
@@ -209,6 +209,7 @@ impl Render for Terminal {
                         .object_fit(gpui::ObjectFit::Fill)
                         .size_full()
                 }))
+                //.debug_red()
         }))
         .size_full()
     }

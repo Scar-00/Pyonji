@@ -6,9 +6,9 @@ use gpui_base::StyledExt as _;
 use sessions::SessionsView;
 
 use gpui::*;
-use gpui_component::{WindowExt, dialog::Dialog};
+use gpui_component::{WindowExt, dialog::{Dialog, DialogContent}};
 
-use crate::{Pyonji, util};
+use crate::{PyTheme, Pyonji, util};
 
 #[derive(Debug, Clone, Copy)]
 pub enum OverlayScreen {
@@ -32,7 +32,7 @@ impl Overlay {
         Self {
             pyonji: pyonji.clone(),
 
-            sessions: cx.new(|cx| SessionsView::new(&pyonji, cx)),
+            sessions: cx.new(|cx| SessionsView::new(&pyonji, window, cx)),
         }
     }
 }
@@ -42,17 +42,22 @@ impl Overlay {
         if window.has_active_dialog(cx) {
             window.close_dialog(cx);
         }
-        let builder = cx.processor(move |this, dialog: Dialog, _window, _cx| {
+        let builder = cx.processor(move |this, dialog: Dialog, _window, cx| {
             dialog
-                .backdrop_blur(px(24.0))
-                .opacity(0.9)
+                .p_0()
                 .h_4_5()
-                .title(format!("{screen:?}"))
                 .close_button(false)
-                .child(match screen {
-                    OverlayScreen::Sessions => this.sessions.clone().into_any_element(),
-                    _ => div().into_any_element(),
-                })
+                .child(
+                    div()
+                        .size_full()
+                        .bg(cx.theme().surface)
+                        .backdrop_blur(px(24.0))
+                        .p_1()
+                        .child(match screen {
+                            OverlayScreen::Sessions => this.sessions.clone().into_any_element(),
+                            _ => div().into_any_element(),
+                        })
+                )
         });
         window.open_dialog(cx, builder);
         let handle = match screen {

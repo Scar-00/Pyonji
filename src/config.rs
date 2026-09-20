@@ -105,6 +105,10 @@ impl<T: 'static> ProxyContext<T> {
     fn weak_entity(&self) -> WeakEntity<T> {
         self.entity_state.clone()
     }
+
+    fn to_ctx(&mut self) -> Context<'_, T> {
+        Context::new_context(&mut self.app, self.entity_state.clone())
+    }
 }
 
 struct LuaProxy {
@@ -321,6 +325,7 @@ impl LuaUserData for LuaProxy {
                     this.py.session_manager.remove_session(id);
                     return Ok(None);
                 }
+                this.py.resize_tab(current, &mut this.cx.to_ctx());
                 Ok(Some(id))
             })
         });

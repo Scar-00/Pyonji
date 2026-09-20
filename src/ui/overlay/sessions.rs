@@ -3,7 +3,7 @@ use std::ops::Range;
 use crate::{PyTheme as _, Pyonji, terminal::SessionId, util};
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_base::*;
-use gpui_component::{WindowExt, separator::Separator};
+use gpui_component::{WindowExt, separator::Separator, input::{InputState, Input, InputEvent}, IconName, Sizable};
 
 actions!([Submit, Next, Prev]);
 
@@ -12,20 +12,30 @@ pub struct SessionsView {
 
     focus_handle: FocusHandle,
     selected: Option<usize>,
+    search_input: Entity<InputState>,
 }
 
 impl SessionsView {
-    pub fn new(py: &WeakEntity<Pyonji>, cx: &mut Context<Self>) -> Self {
+    pub fn new(py: &WeakEntity<Pyonji>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.bind_keys([
             KeyBinding::new("enter", Submit, None),
             KeyBinding::new("up", Prev, None),
             KeyBinding::new("down", Next, None),
         ]);
+
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions…"));
+        let focus_handle = cx.focus_handle();
+        cx.on_focus_in(&focus_handle, window, |this, window, cx| {
+            let focus = this.search_input.focus_handle(cx).clone();
+            window.focus(&focus, cx);
+        })
+        .detach();
         Self {
             pyonji: py.clone(),
 
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             selected: None,
+            search_input,
         }
     }
 
@@ -53,10 +63,10 @@ impl SessionsView {
         cx: &mut Context<Self>,
     ) -> Button {
         let theme = cx.theme();
-        let select_color = gpui::red();
+        let select_color = theme.selected;
         Button::new(format!("{tab}-{sid}"))
             .border_1()
-            .border_color(theme.unselected)
+            .border_color(if selected { theme.selected_border } else { theme.unselected_border })
             .w_full()
             .h_16()
             .map(|this| if selected {
@@ -89,6 +99,8 @@ impl SessionsView {
 impl Render for SessionsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let py = util::read!(self.pyonji, cx);
+        let query = self.search_input.read(cx).value().to_lowercase();
+
         let sessions = py
             .tabs
             .iter()
@@ -99,15 +111,20 @@ impl Render for SessionsView {
                     .iter()
                     .filter_map(|id| {
                         let session = py.session_manager.session(*id)?;
-                        Some((i, *id, session.title().to_string()))
+                        let title = session.title().to_string();
+                        if query.is_empty() || title.to_lowercase().contains(&query) {
+                            Some((i, *id, title))
+                        } else {
+                            None
+                        }
                     })
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
         let sessions_len = sessions.len();
+
         v_flex()
             .track_focus(&self.focus_handle)
-            .debug_focused(&self.focus_handle, window, cx)
             .size_full()
             .on_action(cx.listener({
                 let sessions = sessions.clone();
@@ -145,29 +162,46 @@ impl Render for SessionsView {
                 cx.notify();
             }))
             .child(
-                uniform_list(
-                    "sessions-list",
-                    sessions.len(),
-                    cx.processor(move |this, range: Range<usize>, _, cx| {
-                        let start = range.start;
-                        sessions[range]
-                            .iter()
-                            .enumerate()
-                            .map(|(i, (tab, id, title))| {
-                                let selected = this.selected == Some(i + start);
-                                h_flex()
-                                    .w_full()
-                                    .py_2()
-                                    .justify_center()
-                                    .items_center()
-                                    .child(
-                                        Self::layout(*tab, title.clone(), *id, selected, cx)
-                                    )
-                            })
-                            .collect()
-                    }),
-                )
-                .size_full(),
+                h_flex()
+                    .w_full()
+                    .py_1()
+                    .child(
+                        Input::new(&self.search_input)
+                            .prefix(IconName::Search)
+                            .w_full()
+                            .bordered(false)
+                            .appearance(false)
+                            .bg(cx.theme().background)
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .child(
+                        uniform_list(
+                            "sessions-list",
+                            sessions.len(),
+                            cx.processor(move |this, range: Range<usize>, _, cx| {
+                                let start = range.start;
+                                sessions[range]
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, (tab, id, title))| {
+                                        let selected = this.selected == Some(i + start);
+                                        h_flex()
+                                            .w_full()
+                                            .py_2()
+                                            .justify_center()
+                                            .items_center()
+                                            .child(
+                                                Self::layout(*tab, title.clone(), *id, selected, cx)
+                                            )
+                                    })
+                                    .collect()
+                            }),
+                        )
+                        .size_full(),
+                    ),
             )
     }
 }

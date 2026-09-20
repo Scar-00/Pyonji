@@ -734,6 +734,8 @@ pub struct Theme {
     text: Rgba,
     selected: Rgba,
     unselected: Rgba,
+    selected_border: Rgba,
+    unselected_border: Rgba,
 }
 
 impl Theme {
@@ -748,6 +750,8 @@ impl Theme {
             text: Rgba::new(0.9, 0.9, 0.9, 1.0),
             selected: Rgba::new(58.0 / 255.0, 58.0 / 255.0, 92.0 / 255.0, 1.0),
             unselected: Rgba::new(40.0 / 255.0, 40.0 / 255.0, 40.0 / 255.0, 1.0),
+            selected_border: Rgba::new(0.4, 0.4, 0.6, 1.0),
+            unselected_border: Rgba::new(0.2, 0.2, 0.2, 1.0),
         }
     }
 }
