@@ -6,7 +6,10 @@ use gpui_base::StyledExt as _;
 use sessions::SessionsView;
 
 use gpui::*;
-use gpui_component::{WindowExt, dialog::{Dialog, DialogContent}};
+use gpui_component::{
+    WindowExt,
+    dialog::{Dialog, DialogContent},
+};
 
 use crate::{PyTheme, Pyonji, util};
 
@@ -28,7 +31,8 @@ impl Overlay {
         cx.on_focus_lost(window, |this, window, cx| {
             let focus = util::read!(this.pyonji, cx).focus_handle.clone();
             window.focus(&focus, cx);
-        }).detach();
+        })
+        .detach();
         Self {
             pyonji: pyonji.clone(),
 
@@ -43,26 +47,22 @@ impl Overlay {
             window.close_dialog(cx);
         }
         let builder = cx.processor(move |this, dialog: Dialog, _window, cx| {
-            dialog
-                .p_0()
-                .h_4_5()
-                .close_button(false)
-                .child(
-                    div()
-                        .size_full()
-                        .bg(cx.theme().surface)
-                        .backdrop_blur(px(24.0))
-                        .p_1()
-                        .child(match screen {
-                            OverlayScreen::Sessions => this.sessions.clone().into_any_element(),
-                            _ => div().into_any_element(),
-                        })
-                )
+            dialog.p_0().h_4_5().close_button(false).child(
+                div()
+                    .size_full()
+                    .bg(cx.theme().surface)
+                    .backdrop_blur(px(24.0))
+                    .p_1()
+                    .child(match screen {
+                        OverlayScreen::Sessions => this.sessions.clone().into_any_element(),
+                        _ => div().into_any_element(),
+                    }),
+            )
         });
         window.open_dialog(cx, builder);
         let handle = match screen {
             OverlayScreen::Sessions => self.sessions.focus_handle(cx),
-            _ => todo!()
+            _ => todo!(),
         };
         window.defer(cx, move |window, cx| {
             window.focus(&handle, cx);

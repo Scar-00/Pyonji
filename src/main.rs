@@ -612,6 +612,7 @@ impl Render for Pyonji {
                             .on_action(cx.listener(Self::on_enter_rename))
                             .on_action(cx.listener(Self::on_enter_lua))
                             .on_action(cx.listener(Self::on_switch_tab))
+                            .on_key_down(cx.listener(Self::handle_key_down))
                             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                                 this.overlay.update(cx, |this, cx| {
                                     this.open(OverlayScreen::Palette, window, cx);
@@ -634,6 +635,119 @@ impl Render for Pyonji {
             )
             .children(Root::render_sheet_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
+    }
+}
+
+impl Pyonji {
+    fn handle_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Only the focused terminal consumes keys: typing in a dialog or the
+        // status prompt must not reach the pty.
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
+        if event.is_held {
+            // Held-key repeats go straight to the pty / prompt repeat path
+            // below without re-triggering keybindings.
+            //return self.handle_key_repeat(event, entity, window, cx);
+            return;
+        }
+
+        /*if self.input.resize_mode_held {
+            let delta = match event.keystroke.key.as_str() {
+                "left" => Some((SplitDirection::Vertical, -1)),
+                "right" => Some((SplitDirection::Vertical, 1)),
+                "up" => Some((SplitDirection::Horizontal, -1)),
+                "down" => Some((SplitDirection::Horizontal, 1)),
+                _ => None,
+            };
+            if let Some((direction, delta)) = delta {
+                self.input.resize_mode_used = true;
+                self.resize_active_pane(direction, delta);
+                window.prevent_default();
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+        }*/
+
+        let modifiers = &event.keystroke.modifiers;
+        /*let no_mods =
+            !modifiers.control && !modifiers.alt && !modifiers.shift && !modifiers.platform;
+        // A bare key while a move is pending either completes the move (digit)
+        // or cancels it — consumed either way, exactly like before.
+        if no_mods && self.input.pending_move_to_tab {
+            self.input.pending_move_to_tab = false;
+            self.input.action_mode = false;
+            if let Some(target) = digit_index(event)
+                && let Some(session) = self.workspace.active_session()
+            {
+                self.move_session_to_tab(session, target);
+            }
+            window.prevent_default();
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }*/
+
+        /*let matched = self.input.match_action(event);
+        if let Some(matched_action) = matched {
+            let was_in_action_mode = self.input.action_mode;
+            let is_action_trigger = InputManager::is_action_trigger(&matched_action);
+            if was_in_action_mode && !is_action_trigger {
+                self.input.action_mode = false;
+            }
+            // Bare keys only fire inside action mode (except the trigger
+            // itself), exactly like the previous dispatch.
+            if is_action_trigger || !(!was_in_action_mode && bare_key(event)) {
+                match matched_action {
+                    KeyAction::Custom(func) => {
+                        config::with_env(self, |this| {
+                            func.call::<()>(this)?;
+                            Ok(())
+                        })
+                        .into_log();
+                    }
+                    KeyAction::Builtin(action) => {
+                        self.dispatch_builtin(action, entity, window, cx);
+                    }
+                }
+                // Consumed keys must stop here: GPUI delivers text separately
+                // from key events, and an unstopped trigger would be
+                // re-delivered as text into whatever just opened.
+                window.prevent_default();
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+        } else if self.input.action_mode {
+            // Any unbound key leaves action mode, as before.
+            self.input.action_mode = false;
+            cx.notify();
+        }*/
+
+        let Some(active_session) = self.active_session() else {
+            return;
+        };
+        let reset_scrollback = self
+            .session_manager
+            .session_mut(active_session)
+            .is_some_and(TerminalSession::reset_scrollback);
+        let consumed = self
+            .session_manager
+            .session_mut(active_session)
+            .is_some_and(|session| session.handle_key_down(event));
+        if consumed {
+            window.prevent_default();
+            cx.stop_propagation();
+        }
+        if reset_scrollback {
+            cx.notify();
+        }
     }
 }
 

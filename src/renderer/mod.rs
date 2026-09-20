@@ -252,7 +252,7 @@ impl Renderer {
             match divider.direction {
                 SplitDirection::Vertical => {
                     let x = self.font_size / 2.0 * f32::from(divider.x);
-                    let y = self.line_height * f32::from(divider.y);
+                    let y = self.line_height * f32::from(divider.y + divider.rows);
                     let height = divider_height * f32::from(divider.rows.max(1)) * self.line_height;
                     let [x, y] = self.ndc([x, y], size);
                     self.divider_renderer

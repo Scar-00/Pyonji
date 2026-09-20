@@ -132,25 +132,27 @@ impl RenderOnce for SessionView {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let py = util::read!(self.pyonji, cx);
-        h_flex().gap_1().children(py.tabs.iter().enumerate().filter_map(|(i, tab)| {
-            let id = tab.as_ref().and_then(|tab| tab.active_session())?;
-            let title = py.session_manager.session(id)?.title();
-            let label = format!("[{i}] - {title}");
-            Some(
-                h_flex()
-                    .items_center()
-                    .justify_center()
-                    .px_1()
-                    .map(|this| {
-                        if py.current_tab == Some(i) {
-                            this.bg(theme.selected).font_bold()
-                        } else {
-                            this.bg(theme.unselected)
-                        }
-                    })
-                    .child(label),
-            )
-        }))
+        h_flex()
+            .gap_1()
+            .children(py.tabs.iter().enumerate().filter_map(|(i, tab)| {
+                let id = tab.as_ref().and_then(|tab| tab.active_session())?;
+                let title = py.session_manager.session(id)?.title();
+                let label = format!("[{i}] - {title}");
+                Some(
+                    h_flex()
+                        .items_center()
+                        .justify_center()
+                        .px_1()
+                        .map(|this| {
+                            if py.current_tab == Some(i) {
+                                this.bg(theme.selected).font_bold()
+                            } else {
+                                this.bg(theme.unselected)
+                            }
+                        })
+                        .child(label),
+                )
+            }))
     }
 }
 

@@ -3,7 +3,11 @@ use std::ops::Range;
 use crate::{PyTheme as _, Pyonji, terminal::SessionId, util};
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_base::*;
-use gpui_component::{WindowExt, separator::Separator, input::{InputState, Input, InputEvent}, IconName, Sizable};
+use gpui_component::{
+    IconName, Sizable, WindowExt,
+    input::{Input, InputEvent, InputState},
+    separator::Separator,
+};
 
 actions!([Submit, Next, Prev]);
 
@@ -66,13 +70,19 @@ impl SessionsView {
         let select_color = theme.selected;
         Button::new(format!("{tab}-{sid}"))
             .border_1()
-            .border_color(if selected { theme.selected_border } else { theme.unselected_border })
+            .border_color(if selected {
+                theme.selected_border
+            } else {
+                theme.unselected_border
+            })
             .w_full()
             .h_16()
-            .map(|this| if selected {
-                this.bg(select_color)
-            }else {
-                this.bg(theme.surface)
+            .map(|this| {
+                if selected {
+                    this.bg(select_color)
+                } else {
+                    this.bg(theme.surface)
+                }
             })
             .shadow_md()
             .child(
@@ -162,46 +172,39 @@ impl Render for SessionsView {
                 cx.notify();
             }))
             .child(
-                h_flex()
-                    .w_full()
-                    .py_1()
-                    .child(
-                        Input::new(&self.search_input)
-                            .prefix(IconName::Search)
-                            .w_full()
-                            .bordered(false)
-                            .appearance(false)
-                            .bg(cx.theme().background)
-                    ),
+                h_flex().w_full().py_1().child(
+                    Input::new(&self.search_input)
+                        .prefix(IconName::Search)
+                        .w_full()
+                        .bordered(false)
+                        .appearance(false)
+                        .bg(cx.theme().background),
+                ),
             )
             .child(
-                v_flex()
-                    .flex_1()
-                    .child(
-                        uniform_list(
-                            "sessions-list",
-                            sessions.len(),
-                            cx.processor(move |this, range: Range<usize>, _, cx| {
-                                let start = range.start;
-                                sessions[range]
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, (tab, id, title))| {
-                                        let selected = this.selected == Some(i + start);
-                                        h_flex()
-                                            .w_full()
-                                            .py_2()
-                                            .justify_center()
-                                            .items_center()
-                                            .child(
-                                                Self::layout(*tab, title.clone(), *id, selected, cx)
-                                            )
-                                    })
-                                    .collect()
-                            }),
-                        )
-                        .size_full(),
-                    ),
+                v_flex().flex_1().child(
+                    uniform_list(
+                        "sessions-list",
+                        sessions.len(),
+                        cx.processor(move |this, range: Range<usize>, _, cx| {
+                            let start = range.start;
+                            sessions[range]
+                                .iter()
+                                .enumerate()
+                                .map(|(i, (tab, id, title))| {
+                                    let selected = this.selected == Some(i + start);
+                                    h_flex()
+                                        .w_full()
+                                        .py_2()
+                                        .justify_center()
+                                        .items_center()
+                                        .child(Self::layout(*tab, title.clone(), *id, selected, cx))
+                                })
+                                .collect()
+                        }),
+                    )
+                    .size_full(),
+                ),
             )
     }
 }

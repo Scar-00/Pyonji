@@ -121,18 +121,19 @@ impl Terminal {
 
         let font_size = pyonji.read(cx).font_size;
         let cols = ((target_size.width.0 as f32 / (font_size / 2.0)) as u16).max(1);
-        let rows =
-            ((target_size.height.0 as f32 / font_size * pyonji.read(cx).line_height) as u16).max(1);
-if cols != self.cols || rows != self.rows {
-                self.cols = cols;
-                self.rows = rows;
-                pyonji.update(cx, |this, _| {
-                    for (id, geometry) in this.tab_layouts(rows, cols) {
-                        this.session_manager
-                            .resize_session(id, geometry.rows, geometry.cols);
-                    }
-                });
-            }
+        let rows = ((target_size.height.0 as f32 / (font_size * pyonji.read(cx).line_height))
+            as u16)
+            .max(1);
+        if cols != self.cols || rows != self.rows {
+            self.cols = cols;
+            self.rows = rows;
+            pyonji.update(cx, |this, _| {
+                for (id, geometry) in this.tab_layouts(rows, cols) {
+                    this.session_manager
+                        .resize_session(id, geometry.rows, geometry.cols);
+                }
+            });
+        }
     }
 
     fn paint(&mut self, cx: &mut Context<Self>) {
@@ -209,7 +210,7 @@ impl Render for Terminal {
                         .object_fit(gpui::ObjectFit::Fill)
                         .size_full()
                 }))
-                //.debug_red()
+            //.debug_red()
         }))
         .size_full()
     }
