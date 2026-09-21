@@ -40,15 +40,9 @@ pub struct StatusBar {
 }
 
 impl StatusBar {
-    const KEY_CONTEXT: &str = "STATUS-BAR";
+    pub const KEY_CONTEXT: &str = "STATUS-BAR";
 
     pub fn new(pyonji: WeakEntity<Pyonji>, cx: &mut Context<Self>) -> Self {
-        cx.bind_keys([
-            KeyBinding::new("escape", DismissStatusBarState, Some(Self::KEY_CONTEXT)),
-            KeyBinding::new("up", HistoryNext, Some(Self::KEY_CONTEXT)),
-            KeyBinding::new("down", HistoryPrev, Some(Self::KEY_CONTEXT)),
-        ]);
-
         Self {
             pyonji,
             focus_handle: cx.focus_handle(),

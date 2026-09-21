@@ -1,15 +1,12 @@
-mod palette;
-mod releases;
-mod sessions;
+pub mod palette;
+pub mod releases;
+pub mod sessions;
 
 use gpui_base::StyledExt as _;
 use sessions::SessionsView;
 
 use gpui::*;
-use gpui_component::{
-    WindowExt,
-    dialog::{Dialog, DialogContent},
-};
+use gpui_component::{WindowExt, dialog::Dialog};
 
 use crate::{PyTheme, Pyonji, util};
 

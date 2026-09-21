@@ -102,3 +102,9 @@ function NextFreeTab()
     end
     return nil;
 end
+
+py:bind({ 'ctrl', 'shift' }, "F", py.open_sessions());
+py:bind("<ctrl-b> 1", py.switch_tab(0));
+
+
+

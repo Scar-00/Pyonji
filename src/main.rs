@@ -39,6 +39,7 @@ use mlua::prelude::*;
 use smallvec::{SmallVec, smallvec};
 use tracing_subscriber::prelude::*;
 
+use crate::config::LuaAction;
 use crate::{
     pty::SshConnection,
     ui::{OverlayScreen, StatusBar, StatusBarEvent, StatusBarMode},
@@ -118,6 +119,7 @@ struct Pyonji {
     line_height: f32,
     default_cwd: Option<PathBuf>,
     ssh_sessions: Vec<SshConnection>,
+    registered_callbacks: Vec<LuaAction>,
 }
 
 impl Pyonji {
@@ -132,9 +134,43 @@ impl Pyonji {
 
     const TERMINAL_CONTEXT: &str = "terminal";
 
+    fn init(cx: &mut App) {
+        use ui::overlay;
+
+        cx.bind_keys([
+            KeyBinding::new("enter", overlay::sessions::Submit, None),
+            KeyBinding::new("up", overlay::sessions::Prev, None),
+            KeyBinding::new("down", overlay::sessions::Next, None),
+            KeyBinding::new(
+                "escape",
+                ui::status_bar::DismissStatusBarState,
+                Some(StatusBar::KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "up",
+                ui::status_bar::HistoryNext,
+                Some(StatusBar::KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "down",
+                ui::status_bar::HistoryPrev,
+                Some(StatusBar::KEY_CONTEXT),
+            ),
+            KeyBinding::new("ctrl-b r", EnterRename, Some(Self::TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-b l", EnterLuaRepl, Some(Self::TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-shift-f", OpenPalette, Some(Self::TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-shift-r", OpenReleases, Some(Self::TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-shift-s", OpenSessions, Some(Self::TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-b 1", SwitchTab(0), Some(Self::TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-b 2", SwitchTab(1), Some(Self::TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-b 3", SwitchTab(2), Some(Self::TERMINAL_CONTEXT)),
+        ]);
+    }
+
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cli = Cli::parse();
-        let lua = Lua::new();
+        let lua = unsafe { Lua::unsafe_new() };
+        config::install_inspect(&lua);
         let (tx, rx) = async_channel::unbounded();
         {
             let tx = tx.clone();
@@ -152,21 +188,12 @@ impl Pyonji {
             }
         }
 
+        Self::init(cx);
+
         config::watch(tx.clone());
 
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
-
-        cx.bind_keys([
-            KeyBinding::new("ctrl-b r", EnterRename, Some(Self::TERMINAL_CONTEXT)),
-            KeyBinding::new("ctrl-b l", EnterLuaRepl, Some(Self::TERMINAL_CONTEXT)),
-            KeyBinding::new("ctrl-shift-f", OpenPalette, Some(Self::TERMINAL_CONTEXT)),
-            KeyBinding::new("ctrl-shift-r", OpenReleases, Some(Self::TERMINAL_CONTEXT)),
-            KeyBinding::new("ctrl-shift-s", OpenSessions, Some(Self::TERMINAL_CONTEXT)),
-            KeyBinding::new("ctrl-b 1", SwitchTab(0), Some(Self::TERMINAL_CONTEXT)),
-            KeyBinding::new("ctrl-b 2", SwitchTab(1), Some(Self::TERMINAL_CONTEXT)),
-            KeyBinding::new("ctrl-b 3", SwitchTab(2), Some(Self::TERMINAL_CONTEXT)),
-        ]);
 
         let py = cx.weak_entity();
         Self::spawn_inital_session(window, cx);
@@ -194,6 +221,7 @@ impl Pyonji {
             line_height: 1.1,
             default_cwd: None,
             ssh_sessions: vec![],
+            registered_callbacks: vec![],
         }
     }
 
@@ -218,7 +246,7 @@ impl Pyonji {
                 }
                 StatusBarEvent::ExecLua(code) => {
                     let lua = this.lua.clone();
-                    let res = config::with_env(this, cx, |_| lua.load(code).exec());
+                    let res = config::with_env(this, window, cx, |_| lua.load(code).exec());
                     this.status_bar.update(cx, |this, cx| {
                         this.push_lua_history(code.clone());
                         this.reset_history();
@@ -261,7 +289,9 @@ impl Pyonji {
                                 }
                             }
                             Event::ConfigChanged => {
-                                config::load(this, cx);
+                                if let Err(e) = config::load(this, window, cx) {
+                                    window.dispatch_action(Box::new(PushError::new(e)), cx);
+                                }
                                 cx.notify();
                             }
                             Event::LuaPrint(text) => {
@@ -284,7 +314,9 @@ impl Pyonji {
         cx.spawn_in(window, async move |this, cx| {
             _ = this
                 .update_in(cx, |this, window, cx| {
-                    config::load(this, cx);
+                    if let Err(e) = config::load(this, window, cx) {
+                        window.dispatch_action(Box::new(PushError::new(e)), cx);
+                    }
                     let res = this
                         .session_manager
                         .create_session(20, 80, this.cli.path.as_deref());
@@ -378,6 +410,13 @@ impl Pyonji {
             .message(print.string.clone());
 
         window.push_notification(note, cx);
+    }
+
+    fn on_exec(&mut self, func: &ExecKeybind, window: &mut Window, cx: &mut Context<Self>) {
+        let func = func.0.clone();
+        if let Err(e) = config::with_env(self, window, cx, |this| func.call::<()>(this)) {
+            window.dispatch_action(Box::new(PushError::new(e)), cx);
+        }
     }
 
     fn push_note(
@@ -600,6 +639,7 @@ impl Render for Pyonji {
             .on_action(cx.listener(Self::on_warning))
             .on_action(cx.listener(Self::on_info))
             .on_action(cx.listener(Self::on_lua_print))
+            .on_action(cx.listener(Self::on_exec))
             .child(
                 v_flex()
                     .size_full()
@@ -754,6 +794,12 @@ impl Pyonji {
 #[derive(Action, Clone, PartialEq)]
 #[action(no_json)]
 struct SwitchTab(usize);
+
+#[derive(Action, Clone, PartialEq)]
+#[action(no_json)]
+struct ExecKeybind(LuaFunction);
+
+unsafe impl Send for ExecKeybind {}
 
 #[derive(Action, Clone, PartialEq)]
 #[action(no_json)]

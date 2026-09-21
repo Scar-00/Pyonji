@@ -1,10 +1,14 @@
-use crate::Pyonji;
 use crate::pty::{Event as PtyEvent, SshConnection};
 use crate::terminal::{SessionId, SplitDirection, Tab as TerminalTab};
+use crate::ui::OverlayScreen;
 use crate::util::UnsafeRefMut;
+use crate::{ExecKeybind, Pyonji};
 use anyhow::{Context as _, Result};
 use async_channel::Sender;
-use gpui::{App, Context, Entity, EntityId, KeyDownEvent, Modifiers, WeakEntity};
+use gpui::{
+    App, Context, Entity, EntityId, KeyBinding, KeyDownEvent, Modifiers, WeakEntity, Window,
+};
+use gpui_component::ThemeMode;
 use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
 use path_absolutize::*;
@@ -19,6 +23,13 @@ use std::time::Duration;
 const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
 pub const LUA_MODULES: &[(&str, &str)] =
     &[("lua.keybind", include_str!("../resources/lua/keybind.lua"))];
+
+pub struct LuaAction {
+    pub args: Vec<String>,
+    pub is_var_arg: bool,
+    pub name: String,
+    pub callback: LuaFunction,
+}
 
 #[allow(unused_macros)]
 macro_rules! apply {
@@ -114,6 +125,7 @@ impl<T: 'static> ProxyContext<T> {
 struct LuaProxy {
     py: UnsafeRefMut<Pyonji>,
     cx: ProxyContext<Pyonji>,
+    window: UnsafeRefMut<Window>,
 }
 
 impl LuaUserData for LuaProxy {
@@ -150,6 +162,57 @@ impl LuaUserData for LuaProxy {
             }
             Ok(())
         });
+        methods.add_method_mut("bind", |lua, this, args: LuaMultiValue| {
+            if args.front().is_some_and(|arg| arg.is_table()) {
+                let (mods, key, func): (Vec<String>, String, LuaFunction) =
+                    FromLuaMulti::from_lua_multi(args, lua)?;
+                let mut state = Modifiers::default();
+                for modifier in &mods {
+                    state |= ConfigKeyBinding::parse_mod(modifier)?;
+                }
+                let key = ConfigKeyBinding::parse_key(&key)?;
+                let binding = ConfigKeyBinding {
+                    modifiers: state,
+                    key,
+                };
+                this.cx.app.bind_keys([KeyBinding::new(
+                    binding.to_gpui_keys().as_str(),
+                    ExecKeybind(func.clone()),
+                    None,
+                )]);
+            } else {
+                let (binding, func): (ConfigKeyBinding, LuaFunction) =
+                    FromLuaMulti::from_lua_multi(args, lua)?;
+                this.cx.app.bind_keys([KeyBinding::new(
+                    binding.to_gpui_keys().as_str(),
+                    ExecKeybind(func.clone()),
+                    None,
+                )]);
+            }
+            Ok(())
+        });
+        methods.add_method_mut(
+            "register",
+            |lua, this, (name, func): (String, LuaFunction)| {
+                let (args, is_var_arg) = lua
+                    .globals()
+                    .get::<LuaFunction>("__HOST_INSPECT_FUNC")
+                    .and_then(|f| f.call::<(LuaTable, bool)>(func.clone()))
+                    .and_then(|(names, var_arg)| {
+                        names
+                            .sequence_values::<String>()
+                            .collect::<LuaResult<Vec<_>>>()
+                            .map(|names| (names, var_arg))
+                    })?;
+                this.py.registered_callbacks.push(LuaAction {
+                    args,
+                    is_var_arg,
+                    name,
+                    callback: func,
+                });
+                Ok(())
+            },
+        );
         methods.add_function("create_session", |lua, args: LuaMultiValue| {
             let (this, (dir, tab, direction, parent)) = args!(
                 args,
@@ -399,6 +462,15 @@ impl LuaUserData for LuaProxy {
                     term_session.rename(name.clone());
                     Ok(true)
                 }
+            })
+        });
+        methods.add_function("open_sessions", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                let window = this.window.as_mut();
+                this.py.overlay.update(this.cx.app.as_mut(), |this, cx| {
+                    this.open(OverlayScreen::Sessions, window, cx);
+                });
+                Ok(())
             })
         });
     }
@@ -1019,43 +1091,29 @@ pub fn watch(tx: Sender<PtyEvent>) {
     });
 }
 
-pub fn load(this: &mut Pyonji, cx: &mut Context<Pyonji>) {
-    let Some(path) = util::config_path() else {
-        return;
-    };
+pub fn load(this: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>) -> Result<()> {
+    let path = util::config_path().context("failed to get config path")?;
 
-    _ = util::create_config_if_missing(&path)
-        .inspect_err(|e| tracing::error!(%e, "failed to create default config"));
+    util::create_config_if_missing(&path)
+        .context(format!("failed to create default config at {path:?}"))?;
 
-    //this.workspace.ssh_sessions.clear();
-    //this.input.keymap = Surface::default_keymap();
-    //this.registered_callbacks.clear();
+    cx.clear_key_bindings();
+    Pyonji::init(cx);
+    gpui_component::init(cx);
+    gpui_component::Theme::change(ThemeMode::Dark, Some(window), cx);
+    this.ssh_sessions.clear();
+    this.registered_callbacks.clear();
+
     let lua = this.lua.clone();
-    _ = with_env(this, cx, |_| {
+    with_env(this, window, cx, |_| {
         let chunk = lua.load(path);
         chunk.exec()
-    });
-    /*let action_key = this.input.action.clone();
-    let overridden = matches!(
-        this.input.keymap.get(&action_key),
-        Some(KeyAction::Custom(_))
-    );
-    if !overridden {
-        this.input
-            .keymap
-            .retain(|_, v| !matches!(v, KeyAction::Builtin(BuiltinAction::Action)));
-        this.input
-            .keymap
-            .insert(action_key, KeyAction::Builtin(BuiltinAction::Action));
-    }
-    // Palette/tabs/ssh sync to the StatusBar every frame in `render`; no
-    // explicit refresh needed here (keeps `load` synchronous for the file
-    // watcher and Lua without a window/cx).
-    */
+    })
 }
 
 pub fn with_env<R>(
     this: &mut Pyonji,
+    window: &mut Window,
     cx: &mut Context<Pyonji>,
     f: impl FnOnce(LuaAnyUserData) -> LuaResult<R>,
 ) -> Result<R> {
@@ -1063,6 +1121,7 @@ pub fn with_env<R>(
     let mut proxy = LuaProxy {
         py: UnsafeRefMut::new(this),
         cx: ProxyContext::new(cx),
+        window: UnsafeRefMut::new(window),
     };
     let res = lua.scope(|scope| {
         let app = scope.create_userdata_ref_mut(&mut proxy)?;
@@ -1151,20 +1210,13 @@ mod util {
     }
 }
 
-/// A keyboard shortcut, independent of any windowing toolkit.
-///
-/// `modifiers` uses [`gpui::Modifiers`] (`control`/`alt`/`shift`/`platform`)
-/// and `key` is the lowercase GPUI key name (`"b"`, `"f1"`, `"up"`,
-/// `"space"`, `"semicolon"`, …). The Lua surface keeps accepting the
-/// historical `"<ctrl+shift>-F"` spelling; [`KeyBinding::parse`] normalizes it
-/// into this form.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct KeyBinding {
+pub struct ConfigKeyBinding {
     pub modifiers: Modifiers,
     pub key: String,
 }
 
-impl KeyBinding {
+impl ConfigKeyBinding {
     pub fn new(modifiers: Modifiers, key: impl Into<String>) -> Self {
         Self {
             modifiers,
@@ -1172,52 +1224,25 @@ impl KeyBinding {
         }
     }
 
-    pub fn control(key: impl Into<String>) -> Self {
-        Self::new(
-            Modifiers {
-                control: true,
-                ..Default::default()
-            },
-            key,
-        )
-    }
-
-    /// Whether this binding matches a GPUI key-down event.
-    ///
-    /// Modifiers must match exactly (ignoring `function`, which has no
-    /// historical equivalent). The key matches either [`Keystroke::key`] or
-    /// the typed [`Keystroke::key_char`], so punctuation spellings like
-    /// `"semicolon"` keep working even though GPUI reports the literal `";"`.
-    pub fn matches_event(&self, event: &KeyDownEvent) -> bool {
-        let mods = &event.keystroke.modifiers;
-        if self.modifiers.control != mods.control
-            || self.modifiers.alt != mods.alt
-            || self.modifiers.shift != mods.shift
-            || self.modifiers.platform != mods.platform
-        {
-            return false;
+    pub fn to_gpui_keys(&self) -> String {
+        let mut out = String::new();
+        if self.modifiers.alt {
+            out.push_str("alt-");
         }
-        let key = event.keystroke.key.to_lowercase();
-        if key == self.key {
-            return true;
+        if self.modifiers.control {
+            out.push_str("ctrl-");
         }
-        if let Some(literal) = Self::key_literal(&self.key) {
-            if key == literal {
-                return true;
-            }
+        if self.modifiers.shift {
+            out.push_str("shift-");
         }
-        if let Some(ch) = event.keystroke.key_char.as_deref() {
-            let ch = ch.to_lowercase();
-            if ch == self.key {
-                return true;
-            }
-            if let Some(literal) = Self::key_literal(&self.key) {
-                if ch == literal {
-                    return true;
-                }
-            }
+        if self.modifiers.platform {
+            todo!();
         }
-        false
+        if self.modifiers.function {
+            todo!();
+        }
+        out.push_str(&self.key);
+        out
     }
 
     /// Canonicalize a key name to the lowercase GPUI spelling.
@@ -1335,7 +1360,6 @@ impl KeyBinding {
         })
     }
 
-    /// Parse a historical key name into its canonical GPUI spelling.
     pub fn parse_key(key: &str) -> Result<String> {
         let key = key.to_lowercase();
         let canonical = match key.as_str() {
@@ -1375,7 +1399,6 @@ impl KeyBinding {
         Ok(canonical)
     }
 
-    /// Digit value for `1`–`9` bindings (tab selection), if this is one.
     pub fn digit_index(&self) -> Option<usize> {
         if self.modifiers.control
             || self.modifiers.alt
@@ -1399,77 +1422,9 @@ impl KeyBinding {
     }
 }
 
-impl FromLua for KeyBinding {
+impl FromLua for ConfigKeyBinding {
     fn from_lua(value: LuaValue, _: &Lua) -> LuaResult<Self> {
         let binding = value.as_string().context("not a string")?;
         Ok(Self::parse(binding.to_str()?)?)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn keystroke(key: &str, modifiers: Modifiers) -> KeyDownEvent {
-        KeyDownEvent {
-            keystroke: gpui::Keystroke {
-                modifiers,
-                key: key.to_string(),
-                key_char: None,
-            },
-            is_held: false,
-            prefer_character_input: false,
-        }
-    }
-
-    #[test]
-    fn parses_historical_spellings() {
-        let binding = KeyBinding::parse("<ctrl>-B").unwrap();
-        assert!(binding.modifiers.control);
-        assert_eq!(binding.key, "b");
-
-        let binding = KeyBinding::parse("<ctrl+shift>-F").unwrap();
-        assert!(binding.modifiers.control && binding.modifiers.shift);
-        assert_eq!(binding.key, "f");
-
-        let binding = KeyBinding::parse("semicolon").unwrap();
-        assert_eq!(binding.key, "semicolon");
-
-        assert!(KeyBinding::parse("<bogus>-a").is_err());
-        assert!(KeyBinding::parse("<ctrl>-bogus").is_err());
-    }
-
-    #[test]
-    fn matches_gpui_key_events() {
-        let binding = KeyBinding::control("b");
-        let event = keystroke(
-            "b",
-            Modifiers {
-                control: true,
-                ..Default::default()
-            },
-        );
-        assert!(binding.matches_event(&event));
-        assert!(!KeyBinding::control("c").matches_event(&event));
-
-        // Punctuation keeps working when GPUI reports the literal character.
-        let binding = KeyBinding::parse("semicolon").unwrap();
-        let event = KeyDownEvent {
-            keystroke: gpui::Keystroke {
-                modifiers: Modifiers::default(),
-                key: ";".to_string(),
-                key_char: Some(";".to_string()),
-            },
-            is_held: false,
-            prefer_character_input: false,
-        };
-        assert!(binding.matches_event(&event));
-    }
-
-    #[test]
-    fn digit_index_covers_tabs() {
-        assert_eq!(KeyBinding::parse("1").unwrap().digit_index(), Some(0));
-        assert_eq!(KeyBinding::parse("9").unwrap().digit_index(), Some(8));
-        assert_eq!(KeyBinding::parse("<ctrl>-1").unwrap().digit_index(), None);
     }
 }

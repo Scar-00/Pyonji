@@ -41,14 +41,14 @@ require('lua.keybind');
 ---@field bind BindFn
 ---@field register fun(self: Pyonji, name: string, action: function)
 ---@field config fun(self: Pyonji, config: Config)
----@field open_palette fun(self: Pyonji)
----@field open_sessions fun(self: Pyonji)
----@field open_detached fun(self: Pyonji)
----@field open_releases fun(self: Pyonji)
----@field open_opener fun(self: Pyonji)
----@field open_command fun(self: Pyonji) opens the `:` command prompt
----@field open_lua fun(self: Pyonji) opens the `>` lua prompt
----@field open_rename fun(self: Pyonji)
+---@field open_palette fun(self: Pyonji?)
+---@field open_sessions fun(self: Pyonji?)
+---@field open_detached fun(self: Pyonji?)
+---@field open_releases fun(self: Pyonji?)
+---@field open_opener fun(self: Pyonji?)
+---@field open_command fun(self: Pyonji?) opens the `:` command prompt
+---@field open_lua fun(self: Pyonji?) opens the `>` lua prompt
+---@field open_rename fun(self: Pyonji?)
 ---@field rename RenameFn
 ---@field detach fun(self: Pyonji): boolean
 ---@field attach fun(self: Pyonji, session: integer, tab: integer?): boolean
@@ -56,7 +56,7 @@ require('lua.keybind');
 ---@field move_to fun(self: Pyonji, tab: integer): boolean
 ---@field split fun(self: Pyonji, direction: string): integer?
 ---@field create_session fun(self: Pyonji, dir: string?, tab: integer?, direction: string?, parent: integer?): integer
----@field switch_tab fun(self: Pyonji, tab: integer): boolean
+---@field switch_tab fun(self: Pyonji?, tab: integer): boolean
 ---@field next_tab fun(self: Pyonji): integer
 ---@field prev_tab fun(self: Pyonji): integer
 ---@field focus_next_pane fun(self: Pyonji): integer?

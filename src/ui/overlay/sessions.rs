@@ -21,12 +21,6 @@ pub struct SessionsView {
 
 impl SessionsView {
     pub fn new(py: &WeakEntity<Pyonji>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.bind_keys([
-            KeyBinding::new("enter", Submit, None),
-            KeyBinding::new("up", Prev, None),
-            KeyBinding::new("down", Next, None),
-        ]);
-
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions…"));
         let focus_handle = cx.focus_handle();
         cx.on_focus_in(&focus_handle, window, |this, window, cx| {
