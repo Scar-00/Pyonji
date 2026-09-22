@@ -172,8 +172,10 @@ impl LuaUserData for LuaProxy {
                 }
                 let key = ConfigKeyBinding::parse_key(&key)?;
                 let binding = ConfigKeyBinding {
-                    modifiers: state,
-                    key,
+                    keystrokes: vec![SingleKeyBinding {
+                        modifiers: state,
+                        key,
+                    }],
                 };
                 this.cx.app.bind_keys([KeyBinding::new(
                     binding.to_gpui_keys().as_str(),
@@ -1212,6 +1214,11 @@ mod util {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConfigKeyBinding {
+    pub keystrokes: Vec<SingleKeyBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SingleKeyBinding {
     pub modifiers: Modifiers,
     pub key: String,
 }
@@ -1219,30 +1226,100 @@ pub struct ConfigKeyBinding {
 impl ConfigKeyBinding {
     pub fn new(modifiers: Modifiers, key: impl Into<String>) -> Self {
         Self {
-            modifiers,
-            key: Self::canonical_key(&key.into()),
+            keystrokes: vec![SingleKeyBinding {
+                modifiers,
+                key: Self::canonical_key(&key.into()),
+            }],
         }
     }
 
     pub fn to_gpui_keys(&self) -> String {
-        let mut out = String::new();
-        if self.modifiers.alt {
-            out.push_str("alt-");
+        self.keystrokes
+            .iter()
+            .map(|ks| {
+                let mut out = String::new();
+                if ks.modifiers.alt {
+                    out.push_str("alt-");
+                }
+                if ks.modifiers.control {
+                    out.push_str("ctrl-");
+                }
+                if ks.modifiers.shift {
+                    out.push_str("shift-");
+                }
+                if ks.modifiers.platform {
+                    out.push_str("cmd-");
+                }
+                if ks.modifiers.function {
+                    out.push_str("fn-");
+                }
+                out.push_str(&ks.key);
+                out
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn parse_single(binding: &str) -> Result<SingleKeyBinding> {
+        // Handle bracket notation like <ctrl-b> where key is inside brackets
+        if binding.starts_with('<') && binding.contains('>') {
+            let end = binding
+                .chars()
+                .position(|c| c == '>')
+                .context("failed to find `>` while parsing keybinding")?;
+            let inside = &binding[1..end];
+            let rest = &binding[end + 1..];
+
+            // Try to parse inside as modifier-key (e.g., "ctrl-b" or "ctrl+shift-b")
+            if let Some(delim) = inside.rfind('-') {
+                let modifier_part = &inside[..delim];
+                let key_part = &inside[delim + 1..];
+
+                // Parse modifiers from modifier_part (can have multiple like "ctrl+shift")
+                let mut mods = Modifiers::default();
+                for m in modifier_part.split('+') {
+                    mods |= Self::parse_mod(m)?;
+                }
+
+                let key = Self::parse_key(key_part)?;
+                // If there's content after >, it's an error for single keystroke
+                if !rest.trim().is_empty() {
+                    anyhow::bail!("unexpected content after '>': {}", rest);
+                }
+                return Ok(SingleKeyBinding { modifiers: mods, key });
+            }
         }
-        if self.modifiers.control {
-            out.push_str("ctrl-");
-        }
-        if self.modifiers.shift {
-            out.push_str("shift-");
-        }
-        if self.modifiers.platform {
-            todo!();
-        }
-        if self.modifiers.function {
-            todo!();
-        }
-        out.push_str(&self.key);
-        out
+
+        let (binding, modifiers) = Self::parse_mods(binding)?;
+        let key = if !matches!(
+            (
+                modifiers.control,
+                modifiers.alt,
+                modifiers.shift,
+                modifiers.platform
+            ),
+            (false, false, false, false)
+        ) && let Some(delim) = binding.chars().position(|c| c == '-')
+        {
+            &binding[delim + 1..]
+        } else {
+            binding
+        };
+        let key = Self::parse_key(key)?;
+
+        Ok(SingleKeyBinding { modifiers, key })
+    }
+
+    pub fn parse(binding: impl AsRef<str>) -> Result<Self> {
+        let binding = binding.as_ref().trim();
+        let keystrokes: Result<Vec<_>> = binding
+            .split_whitespace()
+            .map(Self::parse_single)
+            .collect();
+
+        Ok(Self {
+            keystrokes: keystrokes?,
+        })
     }
 
     /// Canonicalize a key name to the lowercase GPUI spelling.
@@ -1287,53 +1364,62 @@ impl ConfigKeyBinding {
         })
     }
 
-    pub fn parse(binding: impl AsRef<str>) -> Result<Self> {
-        let binding = binding.as_ref();
-        let (binding, modifiers) = Self::parse_mods(binding)?;
-        let key = if !matches!(
-            (
-                modifiers.control,
-                modifiers.alt,
-                modifiers.shift,
-                modifiers.platform
-            ),
-            (false, false, false, false)
-        ) && let Some(delim) = binding.chars().position(|c| c == '-')
-        {
-            &binding[delim + 1..]
-        } else {
-            binding
-        };
-        let key = Self::parse_key(key)?;
-
-        Ok(Self { modifiers, key })
-    }
-
     fn parse_mods(binding: &str) -> Result<(&str, Modifiers)> {
-        if !binding.starts_with('<') {
-            return Ok((binding, Modifiers::default()));
-        }
-        let binding = &binding[1..];
-        let end = binding
-            .chars()
-            .position(|c| c == '>')
-            .context("failed to find `>` while parsing keybinding modifiers")?;
-        let mut modifiers = &binding[..end];
+        // Handle bracket notation: <ctrl>, <ctrl+shift>, etc.
+        if binding.starts_with('<') {
+            let binding = &binding[1..];
+            let end = binding
+                .chars()
+                .position(|c| c == '>')
+                .context("failed to find `>` while parsing keybinding modifiers")?;
+            let mut modifiers = &binding[..end];
 
-        let mut mods = Modifiers::default();
+            let mut mods = Modifiers::default();
 
-        if !modifiers.is_empty() {
-            while let Some(next) = modifiers.chars().position(|c| c == '+') {
-                let modifier = &modifiers[..next];
-                mods |= Self::parse_mod(modifier)?;
-                modifiers = &modifiers[next + 1..];
+            if !modifiers.is_empty() {
+                while let Some(next) = modifiers.chars().position(|c| c == '+') {
+                    let modifier = &modifiers[..next];
+                    mods |= Self::parse_mod(modifier)?;
+                    modifiers = &modifiers[next + 1..];
+                }
+                mods |= Self::parse_mod(modifiers)?;
             }
-            mods |= Self::parse_mod(modifiers)?;
+
+            let rest = &binding[end..];
+
+            return Ok((rest, mods));
         }
 
-        let rest = &binding[end..];
+        // Handle non-bracket notation like "ctrl-b", "ctrl+shift-x"
+        // Check if it contains a modifier prefix
+        let known_modifiers = ["ctrl", "alt", "shift", "mod"];
+        for m in known_modifiers {
+            if binding.starts_with(m) && (binding.len() == m.len() || binding[m.len()..].starts_with('-') || binding[m.len()..].starts_with('+')) {
+                // Found a modifier prefix, parse it
+                let rest = &binding[m.len()..];
+                let mut mods = Modifiers::default();
+                let mut current = m;
 
-        Ok((rest, mods))
+                // Parse all modifiers separated by + or -
+                let mut modifier_part = current;
+                let mut key_part = rest;
+
+                // Find the last separator to split modifiers from key
+                if let Some(last_sep) = rest.rfind(|c: char| c == '-' || c == '+') {
+                    modifier_part = &binding[..m.len() + last_sep];
+                    key_part = &rest[last_sep + 1..];
+                }
+
+                // Parse modifiers from modifier_part
+                for part in modifier_part.split(|c: char| c == '-' || c == '+') {
+                    mods |= Self::parse_mod(part)?;
+                }
+
+                return Ok((key_part, mods));
+            }
+        }
+
+        Ok((binding, Modifiers::default()))
     }
 
     pub fn parse_mod(m: &str) -> Result<Modifiers> {
@@ -1360,7 +1446,7 @@ impl ConfigKeyBinding {
         })
     }
 
-    pub fn parse_key(key: &str) -> Result<String> {
+    fn parse_key(key: &str) -> Result<String> {
         let key = key.to_lowercase();
         let canonical = match key.as_str() {
             "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n"
@@ -1400,14 +1486,18 @@ impl ConfigKeyBinding {
     }
 
     pub fn digit_index(&self) -> Option<usize> {
-        if self.modifiers.control
-            || self.modifiers.alt
-            || self.modifiers.shift
-            || self.modifiers.platform
+        if self.keystrokes.len() != 1 {
+            return None;
+        }
+        let ks = &self.keystrokes[0];
+        if ks.modifiers.control
+            || ks.modifiers.alt
+            || ks.modifiers.shift
+            || ks.modifiers.platform
         {
             return None;
         }
-        match self.key.as_str() {
+        match ks.key.as_str() {
             "1" => Some(0),
             "2" => Some(1),
             "3" => Some(2),
@@ -1419,6 +1509,68 @@ impl ConfigKeyBinding {
             "9" => Some(8),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::Modifiers;
+
+    #[test]
+    fn test_parse_single() {
+        let binding = ConfigKeyBinding::parse("ctrl-b").unwrap();
+        assert_eq!(binding.keystrokes.len(), 1);
+        assert!(binding.keystrokes[0].modifiers.control);
+        assert_eq!(binding.keystrokes[0].key, "b");
+        assert_eq!(binding.to_gpui_keys(), "ctrl-b");
+    }
+
+    #[test]
+    fn test_parse_bracket_notation() {
+        let binding = ConfigKeyBinding::parse("<ctrl-b>").unwrap();
+        assert_eq!(binding.keystrokes.len(), 1);
+        assert!(binding.keystrokes[0].modifiers.control);
+        assert_eq!(binding.keystrokes[0].key, "b");
+        assert_eq!(binding.to_gpui_keys(), "ctrl-b");
+    }
+
+    #[test]
+    fn test_parse_multi_bracket() {
+        let binding = ConfigKeyBinding::parse("<ctrl-b> 1").unwrap();
+        assert_eq!(binding.keystrokes.len(), 2);
+        assert!(binding.keystrokes[0].modifiers.control);
+        assert_eq!(binding.keystrokes[0].key, "b");
+        assert_eq!(binding.keystrokes[1].key, "1");
+        assert_eq!(binding.to_gpui_keys(), "ctrl-b 1");
+    }
+
+    #[test]
+    fn test_parse_multi_no_brackets() {
+        let binding = ConfigKeyBinding::parse("ctrl-b 1").unwrap();
+        assert_eq!(binding.keystrokes.len(), 2);
+        assert!(binding.keystrokes[0].modifiers.control);
+        assert_eq!(binding.keystrokes[0].key, "b");
+        assert_eq!(binding.keystrokes[1].key, "1");
+        assert_eq!(binding.to_gpui_keys(), "ctrl-b 1");
+    }
+
+    #[test]
+    fn test_parse_three() {
+        let binding = ConfigKeyBinding::parse("<ctrl-b> 1 2").unwrap();
+        assert_eq!(binding.keystrokes.len(), 3);
+        assert_eq!(binding.to_gpui_keys(), "ctrl-b 1 2");
+    }
+
+    #[test]
+    fn test_parse_alt_shift() {
+        let binding = ConfigKeyBinding::parse("<alt+shift-x> y").unwrap();
+        assert_eq!(binding.keystrokes.len(), 2);
+        assert!(binding.keystrokes[0].modifiers.alt);
+        assert!(binding.keystrokes[0].modifiers.shift);
+        assert_eq!(binding.keystrokes[0].key, "x");
+        assert_eq!(binding.keystrokes[1].key, "y");
+        assert_eq!(binding.to_gpui_keys(), "alt-shift-x y");
     }
 }
 
