@@ -82,7 +82,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     switch in.variant {
         case 0u: {
             let tex = textureSample(glyph_tex, glyph_samp, vec2<f32>(in.uv));
-            var alpha = tex.r;//pow(tex.r, 1.43);
+            var alpha = pow(tex.r, 1.43);
             let color = vec4<f32>(in.color) / 255.0;
             return vec4<f32>(color.xyz, alpha);
         }
