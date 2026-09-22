@@ -113,3 +113,7 @@ end);
 for i = 1, 9 do
     py:bind('<ctrl-b> ' .. i, py.switch_tab(i - 1));
 end
+
+py:config({
+    editor = "nvim",
+});

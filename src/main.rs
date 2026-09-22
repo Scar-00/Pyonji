@@ -27,8 +27,10 @@ use terminal::{Tab as TerminalTab, *};
 use ui::Overlay;
 use ui::Terminal;
 
+use std::path::Path;
 use std::{array, path::PathBuf, sync::Arc};
 
+use anyhow::anyhow;
 use async_channel::{Receiver, Sender};
 use clap::Parser;
 use gpui::{prelude::*, *};
@@ -126,6 +128,7 @@ struct Pyonji {
     default_cwd: Option<PathBuf>,
     ssh_sessions: Vec<SshConnection>,
     registered_callbacks: Vec<LuaAction>,
+    editor: Option<String>,
 }
 
 impl Pyonji {
@@ -234,6 +237,7 @@ impl Pyonji {
             default_cwd: None,
             ssh_sessions: vec![],
             registered_callbacks: vec![],
+            editor: None,
         }
     }
 
@@ -501,6 +505,37 @@ impl Pyonji {
             icon,
             ..Default::default()
         }
+    }
+
+    pub fn create_session(&mut self, dir: Option<&Path>, tab: Option<usize>, parent: Option<SessionId>, cx: &mut Context<Self>) -> Result<SessionId> {
+        let slot = match tab.or(self.current_tab) {
+            Some(slot) if slot < self.tabs.len() => slot,
+            _ => return Err(anyhow!("tab index out of range")),
+        };
+        let cwd = self.default_cwd.clone();
+        let owned_dir = dir.map(PathBuf::from);
+        let path = owned_dir.as_deref().or(cwd.as_deref());
+        let id = self
+            .session_manager
+            .create_session(20, 80, path)
+            .map_err(mlua::Error::external)?;
+        if self.tabs[slot].is_none() {
+            self.tabs[slot] = Some(TerminalTab::new(id));
+        } else {
+            let placed = self.tabs[slot]
+                .as_mut()
+                .map(|tab| match parent.filter(|id| tab.sessions().contains(id)) {
+                    Some(at) => tab.split_on(at, SplitDirection::Vertical, id),
+                    None => tab.split_active(SplitDirection::Vertical, id),
+                })
+                .unwrap_or(false);
+            if !placed {
+                self.session_manager.remove_session(id);
+                return Err(anyhow!("failed to place session"));
+            }
+        }
+        self.resize_tab(slot, cx);
+        Ok(id)
     }
 
     pub fn close_session(&mut self, session: SessionId, cx: &mut Context<Self>) -> bool {

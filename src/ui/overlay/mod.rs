@@ -11,7 +11,7 @@ use opener::{FileOpener, FileOpenerEvent};
 use gpui::*;
 use gpui_component::{WindowExt, dialog::Dialog};
 
-use crate::{PyTheme, Pyonji, util};
+use crate::{PushError, PyTheme, Pyonji, util};
 
 #[derive(Debug, Clone, Copy)]
 pub enum OverlayScreen {
@@ -41,10 +41,7 @@ impl Overlay {
 
             sessions: cx.new(|cx| SessionsView::new(&pyonji, window, cx)),
             releases: cx.new(|cx| ReleasesView::new(&pyonji, window, cx)),
-            opener: cx.new(|cx| {
-                FileOpener::new(std::env::current_dir().unwrap(), window, cx)
-                    .show_hidden(true)
-            }),
+            opener: Self::setup_opener(window, cx),
         }
     }
 }
@@ -83,5 +80,37 @@ impl Overlay {
         window.defer(cx, move |window, cx| {
             window.focus(&handle, cx);
         });
+    }
+
+    fn setup_opener(window: &mut Window, cx: &mut Context<Self>) -> Entity<FileOpener> {
+        let opener = cx.new(|cx| {
+            FileOpener::new(std::env::current_dir().unwrap(), window, cx)
+                .show_hidden(true)
+        });
+        cx.subscribe_in(&opener, window, |this, _, ev: &FileOpenerEvent, window, cx| {
+            _ = this.pyonji.update(cx, |this, cx| {
+                match ev {
+                    FileOpenerEvent::Opened(path) => {
+                        let id = match this.create_session(Some(path), None, None, cx) {
+                            Err(e) => {
+                                window.dispatch_action(Box::new(PushError::new(e)), cx);
+                                window.close_dialog(cx);
+                                return;
+                            }
+                            Ok(id) => id,
+                        };
+                        if path.is_file() && let Some(editor) = this.editor.as_ref() {
+                            this.session_manager.send_text(id, &format!("{editor} .\r"));
+                        }
+                        window.close_dialog(cx);
+                    }
+                    FileOpenerEvent::Cancelled => {
+                        window.close_dialog(cx);
+                    }
+                }
+            });
+        })
+        .detach();
+        opener
     }
 }

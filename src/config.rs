@@ -161,6 +161,9 @@ impl LuaUserData for LuaProxy {
             if let Some(sessions) = ssh_sessions {
                 this.py.ssh_sessions = sessions;
             }
+            if let Some(editor) = config_option_value::<String>(lua, &table, "editor") {
+                this.py.editor = editor;
+            }
             this.py.terminal.update(this.cx.app.as_mut(), |term, _| {
                 let Some(renderer) = term.renderer.as_mut() else {
                     return;
@@ -237,40 +240,15 @@ impl LuaUserData for LuaProxy {
                     Option<SessionId>
                 )
             );
-            let direction = match direction.as_deref().map(str::to_lowercase).as_deref() {
+            let _direction = match direction.as_deref().map(str::to_lowercase).as_deref() {
                 Some("horizontal") | Some("h") => SplitDirection::Horizontal,
                 _ => SplitDirection::Vertical,
             };
             callable_action!(lua, this => {
                 let dir = dir.clone();
                 move |this: &mut Self| -> LuaResult<SessionId> {
-                    let slot = match tab.or(this.py.current_tab) {
-                        Some(slot) if slot < this.py.tabs.len() => slot,
-                        _ => return Err(mlua::Error::external("tab index out of range")),
-                    };
-                    let cwd = this.py.default_cwd.clone();
-                    let owned_dir = dir.clone().map(PathBuf::from);
-                    let path = owned_dir.as_deref().or(cwd.as_deref());
-                    let id = this
-                        .py
-                        .session_manager
-                        .create_session(20, 80, path)
-                        .map_err(mlua::Error::external)?;
-                    if this.py.tabs[slot].is_none() {
-                        this.py.tabs[slot] = Some(TerminalTab::new(id));
-                    } else {
-                        let placed = this.py.tabs[slot]
-                            .as_mut()
-                            .map(|tab| match parent.filter(|id| tab.sessions().contains(id)) {
-                                Some(at) => tab.split_on(at, direction, id),
-                                None => tab.split_active(direction, id),
-                            })
-                            .unwrap_or(false);
-                        if !placed {
-                            this.py.session_manager.remove_session(id);
-                            return Err(mlua::Error::external("failed to place session"));
-                        }
-                    }
+                    let id = this.py.create_session(dir.as_ref().map(|dir| Path::new(dir)), tab, parent, &mut this.cx.to_ctx())
+                        .context("failed to create session")?;
                     Ok(id)
                 }
             })
@@ -287,9 +265,7 @@ impl LuaUserData for LuaProxy {
                 if let Some(term_session) = this.py.session_manager.session_mut(id) {
                     term_session.pty.kill();
                 }
-                remove_session_from_tabs(&mut this.py, id);
-                this.py.session_manager.remove_session(id);
-                this.py.detached_sessions.retain(|detached| *detached != id);
+                this.py.close_session(id, &mut this.cx.to_ctx());
                 Ok(true)
             })
         });

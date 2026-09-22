@@ -24,7 +24,6 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("down", Next, Some(CONTEXT)),
         KeyBinding::new("up", Prev, Some(CONTEXT)),
         KeyBinding::new("enter", Submit, Some(CONTEXT)),
-        //KeyBinding::new("tab", Submit, Some(CONTEXT)),
         KeyBinding::new("alt-up", Parent, Some(CONTEXT)),
         KeyBinding::new("escape", Cancel, Some(CONTEXT)),
     ]);
