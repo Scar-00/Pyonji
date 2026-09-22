@@ -2,7 +2,7 @@ use crate::pty::{Event as PtyEvent, SshConnection};
 use crate::terminal::{SessionId, SplitDirection, Tab as TerminalTab};
 use crate::ui::OverlayScreen;
 use crate::util::UnsafeRefMut;
-use crate::{ExecKeybind, Pyonji};
+use crate::{EnterLuaRepl, EnterRename, ExecKeybind, Pyonji};
 use anyhow::{Context as _, Result};
 use async_channel::Sender;
 use gpui::{
@@ -160,6 +160,16 @@ impl LuaUserData for LuaProxy {
             if let Some(sessions) = ssh_sessions {
                 this.py.ssh_sessions = sessions;
             }
+            this.py.terminal.update(this.cx.app.as_mut(), |term, _| {
+                let Some(renderer) = term.renderer.as_mut() else {
+                    return;
+                };
+                renderer.set_font_metrics(this.py.font_size, this.py.font_size * this.py.line_height);
+                if let Some(font) = this.py.font_family.as_deref() {
+                    renderer.set_font_family(font);
+                }
+                renderer.evict_glyphs();
+            });
             Ok(())
         });
         methods.add_method_mut("bind", |lua, this, args: LuaMultiValue| {
@@ -285,12 +295,7 @@ impl LuaUserData for LuaProxy {
         methods.add_function("switch_tab", |lua, args: LuaMultiValue| {
             let (this, (tab,)) = args!(args, lua, (usize,));
             callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
-                let py = &mut this.py;
-                if tab >= py.tabs.len() || py.tabs[tab].is_none() {
-                    return Ok(false);
-                }
-                py.current_tab = Some(tab);
-                py.wheel_remainder = 0.0;
+                this.py.switch_tab(tab, &mut this.cx.to_ctx());
                 Ok(true)
             })
         });
@@ -472,6 +477,44 @@ impl LuaUserData for LuaProxy {
                 this.py.overlay.update(this.cx.app.as_mut(), |this, cx| {
                     this.open(OverlayScreen::Sessions, window, cx);
                 });
+                Ok(())
+            })
+        });
+        methods.add_function("open_releases", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                let window = this.window.as_mut();
+                this.py.overlay.update(this.cx.app.as_mut(), |this, cx| {
+                    this.open(OverlayScreen::Releases, window, cx);
+                });
+                Ok(())
+            })
+        });
+        methods.add_function("open_opener", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                let window = this.window.as_mut();
+                this.py.overlay.update(this.cx.app.as_mut(), |this, cx| {
+                    this.open(OverlayScreen::Opener, window, cx);
+                });
+                Ok(())
+            })
+        });
+        methods.add_function("open_rename", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                let window = this.window.as_mut();
+                window.dispatch_action(Box::new(EnterRename), &mut this.cx.app);
+                Ok(())
+            })
+        });
+        methods.add_function("open_lua", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                let window = this.window.as_mut();
+                window.dispatch_action(Box::new(EnterLuaRepl), &mut this.cx.app);
+                Ok(())
+            })
+        });
+        methods.add_function("reload_config", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                load(&mut this.py, &mut this.window, &mut this.cx.to_ctx())?;
                 Ok(())
             })
         });
