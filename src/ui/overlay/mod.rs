@@ -1,9 +1,12 @@
 pub mod palette;
 pub mod releases;
 pub mod sessions;
+pub mod opener;
 
 use gpui_base::StyledExt as _;
 use sessions::SessionsView;
+use releases::ReleasesView;
+use opener::{FileOpener, FileOpenerEvent};
 
 use gpui::*;
 use gpui_component::{WindowExt, dialog::Dialog};
@@ -15,12 +18,15 @@ pub enum OverlayScreen {
     Palette,
     Sessions,
     Releases,
+    Opener,
 }
 
 pub struct Overlay {
     pyonji: WeakEntity<Pyonji>,
 
     sessions: Entity<SessionsView>,
+    releases: Entity<ReleasesView>,
+    opener: Entity<FileOpener>,
 }
 
 impl Overlay {
@@ -34,6 +40,11 @@ impl Overlay {
             pyonji: pyonji.clone(),
 
             sessions: cx.new(|cx| SessionsView::new(&pyonji, window, cx)),
+            releases: cx.new(|cx| ReleasesView::new(&pyonji, window, cx)),
+            opener: cx.new(|cx| {
+                FileOpener::new(std::env::current_dir().unwrap(), window, cx)
+                    .show_hidden(true)
+            }),
         }
     }
 }
@@ -44,21 +55,29 @@ impl Overlay {
             window.close_dialog(cx);
         }
         let builder = cx.processor(move |this, dialog: Dialog, _window, cx| {
-            dialog.p_0().h_4_5().close_button(false).child(
-                div()
-                    .size_full()
-                    .bg(cx.theme().surface)
-                    .backdrop_blur(px(24.0))
-                    .p_1()
-                    .child(match screen {
-                        OverlayScreen::Sessions => this.sessions.clone().into_any_element(),
-                        _ => div().into_any_element(),
-                    }),
+            dialog
+                .p_0()
+                .h_4_5()
+                .backdrop_blur(px(24.0))
+                .bg(cx.theme().surface.opacity(0.15))
+                .close_button(false)
+                .child(
+                    div()
+                        .size_full()
+                        .p_1()
+                        .child(match screen {
+                            OverlayScreen::Sessions => this.sessions.clone().into_any_element(),
+                            OverlayScreen::Releases => this.releases.clone().into_any_element(),
+                            OverlayScreen::Opener => this.opener.clone().into_any_element(),
+                            _ => div().into_any_element(),
+                        }),
             )
         });
         window.open_dialog(cx, builder);
         let handle = match screen {
             OverlayScreen::Sessions => self.sessions.focus_handle(cx),
+            OverlayScreen::Releases => self.releases.focus_handle(cx),
+            OverlayScreen::Opener => self.opener.focus_handle(cx),
             _ => todo!(),
         };
         window.defer(cx, move |window, cx| {

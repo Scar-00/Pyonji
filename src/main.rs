@@ -51,7 +51,10 @@ actions!([
     EnterLuaRepl,
     OpenPalette,
     OpenReleases,
-    OpenSessions
+    OpenSessions,
+    Submit,
+    Next,
+    Prev,
 ]);
 
 #[derive(clap::Parser)]
@@ -137,11 +140,12 @@ impl Pyonji {
 
     fn init(cx: &mut App) {
         use ui::overlay;
+        use overlay::releases::ReleasesView;
 
         cx.bind_keys([
-            KeyBinding::new("enter", overlay::sessions::Submit, None),
-            KeyBinding::new("up", overlay::sessions::Prev, None),
-            KeyBinding::new("down", overlay::sessions::Next, None),
+            KeyBinding::new("enter", Submit, None),
+            KeyBinding::new("up", Prev, None),
+            KeyBinding::new("down", Next, None),
             KeyBinding::new(
                 "escape",
                 ui::status_bar::DismissStatusBarState,
@@ -157,21 +161,26 @@ impl Pyonji {
                 ui::status_bar::HistoryPrev,
                 Some(StatusBar::KEY_CONTEXT),
             ),
-            KeyBinding::new("ctrl-b r", EnterRename, Some(Self::TERMINAL_CONTEXT)),
+            KeyBinding::new("down", Next, Some(ReleasesView::CONTEXT)),
+            KeyBinding::new("up", Prev, Some(ReleasesView::CONTEXT)),
+            KeyBinding::new("enter", Submit, Some(ReleasesView::CONTEXT)),
+            /*KeyBinding::new("ctrl-b r", EnterRename, Some(Self::TERMINAL_CONTEXT)),
             KeyBinding::new("ctrl-b l", EnterLuaRepl, Some(Self::TERMINAL_CONTEXT)),
             KeyBinding::new("ctrl-shift-f", OpenPalette, Some(Self::TERMINAL_CONTEXT)),
             KeyBinding::new("ctrl-shift-r", OpenReleases, Some(Self::TERMINAL_CONTEXT)),
             KeyBinding::new("ctrl-shift-s", OpenSessions, Some(Self::TERMINAL_CONTEXT)),
             KeyBinding::new("ctrl-b 1", SwitchTab(0), Some(Self::TERMINAL_CONTEXT)),
             KeyBinding::new("ctrl-b 2", SwitchTab(1), Some(Self::TERMINAL_CONTEXT)),
-            KeyBinding::new("ctrl-b 3", SwitchTab(2), Some(Self::TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-b 3", SwitchTab(2), Some(Self::TERMINAL_CONTEXT)),*/
         ]);
+
+        overlay::opener::init(cx);
     }
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cli = Cli::parse();
         let lua = unsafe { Lua::unsafe_new() };
-        config::install_inspect(&lua);
+        _ = config::install_inspect(&lua);
         let (tx, rx) = async_channel::unbounded();
         {
             let tx = tx.clone();

@@ -8,8 +8,7 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     separator::Separator,
 };
-
-actions!([Submit, Next, Prev]);
+use crate::{Next, Prev, Submit};
 
 pub struct SessionsView {
     pyonji: WeakEntity<Pyonji>,
