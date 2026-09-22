@@ -103,8 +103,13 @@ function NextFreeTab()
     return nil;
 end
 
-py:bind({ 'ctrl', 'shift' }, "F", py.open_sessions());
-py:bind("<ctrl-b> 1", py.switch_tab(0));
+py:bind('<ctrl-b> l', py.open_lua());
+py:bind('<ctrl-b> r', py.open_rename());
+py:bind('<ctrl-b> f', py.open_sessions());
+py:bind('<ctrl-b> o', function ()
+    open("/home/ahri/dev/core/");
+end);
 
-
-
+for i = 1, 9 do
+    py:bind('<ctrl-b> ' .. i, py.switch_tab(i - 1));
+end
