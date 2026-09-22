@@ -40,6 +40,7 @@ use smallvec::{SmallVec, smallvec};
 use tracing_subscriber::prelude::*;
 
 use crate::config::LuaAction;
+use crate::ui::DividerDrag;
 use crate::{
     pty::SshConnection,
     ui::{OverlayScreen, StatusBar, StatusBarEvent, StatusBarMode},
@@ -584,6 +585,35 @@ impl Pyonji {
         }
     }
 
+    pub fn resize_active_pane(
+        &mut self,
+        direction: SplitDirection,
+        delta_first: i16,
+        cx: &mut Context<Self>
+    ) {
+        let (rows, cols) = {
+            let terminal = self.terminal.read(cx);
+            (terminal.rows, terminal.cols)
+        };
+        let area = PaneGeometry {
+            x: 0,
+            y: 0,
+            cols,
+            rows,
+        };
+        let Some(current_tab) = self.current_tab else {
+            return;
+        };
+        let Some(tab) = self.tabs[current_tab].as_mut() else {
+            return;
+        };
+        if !tab.resize_active_split(area, direction, delta_first) {
+            return;
+        }
+        self.wheel_remainder = 0.0;
+        self.resize_tab(current_tab, cx);
+    }
+
     fn tab_layouts(&self, rows: u16, cols: u16) -> Vec<(SessionId, PaneGeometry)> {
         let Some(current_tab) = self.current_tab else {
             return vec![];
@@ -623,6 +653,18 @@ impl Pyonji {
             .as_ref()
             .and_then(TerminalTab::active_session)
     }
+
+    pub fn set_active_session(&mut self, id: SessionId) {
+        let Some(tab) = self.current_tab.clone() else {
+            return;
+        };
+        let Some(tab) = self.tabs[tab].as_mut() else {
+            return;
+        };
+        if tab.set_active_session(id) {
+            self.wheel_remainder = 0.0;
+        }
+    }
 }
 
 impl Render for Pyonji {
@@ -653,6 +695,10 @@ impl Render for Pyonji {
                             .on_action(cx.listener(Self::on_enter_lua))
                             .on_action(cx.listener(Self::on_switch_tab))
                             .on_key_down(cx.listener(Self::handle_key_down))
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_mouse_up))
+                            .on_mouse_move(cx.listener(Self::handle_mouse_move))
+                            .on_scroll_wheel(cx.listener(Self::handle_scroll))
                             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                                 this.overlay.update(cx, |this, cx| {
                                     this.open(OverlayScreen::Palette, window, cx);
@@ -685,19 +731,14 @@ impl Pyonji {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Only the focused terminal consumes keys: typing in a dialog or the
-        // status prompt must not reach the pty.
         if !self.focus_handle.is_focused(window) {
             return;
         }
         if event.is_held {
-            // Held-key repeats go straight to the pty / prompt repeat path
-            // below without re-triggering keybindings.
-            //return self.handle_key_repeat(event, entity, window, cx);
-            return;
+            return self.handle_key_repeat(event, window, cx);
         }
 
-        /*if self.input.resize_mode_held {
+        if self.terminal.read(cx).resize_mode_held {
             let delta = match event.keystroke.key.as_str() {
                 "left" => Some((SplitDirection::Vertical, -1)),
                 "right" => Some((SplitDirection::Vertical, 1)),
@@ -706,69 +747,16 @@ impl Pyonji {
                 _ => None,
             };
             if let Some((direction, delta)) = delta {
-                self.input.resize_mode_used = true;
-                self.resize_active_pane(direction, delta);
+                self.terminal.update(cx, |this, _| {
+                    this.resize_mode_held = true;
+                });
+                self.resize_active_pane(direction, delta, cx);
                 window.prevent_default();
                 cx.stop_propagation();
                 cx.notify();
                 return;
             }
-        }*/
-
-        let modifiers = &event.keystroke.modifiers;
-        /*let no_mods =
-            !modifiers.control && !modifiers.alt && !modifiers.shift && !modifiers.platform;
-        // A bare key while a move is pending either completes the move (digit)
-        // or cancels it — consumed either way, exactly like before.
-        if no_mods && self.input.pending_move_to_tab {
-            self.input.pending_move_to_tab = false;
-            self.input.action_mode = false;
-            if let Some(target) = digit_index(event)
-                && let Some(session) = self.workspace.active_session()
-            {
-                self.move_session_to_tab(session, target);
-            }
-            window.prevent_default();
-            cx.stop_propagation();
-            cx.notify();
-            return;
-        }*/
-
-        /*let matched = self.input.match_action(event);
-        if let Some(matched_action) = matched {
-            let was_in_action_mode = self.input.action_mode;
-            let is_action_trigger = InputManager::is_action_trigger(&matched_action);
-            if was_in_action_mode && !is_action_trigger {
-                self.input.action_mode = false;
-            }
-            // Bare keys only fire inside action mode (except the trigger
-            // itself), exactly like the previous dispatch.
-            if is_action_trigger || !(!was_in_action_mode && bare_key(event)) {
-                match matched_action {
-                    KeyAction::Custom(func) => {
-                        config::with_env(self, |this| {
-                            func.call::<()>(this)?;
-                            Ok(())
-                        })
-                        .into_log();
-                    }
-                    KeyAction::Builtin(action) => {
-                        self.dispatch_builtin(action, entity, window, cx);
-                    }
-                }
-                // Consumed keys must stop here: GPUI delivers text separately
-                // from key events, and an unstopped trigger would be
-                // re-delivered as text into whatever just opened.
-                window.prevent_default();
-                cx.stop_propagation();
-                cx.notify();
-                return;
-            }
-        } else if self.input.action_mode {
-            // Any unbound key leaves action mode, as before.
-            self.input.action_mode = false;
-            cx.notify();
-        }*/
+        }
 
         let Some(active_session) = self.active_session() else {
             return;
@@ -787,6 +775,186 @@ impl Pyonji {
         }
         if reset_scrollback {
             cx.notify();
+        }
+    }
+
+    fn handle_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            window.focus(&self.focus_handle, cx);
+        }
+        let terminal = self.terminal.clone();
+        // Divider drags start on left press, like before — they take over the
+        // gesture so the press never reaches the pane underneath.
+        let (x, y) = terminal.read(cx).pt_to_term(event.position);
+        if event.button == MouseButton::Left
+            && let Some(divider) = terminal.read(cx).divider_hit_test(x, y, self)
+        {
+            let drag = DividerDrag {
+                path: divider.path,
+                direction: divider.direction,
+            };
+            terminal.update(cx, |this, cx| {
+                this.resize_dragged_divider(&drag, x, y, cx);
+                this.divider_drag = Some(drag);
+                cx.notify();
+            });
+            return;
+        }
+        let Some((col, row)) = terminal.read(cx).mouse_to_cell(event.position, self) else {
+            return;
+        };
+        let Some((session_id, col, row)) = terminal.read(cx).pane_at(col, row, self) else {
+            return;
+        };
+        self.set_active_session(session_id);
+        if let Some(session) = self.session_manager.session_mut(session_id) {
+            if !session.uses_local_scrollback() {
+                session.reset_scrollback();
+            }
+            session.handle_mouse_down(event.button, &event.modifiers, col, row);
+        }
+        cx.notify();
+    }
+
+    fn handle_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal.update(cx, |this, _| {
+            this.divider_drag.take().is_some()
+        }) {
+            return;
+        }
+        let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
+            return;
+        };
+        let Some((session_id, col, row)) = self.terminal.read(cx).pane_at(col, row, self) else {
+            return;
+        };
+        if let Some(session) = self.session_manager.session_mut(session_id) {
+            session.handle_mouse_up(event.button, &event.modifiers, col, row);
+        }
+    }
+
+    fn handle_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.pressed_button.is_none() {
+            return;
+        }
+        if let Some(drag) = self.terminal.read(cx).divider_drag.clone() {
+            let (x, y) = self.terminal.read(cx).pt_to_term(event.position);
+            self.terminal.update(cx, |this, cx| {
+                this.resize_dragged_divider(&drag, x, y, cx);
+            });
+            return;
+        }
+        let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
+            return;
+        };
+        let Some((session_id, col, row)) = self.terminal.read(cx).pane_at(col, row, self) else {
+            return;
+        };
+        if let Some(session) = self.session_manager.session_mut(session_id) {
+            session.handle_mouse_move(&event.modifiers, col, row);
+        }
+    }
+
+    fn take_wheel_steps(&mut self, delta_lines: f32) -> i32 {
+        let total = self.wheel_remainder + delta_lines;
+        let whole = if total > 0.0 {
+            total.floor() as i32
+        } else if total < 0.0 {
+            total.ceil() as i32
+        } else {
+            0
+        };
+        self.wheel_remainder = total - whole as f32;
+        whole
+    }
+
+    fn handle_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
+            return;
+        };
+        let Some((session_id, col, row)) = self.terminal.read(cx).pane_at(col, row, self) else {
+            return;
+        };
+        let line_height = self.font_size * self.line_height;
+        let lines = match event.delta {
+            ScrollDelta::Lines(lines) => lines.y,
+            ScrollDelta::Pixels(pixels) => {
+                let scale = self.terminal.read(cx).scale.max(f32::EPSILON);
+                f32::from(pixels.y) / (line_height / scale)
+            }
+        };
+        let uses_local_scrollback = self
+            .session_manager
+            .session(session_id)
+            .is_some_and(TerminalSession::uses_local_scrollback);
+        let whole_lines = if uses_local_scrollback {
+            self.take_wheel_steps(lines)
+        } else {
+            self.wheel_remainder = 0.0;
+            0
+        };
+        if let Some(session) = self.session_manager.session_mut(session_id) {
+            if uses_local_scrollback {
+                if whole_lines != 0 && session.scroll_scrollback(whole_lines) {
+                    cx.notify();
+                }
+            } else {
+                let reset_scrollback = session.reset_scrollback();
+                session.handle_mouse_wheel(lines, &event.modifiers, col, row);
+                if reset_scrollback {
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /*fn handle_key_up(&mut self, key: &str) -> bool {
+        if key.to_lowercase() == self.action.key {
+            self.resize_mode_held = false;
+            if self.resize_mode_used {
+                self.action_mode = false;
+            }
+            self.resize_mode_used = false;
+            true
+        } else {
+            false
+        }
+    }*/
+
+    fn handle_key_repeat(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.terminal.read(cx).resize_mode_held {
+            let delta = match event.keystroke.key.as_str() {
+                "left" => Some((SplitDirection::Vertical, -1)),
+                "right" => Some((SplitDirection::Vertical, 1)),
+                "up" => Some((SplitDirection::Horizontal, -1)),
+                "down" => Some((SplitDirection::Horizontal, 1)),
+                _ => None,
+            };
+            if let Some((direction, delta)) = delta {
+                self.terminal.update(cx, |this, _| {
+                    this.resize_mode_held = true;
+                });
+                self.resize_active_pane(direction, delta, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+        }
+        if let Some(active_session) = self.active_session() {
+            let consumed = self
+                .session_manager
+                .session_mut(active_session)
+                .is_some_and(|session| session.handle_key_down(event));
+            if consumed {
+                window.prevent_default();
+                cx.stop_propagation();
+            }
         }
     }
 }
