@@ -457,10 +457,11 @@ impl Pyonji {
 
         let note = Notification::new()
             .icon(notification_icon(kind, cx))
-            .bg(cx.theme().surface)
+            .bg(cx.theme().surface.opacity(0.15))
             .title(title)
             .autohide(autohide)
             .placement(Anchor::TopRight)
+            .backdrop_blur(px(24.0))
             .message(message);
 
         window.push_notification(note, cx);
@@ -1066,13 +1067,49 @@ impl PyTheme for App {
 impl Global for Theme {}
 
 pub struct Theme {
-    background: Rgba,
-    surface: Rgba,
-    text: Rgba,
-    selected: Rgba,
-    unselected: Rgba,
-    selected_border: Rgba,
-    unselected_border: Rgba,
+    // Base layers
+    pub background: Rgba,
+    pub surface: Rgba,
+    pub surface_elevated: Rgba,
+
+    // Text
+    pub text: Rgba,
+    pub text_muted: Rgba,
+    pub text_disabled: Rgba,
+
+    // Tabs / list items
+    pub selected: Rgba,
+    pub unselected: Rgba,
+    pub hovered: Rgba,
+    pub selected_border: Rgba,
+    pub unselected_border: Rgba,
+
+    // Accent
+    pub accent: Rgba,
+    pub accent_muted: Rgba,
+
+    // Terminal-specific
+    pub cursor: Rgba,
+    pub cursor_text: Rgba,
+    pub selection: Rgba,
+    pub search_match: Rgba,
+    pub search_match_active: Rgba,
+    pub scrollbar: Rgba,
+    pub scrollbar_hover: Rgba,
+    pub split_divider: Rgba,
+    pub split_divider_active: Rgba,
+
+    // Semantic status
+    pub success: Rgba,
+    pub warning: Rgba,
+    pub error: Rgba,
+    pub info: Rgba,
+
+    // Overlays / popups
+    pub overlay_backdrop: Rgba,
+    pub tooltip_background: Rgba,
+    pub border: Rgba,
+    pub focus_ring: Rgba,
 }
 
 impl Theme {
@@ -1082,6 +1119,52 @@ impl Theme {
 
     fn new() -> Self {
         Self {
+            // Base layers (kept your background)
+            background: Rgba::new(24.0 / 255.0, 24.0 / 255.0, 24.0 / 255.0, 1.0),
+            surface: Rgba::new(32.0 / 255.0, 32.0 / 255.0, 32.0 / 255.0, 1.0),
+            surface_elevated: Rgba::new(42.0 / 255.0, 42.0 / 255.0, 42.0 / 255.0, 1.0),
+
+            // Text
+            text: Rgba::new(220.0 / 255.0, 220.0 / 255.0, 220.0 / 255.0, 1.0),
+            text_muted: Rgba::new(140.0 / 255.0, 140.0 / 255.0, 140.0 / 255.0, 1.0),
+            text_disabled: Rgba::new(90.0 / 255.0, 90.0 / 255.0, 90.0 / 255.0, 1.0),
+
+            // Tabs / list items
+            selected: Rgba::new(44.0 / 255.0, 44.0 / 255.0, 44.0 / 255.0, 1.0),
+            unselected: Rgba::new(28.0 / 255.0, 28.0 / 255.0, 28.0 / 255.0, 1.0),
+            hovered: Rgba::new(36.0 / 255.0, 36.0 / 255.0, 36.0 / 255.0, 1.0),
+            selected_border: Rgba::new(122.0 / 255.0, 162.0 / 255.0, 247.0 / 255.0, 1.0),
+            unselected_border: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
+
+            // Accent (one hue, used everywhere emphasis is needed)
+            accent: Rgba::new(122.0 / 255.0, 162.0 / 255.0, 247.0 / 255.0, 1.0),
+            accent_muted: Rgba::new(122.0 / 255.0, 162.0 / 255.0, 247.0 / 255.0, 0.25),
+
+            // Terminal-specific
+            cursor: Rgba::new(220.0 / 255.0, 220.0 / 255.0, 220.0 / 255.0, 1.0),
+            cursor_text: Rgba::new(24.0 / 255.0, 24.0 / 255.0, 24.0 / 255.0, 1.0),
+            selection: Rgba::new(122.0 / 255.0, 162.0 / 255.0, 247.0 / 255.0, 0.3),
+            search_match: Rgba::new(224.0 / 255.0, 175.0 / 255.0, 104.0 / 255.0, 0.4),
+            search_match_active: Rgba::new(224.0 / 255.0, 175.0 / 255.0, 104.0 / 255.0, 0.8),
+            scrollbar: Rgba::new(255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0, 0.12),
+            scrollbar_hover: Rgba::new(255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0, 0.25),
+            split_divider: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
+            split_divider_active: Rgba::new(122.0 / 255.0, 162.0 / 255.0, 247.0 / 255.0, 1.0),
+
+            // Semantic status (bell, exit codes, warnings, etc.)
+            success: Rgba::new(158.0 / 255.0, 206.0 / 255.0, 106.0 / 255.0, 1.0),
+            warning: Rgba::new(224.0 / 255.0, 175.0 / 255.0, 104.0 / 255.0, 1.0),
+            error: Rgba::new(247.0 / 255.0, 118.0 / 255.0, 142.0 / 255.0, 1.0),
+            info: Rgba::new(125.0 / 255.0, 207.0 / 255.0, 255.0 / 255.0, 1.0),
+
+            // Overlays / popups
+            overlay_backdrop: Rgba::new(0.0, 0.0, 0.0, 0.5),
+            tooltip_background: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
+            border: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
+            focus_ring: Rgba::new(122.0 / 255.0, 162.0 / 255.0, 247.0 / 255.0, 1.0),
+        }
+
+        /*Self {
             background: Rgba::new(24.0 / 255.0, 24.0 / 255.0, 24.0 / 255.0, 1.0),
             surface: Rgba::new(30.0 / 255.0, 30.0 / 255.0, 46.0 / 255.0, 1.0),
             text: Rgba::new(0.9, 0.9, 0.9, 1.0),
@@ -1089,6 +1172,6 @@ impl Theme {
             unselected: Rgba::new(40.0 / 255.0, 40.0 / 255.0, 40.0 / 255.0, 1.0),
             selected_border: Rgba::new(0.4, 0.4, 0.6, 1.0),
             unselected_border: Rgba::new(0.2, 0.2, 0.2, 1.0),
-        }
+        }*/
     }
 }

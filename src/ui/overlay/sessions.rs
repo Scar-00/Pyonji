@@ -64,9 +64,9 @@ impl SessionsView {
         Button::new(format!("{tab}-{sid}"))
             .border_1()
             .border_color(if selected {
-                theme.selected_border
+                theme.selected_border.opacity(0.15)
             } else {
-                theme.unselected_border
+                theme.unselected_border.opacity(0.15)
             })
             .w_full()
             .h_16()
@@ -74,7 +74,7 @@ impl SessionsView {
                 if selected {
                     this.bg(select_color)
                 } else {
-                    this.bg(theme.surface)
+                    this.bg(theme.surface.opacity(0.15))
                 }
             })
             .shadow_md()
@@ -171,7 +171,7 @@ impl Render for SessionsView {
                         .w_full()
                         .bordered(false)
                         .appearance(false)
-                        .bg(cx.theme().background),
+                        .bg(cx.theme().background.opacity(0.15)),
                 ),
             )
             .child(
