@@ -18,6 +18,8 @@ mod renderer;
 mod terminal;
 mod ui;
 mod util;
+#[cfg(feature = "install")]
+mod logging;
 
 use assets::{GlobalAssets, PyonjiAsset, PyonjiAssetsSource};
 use pty::Event;
@@ -346,7 +348,7 @@ impl Pyonji {
         .detach()
     }
 
-    fn on_enter_rename(&mut self, _: &EnterRename, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_enter_rename(&mut self, _: &EnterRename, _: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.active_session() else {
             return;
         };

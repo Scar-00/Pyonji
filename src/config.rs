@@ -11,6 +11,7 @@ use gpui::{
 use gpui_component::ThemeMode;
 use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
+use notify::event::ModifyKind;
 use path_absolutize::*;
 use std::fmt::Debug;
 use std::io::Write;
@@ -1116,19 +1117,18 @@ pub fn watch(tx: Sender<PtyEvent>) {
             use std::sync::mpsc;
             let (watch_tx, rx) = mpsc::channel();
             let config = notify::Config::default()
-                .with_poll_interval(Duration::from_secs(1))
-                .with_compare_contents(true);
+                .with_compare_contents(true)
+                .with_follow_symlinks(true);
             let mut watcher = RecommendedWatcher::new(watch_tx, config)?;
             watcher.watch(&path.absolutize()?, RecursiveMode::Recursive)?;
-            while let Ok(ev) = rx.recv() {
-                if let Ok(ev) = ev
-                    && let EventKind::Modify(_) = ev.kind
-                {
+            loop {
+                let ev = rx.recv();
+                let Ok(Ok(event)) = ev else { continue; };
+                if matches!(event.kind, EventKind::Modify(_)) {
                     tx.force_send(PtyEvent::ConfigChanged)
                         .expect("event tx closed");
                 }
             }
-            Ok(())
         };
         if let Err(e) = func() {
             tracing::error!(?e, "watcher thread error");

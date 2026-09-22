@@ -100,7 +100,7 @@ impl SessionsView {
 }
 
 impl Render for SessionsView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let py = util::read!(self.pyonji, cx);
         let query = self.search_input.read(cx).value().to_lowercase();
 
