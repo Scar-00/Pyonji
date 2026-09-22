@@ -3,7 +3,6 @@ pub mod releases;
 pub mod sessions;
 pub mod opener;
 
-use gpui_base::StyledExt as _;
 use sessions::SessionsView;
 use releases::ReleasesView;
 use opener::{FileOpener, FileOpenerEvent};

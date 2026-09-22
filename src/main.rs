@@ -102,7 +102,7 @@ fn main() {
 struct Pyonji {
     cli: Cli,
     lua: Lua,
-    tx: Sender<Event>,
+    _tx: Sender<Event>,
     focus_handle: FocusHandle,
 
     //workspace
@@ -145,40 +145,10 @@ impl Pyonji {
 
     fn init(cx: &mut App) {
         use ui::overlay;
-        use overlay::releases::ReleasesView;
 
-        cx.bind_keys([
-            KeyBinding::new("enter", Submit, None),
-            KeyBinding::new("up", Prev, None),
-            KeyBinding::new("down", Next, None),
-            KeyBinding::new(
-                "escape",
-                ui::status_bar::DismissStatusBarState,
-                Some(StatusBar::KEY_CONTEXT),
-            ),
-            KeyBinding::new(
-                "up",
-                ui::status_bar::HistoryNext,
-                Some(StatusBar::KEY_CONTEXT),
-            ),
-            KeyBinding::new(
-                "down",
-                ui::status_bar::HistoryPrev,
-                Some(StatusBar::KEY_CONTEXT),
-            ),
-            KeyBinding::new("down", Next, Some(ReleasesView::CONTEXT)),
-            KeyBinding::new("up", Prev, Some(ReleasesView::CONTEXT)),
-            KeyBinding::new("enter", Submit, Some(ReleasesView::CONTEXT)),
-            /*KeyBinding::new("ctrl-b r", EnterRename, Some(Self::TERMINAL_CONTEXT)),
-            KeyBinding::new("ctrl-b l", EnterLuaRepl, Some(Self::TERMINAL_CONTEXT)),
-            KeyBinding::new("ctrl-shift-f", OpenPalette, Some(Self::TERMINAL_CONTEXT)),
-            KeyBinding::new("ctrl-shift-r", OpenReleases, Some(Self::TERMINAL_CONTEXT)),
-            KeyBinding::new("ctrl-shift-s", OpenSessions, Some(Self::TERMINAL_CONTEXT)),
-            KeyBinding::new("ctrl-b 1", SwitchTab(0), Some(Self::TERMINAL_CONTEXT)),
-            KeyBinding::new("ctrl-b 2", SwitchTab(1), Some(Self::TERMINAL_CONTEXT)),
-            KeyBinding::new("ctrl-b 3", SwitchTab(2), Some(Self::TERMINAL_CONTEXT)),*/
-        ]);
-
+        ui::status_bar::init(cx);
+        overlay::sessions::init(cx);
+        overlay::releases::init(cx);
         overlay::opener::init(cx);
     }
 
@@ -215,7 +185,7 @@ impl Pyonji {
         Self {
             cli,
             lua,
-            tx: tx.clone(),
+            _tx: tx.clone(),
             focus_handle,
 
             session_manager: SessionManager::new(tx.clone()),

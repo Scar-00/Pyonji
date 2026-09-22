@@ -10,7 +10,6 @@ require('lua.keybind');
 ---@alias Value<T> T | fun(): T
 
 ---@alias BindFn
----| fun(self: Pyonji, mods: Modifier[], key: Key, action: function)
 ---| fun(self: Pyonji, binding: string, action: function)
 
 ---@alias RenameFn

@@ -11,6 +11,26 @@ use crate::util;
 
 actions!([DismissStatusBarState, HistoryPrev, HistoryNext]);
 
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new(
+                "escape",
+                DismissStatusBarState,
+                Some(StatusBar::CONTEXT),
+            ),
+            KeyBinding::new(
+                "up",
+                HistoryNext,
+                Some(StatusBar::CONTEXT),
+            ),
+            KeyBinding::new(
+                "down",
+                HistoryPrev,
+                Some(StatusBar::CONTEXT),
+            )
+    ]);
+}
+
 pub enum StatusBarMode {
     Sessions,
     Cmd,
@@ -40,7 +60,7 @@ pub struct StatusBar {
 }
 
 impl StatusBar {
-    pub const KEY_CONTEXT: &str = "STATUS-BAR";
+    pub const CONTEXT: &str = "STATUS-BAR";
 
     pub fn new(pyonji: WeakEntity<Pyonji>, cx: &mut Context<Self>) -> Self {
         Self {
@@ -88,7 +108,7 @@ impl Render for StatusBar {
         let theme = cx.theme();
         h_flex()
             .id("status-bar")
-            .key_context(Self::KEY_CONTEXT)
+            .key_context(Self::CONTEXT)
             .on_action(cx.listener(Self::on_dismiss))
             .w_full()
             .px_1()

@@ -10,6 +10,14 @@ use gpui_component::{
 };
 use crate::{Next, Prev, Submit};
 
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("enter", Submit, Some(SessionsView::CONTEXT)),
+        KeyBinding::new("up", Prev, Some(SessionsView::CONTEXT)),
+        KeyBinding::new("down", Next, Some(SessionsView::CONTEXT)),
+    ]);
+}
+
 pub struct SessionsView {
     pyonji: WeakEntity<Pyonji>,
 
@@ -19,6 +27,8 @@ pub struct SessionsView {
 }
 
 impl SessionsView {
+    pub const CONTEXT: &str = "SessionsView";
+
     pub fn new(py: &WeakEntity<Pyonji>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions…"));
         let focus_handle = cx.focus_handle();

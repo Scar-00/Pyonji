@@ -3,7 +3,7 @@ use crate::terminal::{SessionId, SplitDirection, Tab as TerminalTab};
 use crate::ui::OverlayScreen;
 use crate::util::UnsafeRefMut;
 use crate::{EnterLuaRepl, EnterRename, ExecKeybind, Pyonji};
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use async_channel::Sender;
 use gpui::{
     App, Context, Entity, EntityId, KeyBinding, KeyDownEvent, Modifiers, WeakEntity, Window,
@@ -144,7 +144,7 @@ impl LuaUserData for LuaProxy {
                 config_option_value(lua, &table, "font_family");
             let default_cwd: Option<Option<String>> =
                 config_option_value(lua, &table, "default_cwd");
-            let ssh_sessions = config_ssh_sessions(lua, &table);
+            let ssh_sessions = util::collect_ssh_sessions(lua, &table);
 
             if let Some(size) = font_size.filter(|size| *size > 0.0) {
                 this.py.font_size = size;
@@ -178,7 +178,7 @@ impl LuaUserData for LuaProxy {
         });
         methods.add_method_mut("bind", |lua, this, args: LuaMultiValue| {
             if args.front().is_some_and(|arg| arg.is_table()) {
-                let (mods, key, func): (Vec<String>, String, LuaFunction) =
+                /*let (mods, key, func): (Vec<String>, String, LuaFunction) =
                     FromLuaMulti::from_lua_multi(args, lua)?;
                 let mut state = Modifiers::default();
                 for modifier in &mods {
@@ -195,7 +195,8 @@ impl LuaUserData for LuaProxy {
                     binding.to_gpui_keys().as_str(),
                     ExecKeybind(func.clone()),
                     None,
-                )]);
+                )]);*/
+                todo!()
             } else {
                 let (binding, func): (ConfigKeyBinding, LuaFunction) =
                     FromLuaMulti::from_lua_multi(args, lua)?;
@@ -641,448 +642,6 @@ fn resolve_value<T: FromLua>(lua: &Lua, value: LuaValue, key: &str) -> Option<T>
     }
 }
 
-fn config_ssh_sessions(lua: &Lua, table: &LuaTable) -> Option<Vec<SshConnection>> {
-    if !table.contains_key("ssh_sessions").unwrap_or(false) {
-        return None;
-    }
-    let value: LuaValue = table.get("ssh_sessions").unwrap_or(LuaValue::Nil);
-    let value = match value {
-        LuaValue::Nil => return Some(Vec::new()),
-        LuaValue::Function(func) => match func.call::<LuaValue>(()) {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::error!(%error, "config value function failed for `ssh_sessions`");
-                return None;
-            }
-        },
-        value => value,
-    };
-    let entries = match Vec::<LuaValue>::from_lua(value, lua) {
-        Ok(entries) => entries,
-        Err(error) => {
-            tracing::error!(%error, "invalid `ssh_sessions` (expected a list of tables)");
-            return None;
-        }
-    };
-    let mut sessions = Vec::with_capacity(entries.len());
-    for (index, entry) in entries.into_iter().enumerate() {
-        let entry = match entry {
-            LuaValue::Function(func) => match func.call::<LuaValue>(()) {
-                Ok(value) => value,
-                Err(error) => {
-                    tracing::error!(%error, index, "ssh session function failed, skipping entry");
-                    continue;
-                }
-            },
-            entry => entry,
-        };
-        let LuaValue::Table(entry) = entry else {
-            tracing::error!(index, "ssh session entry is not a table, skipping");
-            continue;
-        };
-        let name: Option<String> = entry
-            .get::<LuaValue>("name")
-            .ok()
-            .and_then(|value| resolve_value(lua, value, "ssh_sessions[].name"));
-        let Some(name) = name else {
-            tracing::error!(index, "ssh session entry misses `name`, skipping");
-            continue;
-        };
-        let user_name: Option<String> = entry
-            .get::<LuaValue>("user_name")
-            .ok()
-            .and_then(|value| resolve_value(lua, value, "ssh_sessions[].user_name"));
-        let ip: Option<String> = entry
-            .get::<LuaValue>("ip")
-            .ok()
-            .and_then(|value| resolve_value(lua, value, "ssh_sessions[].ip"));
-        let Some(ip) = ip else {
-            tracing::error!(index, "ssh session entry misses `ip`, skipping");
-            continue;
-        };
-        let Ok(ip) = IpAddr::from_str(&ip) else {
-            tracing::error!(index, ip, "ssh session entry has an invalid `ip`, skipping");
-            continue;
-        };
-        sessions.push(SshConnection {
-            user_name: user_name.unwrap_or_else(|| name.clone()),
-            name,
-            ip,
-        });
-    }
-    Some(sessions)
-}
-/*
-impl LuaUserData for Pyonji {
-    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
-        /*methods.add_method_mut("bind", |lua, this, args: LuaMultiValue| {
-            if args.front().is_some_and(|arg| arg.is_table()) {
-                let (mods, key, func): (Vec<String>, String, LuaFunction) =
-                    FromLuaMulti::from_lua_multi(args, lua)?;
-                let mut state = Modifiers::default();
-                for modifier in &mods {
-                    state |= KeyBinding::parse_mod(modifier)?;
-                }
-                let key = KeyBinding::parse_key(&key)?;
-                this.input.keymap.insert(
-                    KeyBinding { modifiers: state, key },
-                    KeyAction::Custom(func.clone()),
-                );
-            } else {
-                let (binding, func): (KeyBinding, LuaFunction) =
-                    FromLuaMulti::from_lua_multi(args, lua)?;
-                this.input
-                    .keymap
-                    .insert(binding, KeyAction::Custom(func));
-            }
-
-            Ok(())
-        });*/
-        methods.add_method_mut(
-            "register",
-            |lua, this, (name, func): (String, LuaFunction)| {
-                let (args, is_var_arg) = lua
-                    .globals()
-                    .get::<LuaFunction>("__HOST_INSPECT_FUNC")
-                    .and_then(|f| f.call::<(LuaTable, bool)>(func.clone()))
-                    .and_then(|(names, var_arg)| {
-                        names
-                            .sequence_values::<String>()
-                            .collect::<LuaResult<Vec<_>>>()
-                            .map(|names| (names, var_arg))
-                    })?;
-                // Source of truth lives on Surface for sync Lua access;
-                // `render` syncs the copy into the StatusBar component.
-                this.registered_callbacks.push(LuaAction {
-                    args,
-                    is_var_arg,
-                    name,
-                    callback: func,
-                });
-                Ok(())
-            },
-        );
-        methods.add_method_mut("config", |lua, this, table: LuaTable| {
-            if let Ok(font_size) = table.get::<f32>("font_size") {
-                this.font_size = font_size;
-            }
-            if let Ok(line_height) = table.get::<f32>("line_height") {
-                this.line_height = line_height;
-            }
-            if let Ok(font_family) = table.get::<Option<String>>("font_family") {
-                this.font_family = font_family;
-            }
-            /*if let Ok(fullscreen) = table.get::<bool>("fullscreen") {
-                this.fullscreen = fullscreen;
-            }*/
-            if let Ok(default_cwd) = table.get::<Option<PathBuf>>("default_cwd") {
-                this.default_cwd = default_cwd;
-            }
-            /*if let Ok(action) = table.get::<KeyBinding>("action") {
-                this.input.action = action;
-            }*/
-            /*if let Ok(status_height) = table.get::<f32>("status_height") {
-                // Owned synchronously by the terminal viewport (like the
-                // font metrics); `render` syncs a copy into the bar.
-                this.terminal.status_height = status_height.max(0.5);
-            }*/
-            this.ssh_sessions = util::collect_ssh_sessions(lua, &table);
-
-            Ok(())
-        });
-        methods.add_function("open_palette", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                Ok(())
-            })
-        });
-        methods.add_function("open_sessions", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                Ok(())
-            })
-        });
-        methods.add_function("open_detached", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                Ok(())
-            })
-        });
-        methods.add_function("detach", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<bool> {
-                Ok(this.detach_active_session())
-            })
-        });
-        methods.add_function("attach", |lua, args: LuaMultiValue| {
-            let (this, (session, tab)) = args!(args, lua, (SessionId, Option<usize>));
-            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
-                Ok(this.reattach_session(session, tab.unwrap_or(this.workspace.current_tab)))
-            })
-        });
-        methods.add_function("open_rename", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                let name = this
-                    .workspace
-                    .active_session()
-                    .and_then(|id| this.workspace.session_manager.session(id))
-                    .map(|s| s.title().to_owned())
-                    .unwrap_or_default();
-                this.queue_action(OpenRenamePrompt { name });
-                Ok(())
-            })
-        });
-        methods.add_function("rename", |lua, args: LuaMultiValue| {
-            let (this, (rest,)) = args!(args, lua, (LuaMultiValue,));
-            let (session, name) = {
-                let with_session: LuaResult<(SessionId, String)> =
-                    FromLuaMulti::from_lua_multi(rest.clone(), lua);
-                match with_session {
-                    Ok((session, name)) => (Some(session), name),
-                    Err(_) => {
-                        let (name,) = FromLuaMulti::from_lua_multi(rest, lua)?;
-                        (None, name)
-                    }
-                }
-            };
-            callable_action!(lua, this => {
-                let name = name.clone();
-                move |this: &mut Self| -> LuaResult<bool> {
-                    let Some(session) = session.or_else(|| this.active_session()) else {
-                        return Ok(false);
-                    };
-                    Ok(this.rename_session(session, &name))
-                }
-            })
-        });
-        methods.add_function("close", |lua, args: LuaMultiValue| {
-            let (this, (session,)) = args!(args, lua, (Option<SessionId>,));
-            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
-                let Some(session) = session.or_else(|| this.active_session()) else {
-                    return Ok(false);
-                };
-                let Some(term_session) = this
-                    .workspace
-                    .session_manager
-                    .session_mut(session)
-                else {
-                    return Ok(false);
-                };
-                term_session.pty.kill();
-                Ok(this.close_session(session))
-            })
-        });
-        methods.add_function("move_to", |lua, args: LuaMultiValue| {
-            let (this, (tab,)) = args!(args, lua, (Option<usize>,));
-            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
-                let Some(tab) = tab else {
-                    return Ok(false);
-                };
-                let Some(session) = this.active_session() else {
-                    return Ok(false);
-                };
-                Ok(this.move_session_to_tab(session, tab))
-            })
-        });
-        methods.add_function("switch_tab", |lua, args: LuaMultiValue| {
-            let (this, (tab,)) = args!(args, lua, (usize,));
-            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
-                Ok(this.switch_tab(tab))
-            })
-        });
-        methods.add_function("next_tab", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<usize> {
-                let index = this.next_tab_index();
-                this.switch_tab(index);
-                Ok(index)
-            })
-        });
-        methods.add_function("prev_tab", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<usize> {
-                let index = this.previous_tab_index();
-                this.switch_tab(index);
-                Ok(index)
-            })
-        });
-        methods.add_function("split", |lua, args: LuaMultiValue| {
-            let (this, direction) = args!(args, lua, String);
-            let direction = match direction.to_lowercase().as_str() {
-                "horizontal" | "h" => SplitDirection::Horizontal,
-                _ => SplitDirection::Vertical,
-            };
-            callable_action!(lua, this => move |this: &mut Self| -> LuaResult<Option<SessionId>> {
-                Ok(this.split_current_tab(direction))
-            })
-        });
-        methods.add_function("focus_next_pane", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<Option<SessionId>> {
-                Ok(this.focus_next_pane())
-            })
-        });
-        methods.add_function("write", |lua, args: LuaMultiValue| {
-            let (this, (text,)) = args!(args, lua, (String,));
-            callable_action!(lua, this => {
-                let text = text.clone();
-                move |this: &mut Self| -> LuaResult<bool> {
-                    let Some(active) = this.active_session() else {
-                        return Ok(false);
-                    };
-                    this.workspace.session_manager.send_text(active, &text);
-                    Ok(true)
-                }
-            })
-        });
-        methods.add_function("write_to", |lua, args: LuaMultiValue| {
-            let (this, (session, text)) = args!(args, lua, (SessionId, String));
-            callable_action!(lua, this => {
-                let text = text.clone();
-                move |this: &mut Self| -> LuaResult<bool> {
-                    this.workspace.session_manager.send_text(session, &text);
-                    Ok(true)
-                }
-            })
-        });
-        methods.add_function("open_releases", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                this.request_overlay(Screen::Releases);
-                Ok(())
-            })
-        });
-        methods.add_function("open_opener", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                this.request_overlay(Screen::Opener);
-                Ok(())
-            })
-        });
-        methods.add_function("open_command", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                this.queue_action(OpenCommandPrompt);
-                Ok(())
-            })
-        });
-        methods.add_function("open_lua", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                this.queue_action(OpenLuaPrompt);
-                Ok(())
-            })
-        });
-        methods.add_function("toggle_fullscreen", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<bool> {
-                // The `ToggleFullscreen` handler flips `fullscreen` and the
-                // window together; predict the post-toggle value (the queue
-                // drains in order before any other Lua runs).
-                this.queue_action(ToggleFullscreen);
-                Ok(!this.fullscreen)
-            })
-        });
-        methods.add_function("toggle_decorations", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                // GPUI manages window chrome itself; there is no runtime
-                // toggle. Stay honest instead of silently doing nothing.
-                // No window/cx here (Lua) — queue for `render` to dispatch.
-                this.queue_action(ShowStatusMessage {
-                    text: "window decorations toggle is not supported on GPUI".to_string(),
-                });
-                Ok(())
-            })
-        });
-        methods.add_function("toggle_status_bar", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                // No window/cx here — queue; the handler flips synchronously.
-                this.queue_action(ToggleStatusBar);
-                Ok(())
-            })
-        });
-        methods.add_function("reload_config", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                load(this);
-                Ok(())
-            })
-        });
-        methods.add_function("quit", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                _ = this.event_tx.try_send(PtyEvent::Exit);
-                Ok(())
-            })
-        });
-        methods.add_function(
-            "create_session",
-            |lua, args: LuaMultiValue| {
-                let (this, (dir, tab, direction, parent)) = args!(
-                    args,
-                    lua,
-                    (
-                        Option<String>,
-                        Option<usize>,
-                        Option<String>,
-                        Option<SessionId>
-                    )
-                );
-                let direction = match direction.as_deref().map(str::to_lowercase).as_deref() {
-                    Some("horizontal") | Some("h") => SplitDirection::Horizontal,
-                    _ => SplitDirection::Vertical,
-                };
-                callable_action!(lua, this => {
-                    let dir = dir.clone();
-                    move |this: &mut Self| -> LuaResult<SessionId> {
-                        let cols = this.terminal.cols;
-                        let rows = this.terminal_rows();
-                        this.workspace.create_session_placed(
-                            dir.as_deref().map(Path::new),
-                            tab,
-                            direction,
-                            parent,
-                            cols,
-                            rows,
-                        ).map_err(|e| mlua::Error::external(e))
-                    }
-                })
-            },
-        );
-    }
-
-    fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
-        fields.add_field_method_get("current_tab", |_, this| Ok(this.workspace.current_tab));
-        fields.add_field_method_get("font_size", |_, this| Ok(this.terminal.font_size));
-        fields.add_field_method_get("status_height", |_, this| {
-            Ok(this.terminal.status_height)
-        });
-        fields.add_field_method_get("line_height", |_, this| Ok(this.terminal.line_height));
-        fields.add_field_method_get("font_family", |_, this| {
-            Ok(this.terminal.font_family.clone())
-        });
-        fields.add_field_method_get("rows", |_, this| Ok(this.terminal.rows));
-        fields.add_field_method_get("cols", |_, this| Ok(this.terminal.cols));
-        fields.add_field_method_get("active_session", |lua, this| {
-            this.active_session().into_lua(lua)
-        });
-        fields.add_field_method_get("tab_count", |_, this| {
-            Ok(this.workspace.tabs.iter().flatten().count())
-        });
-        fields.add_field_method_get("detached_sessions", |lua, this| {
-            let table = lua.create_table()?;
-            for (index, session) in this.live_detached_sessions().into_iter().enumerate() {
-                table.raw_set(index + 1, session)?;
-            }
-            Ok(table)
-        });
-        fields.add_field_method_get("ssh_sessions", |lua, this| {
-            let table = lua.create_table()?;
-            for (index, session) in this.workspace.ssh_sessions.iter().enumerate() {
-                let entry = lua.create_table()?;
-                entry.raw_set("name", session.name.clone())?;
-                entry.raw_set("user_name", session.user_name.clone())?;
-                entry.raw_set("ip", session.ip.to_string())?;
-                table.raw_set(index + 1, entry)?;
-            }
-            Ok(table)
-        });
-
-        fields.add_field_method_get("sessions", |lua, this| {
-            let tabs = this.workspace.tabs.iter().filter_map(|tab| {
-                lua.create_sequence_from(tab.as_ref()?.sessions()).ok()
-            });
-            lua.create_sequence_from(tabs)
-        });
-    }
-}*/
-
 pub fn watch(tx: Sender<PtyEvent>) {
     let Some(path) = util::config_path() else {
         return;
@@ -1168,9 +727,9 @@ mod util {
     use std::path::Path;
 
     use super::*;
-    pub fn collect_ssh_sessions(lua: &Lua, table: &LuaTable) -> Vec<SshConnection> {
+    pub fn collect_ssh_sessions(lua: &Lua, table: &LuaTable) -> Option<Vec<SshConnection>> {
         let Ok(sessions) = table.get::<Vec<LuaValue>>("ssh_sessions") else {
-            return vec![];
+            return None;
         };
         sessions
             .into_iter()
@@ -1194,7 +753,7 @@ mod util {
                 })
             })
             .collect::<LuaResult<Vec<_>>>()
-            .unwrap_or_default()
+            .ok()
     }
 
     pub fn from_value<T: FromLua>(value: LuaValue, lua: &Lua) -> LuaResult<T> {
@@ -1233,115 +792,60 @@ mod util {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConfigKeyBinding {
-    pub keystrokes: Vec<SingleKeyBinding>,
+    mods: Option<Modifier>,
+    key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SingleKeyBinding {
-    pub modifiers: Modifiers,
-    pub key: String,
+pub struct Modifier {
+    parts: Vec<String>,
+    split: bool,
 }
 
 impl ConfigKeyBinding {
-    pub fn new(modifiers: Modifiers, key: impl Into<String>) -> Self {
-        Self {
-            keystrokes: vec![SingleKeyBinding {
-                modifiers,
-                key: Self::canonical_key(&key.into()),
-            }],
-        }
-    }
-
     pub fn to_gpui_keys(&self) -> String {
-        self.keystrokes
-            .iter()
-            .map(|ks| {
-                let mut out = String::new();
-                if ks.modifiers.alt {
-                    out.push_str("alt-");
-                }
-                if ks.modifiers.control {
-                    out.push_str("ctrl-");
-                }
-                if ks.modifiers.shift {
-                    out.push_str("shift-");
-                }
-                if ks.modifiers.platform {
-                    out.push_str("cmd-");
-                }
-                if ks.modifiers.function {
-                    out.push_str("fn-");
-                }
-                out.push_str(&ks.key);
-                out
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
+        let mut out = String::new();
+
+        if let Some(mods) = self.mods.as_ref() {
+            mods.parts.iter().for_each(|modifier| {
+                out.push_str(&format!("{modifier}-"));
+            });
+            if mods.split {
+                out.pop();
+                out.push(' ');
+            }
+        }
+        out.push_str(&self.key);
+        out
     }
 
-    fn parse_single(binding: &str) -> Result<SingleKeyBinding> {
-        // Handle bracket notation like <ctrl-b> where key is inside brackets
+    pub fn parse(binding: impl AsRef<str>) -> Result<Self> {
+        let binding = binding.as_ref().trim();
         if binding.starts_with('<') && binding.contains('>') {
             let end = binding
                 .chars()
                 .position(|c| c == '>')
                 .context("failed to find `>` while parsing keybinding")?;
-            let inside = &binding[1..end];
-            let rest = &binding[end + 1..];
-
-            // Try to parse inside as modifier-key (e.g., "ctrl-b" or "ctrl+shift-b")
-            if let Some(delim) = inside.rfind('-') {
-                let modifier_part = &inside[..delim];
-                let key_part = &inside[delim + 1..];
-
-                // Parse modifiers from modifier_part (can have multiple like "ctrl+shift")
-                let mut mods = Modifiers::default();
-                for m in modifier_part.split('+') {
-                    mods |= Self::parse_mod(m)?;
-                }
-
-                let key = Self::parse_key(key_part)?;
-                // If there's content after >, it's an error for single keystroke
-                if !rest.trim().is_empty() {
-                    anyhow::bail!("unexpected content after '>': {}", rest);
-                }
-                return Ok(SingleKeyBinding { modifiers: mods, key });
-            }
+            let inside = &binding[1..end].trim();
+            let rest = &binding[end + 1..].trim();
+            let parts = inside.split('-').map(Self::canonical_key).collect::<Vec<_>>();
+            let is_split = parts.iter().any(|part| !Self::is_mod(part));
+            Ok(Self {
+                mods: if parts.is_empty() {
+                    None
+                } else {
+                    Some(Modifier{
+                        parts: parts,
+                        split: is_split,
+                    })
+                },
+                key: Self::canonical_key(rest),
+            })
+        }else {
+            Err(anyhow!("{binding} is not a valid keybind"))
         }
-
-        let (binding, modifiers) = Self::parse_mods(binding)?;
-        let key = if !matches!(
-            (
-                modifiers.control,
-                modifiers.alt,
-                modifiers.shift,
-                modifiers.platform
-            ),
-            (false, false, false, false)
-        ) && let Some(delim) = binding.chars().position(|c| c == '-')
-        {
-            &binding[delim + 1..]
-        } else {
-            binding
-        };
-        let key = Self::parse_key(key)?;
-
-        Ok(SingleKeyBinding { modifiers, key })
     }
 
-    pub fn parse(binding: impl AsRef<str>) -> Result<Self> {
-        let binding = binding.as_ref().trim();
-        let keystrokes: Result<Vec<_>> = binding
-            .split_whitespace()
-            .map(Self::parse_single)
-            .collect();
-
-        Ok(Self {
-            keystrokes: keystrokes?,
-        })
-    }
-
-    /// Canonicalize a key name to the lowercase GPUI spelling.
     fn canonical_key(key: &str) -> String {
         match key.to_lowercase().as_str() {
             "esc" => "escape".to_string(),
@@ -1364,232 +868,8 @@ impl ConfigKeyBinding {
         }
     }
 
-    /// The literal character a punctuation name produces, if any.
-    fn key_literal(name: &str) -> Option<&'static str> {
-        Some(match name {
-            "space" => " ",
-            "semicolon" => ";",
-            "comma" => ",",
-            "period" => ".",
-            "slash" => "/",
-            "backslash" => "\\",
-            "minus" => "-",
-            "equal" => "=",
-            "quote" => "'",
-            "backquote" => "`",
-            "bracketleft" => "[",
-            "bracketright" => "]",
-            _ => return None,
-        })
-    }
-
-    fn parse_mods(binding: &str) -> Result<(&str, Modifiers)> {
-        // Handle bracket notation: <ctrl>, <ctrl+shift>, etc.
-        if binding.starts_with('<') {
-            let binding = &binding[1..];
-            let end = binding
-                .chars()
-                .position(|c| c == '>')
-                .context("failed to find `>` while parsing keybinding modifiers")?;
-            let mut modifiers = &binding[..end];
-
-            let mut mods = Modifiers::default();
-
-            if !modifiers.is_empty() {
-                while let Some(next) = modifiers.chars().position(|c| c == '+') {
-                    let modifier = &modifiers[..next];
-                    mods |= Self::parse_mod(modifier)?;
-                    modifiers = &modifiers[next + 1..];
-                }
-                mods |= Self::parse_mod(modifiers)?;
-            }
-
-            let rest = &binding[end..];
-
-            return Ok((rest, mods));
-        }
-
-        // Handle non-bracket notation like "ctrl-b", "ctrl+shift-x"
-        // Check if it contains a modifier prefix
-        let known_modifiers = ["ctrl", "alt", "shift", "mod"];
-        for m in known_modifiers {
-            if binding.starts_with(m) && (binding.len() == m.len() || binding[m.len()..].starts_with('-') || binding[m.len()..].starts_with('+')) {
-                // Found a modifier prefix, parse it
-                let rest = &binding[m.len()..];
-                let mut mods = Modifiers::default();
-                let mut current = m;
-
-                // Parse all modifiers separated by + or -
-                let mut modifier_part = current;
-                let mut key_part = rest;
-
-                // Find the last separator to split modifiers from key
-                if let Some(last_sep) = rest.rfind(|c: char| c == '-' || c == '+') {
-                    modifier_part = &binding[..m.len() + last_sep];
-                    key_part = &rest[last_sep + 1..];
-                }
-
-                // Parse modifiers from modifier_part
-                for part in modifier_part.split(|c: char| c == '-' || c == '+') {
-                    mods |= Self::parse_mod(part)?;
-                }
-
-                return Ok((key_part, mods));
-            }
-        }
-
-        Ok((binding, Modifiers::default()))
-    }
-
-    pub fn parse_mod(m: &str) -> Result<Modifiers> {
-        Ok(match m.trim() {
-            "ctrl" => Modifiers {
-                control: true,
-                ..Default::default()
-            },
-            "alt" => Modifiers {
-                alt: true,
-                ..Default::default()
-            },
-            "shift" => Modifiers {
-                shift: true,
-                ..Default::default()
-            },
-            "mod" => Modifiers {
-                platform: true,
-                ..Default::default()
-            },
-            x => {
-                anyhow::bail!("`{x}` is not a valid modifier");
-            }
-        })
-    }
-
-    fn parse_key(key: &str) -> Result<String> {
-        let key = key.to_lowercase();
-        let canonical = match key.as_str() {
-            "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n"
-            | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" | "0" | "1"
-            | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => key,
-            "up" | "arrowup" => "up".to_string(),
-            "down" | "arrowdown" => "down".to_string(),
-            "left" | "arrowleft" => "left".to_string(),
-            "right" | "arrowright" => "right".to_string(),
-            "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11"
-            | "f12" => key,
-            "space" => "space".to_string(),
-            "enter" | "return" => "enter".to_string(),
-            "esc" | "escape" => "escape".to_string(),
-            "tab" => "tab".to_string(),
-            "backspace" => "backspace".to_string(),
-            "delete" | "del" => "delete".to_string(),
-            "insert" | "ins" => "insert".to_string(),
-            "home" => "home".to_string(),
-            "end" => "end".to_string(),
-            "pageup" => "pageup".to_string(),
-            "pagedown" => "pagedown".to_string(),
-            "semicolon" => "semicolon".to_string(),
-            "comma" => "comma".to_string(),
-            "period" | "dot" => "period".to_string(),
-            "slash" => "slash".to_string(),
-            "backslash" => "backslash".to_string(),
-            "minus" => "minus".to_string(),
-            "equals" | "equal" => "equal".to_string(),
-            "quote" | "apostrophe" => "quote".to_string(),
-            "backquote" | "grave" => "backquote".to_string(),
-            "bracketleft" | "[" => "bracketleft".to_string(),
-            "bracketright" | "]" => "bracketright".to_string(),
-            x => anyhow::bail!("`{x}` is not a valid key"),
-        };
-        Ok(canonical)
-    }
-
-    pub fn digit_index(&self) -> Option<usize> {
-        if self.keystrokes.len() != 1 {
-            return None;
-        }
-        let ks = &self.keystrokes[0];
-        if ks.modifiers.control
-            || ks.modifiers.alt
-            || ks.modifiers.shift
-            || ks.modifiers.platform
-        {
-            return None;
-        }
-        match ks.key.as_str() {
-            "1" => Some(0),
-            "2" => Some(1),
-            "3" => Some(2),
-            "4" => Some(3),
-            "5" => Some(4),
-            "6" => Some(5),
-            "7" => Some(6),
-            "8" => Some(7),
-            "9" => Some(8),
-            _ => None,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui::Modifiers;
-
-    #[test]
-    fn test_parse_single() {
-        let binding = ConfigKeyBinding::parse("ctrl-b").unwrap();
-        assert_eq!(binding.keystrokes.len(), 1);
-        assert!(binding.keystrokes[0].modifiers.control);
-        assert_eq!(binding.keystrokes[0].key, "b");
-        assert_eq!(binding.to_gpui_keys(), "ctrl-b");
-    }
-
-    #[test]
-    fn test_parse_bracket_notation() {
-        let binding = ConfigKeyBinding::parse("<ctrl-b>").unwrap();
-        assert_eq!(binding.keystrokes.len(), 1);
-        assert!(binding.keystrokes[0].modifiers.control);
-        assert_eq!(binding.keystrokes[0].key, "b");
-        assert_eq!(binding.to_gpui_keys(), "ctrl-b");
-    }
-
-    #[test]
-    fn test_parse_multi_bracket() {
-        let binding = ConfigKeyBinding::parse("<ctrl-b> 1").unwrap();
-        assert_eq!(binding.keystrokes.len(), 2);
-        assert!(binding.keystrokes[0].modifiers.control);
-        assert_eq!(binding.keystrokes[0].key, "b");
-        assert_eq!(binding.keystrokes[1].key, "1");
-        assert_eq!(binding.to_gpui_keys(), "ctrl-b 1");
-    }
-
-    #[test]
-    fn test_parse_multi_no_brackets() {
-        let binding = ConfigKeyBinding::parse("ctrl-b 1").unwrap();
-        assert_eq!(binding.keystrokes.len(), 2);
-        assert!(binding.keystrokes[0].modifiers.control);
-        assert_eq!(binding.keystrokes[0].key, "b");
-        assert_eq!(binding.keystrokes[1].key, "1");
-        assert_eq!(binding.to_gpui_keys(), "ctrl-b 1");
-    }
-
-    #[test]
-    fn test_parse_three() {
-        let binding = ConfigKeyBinding::parse("<ctrl-b> 1 2").unwrap();
-        assert_eq!(binding.keystrokes.len(), 3);
-        assert_eq!(binding.to_gpui_keys(), "ctrl-b 1 2");
-    }
-
-    #[test]
-    fn test_parse_alt_shift() {
-        let binding = ConfigKeyBinding::parse("<alt+shift-x> y").unwrap();
-        assert_eq!(binding.keystrokes.len(), 2);
-        assert!(binding.keystrokes[0].modifiers.alt);
-        assert!(binding.keystrokes[0].modifiers.shift);
-        assert_eq!(binding.keystrokes[0].key, "x");
-        assert_eq!(binding.keystrokes[1].key, "y");
-        assert_eq!(binding.to_gpui_keys(), "alt-shift-x y");
+    fn is_mod(m: &str) -> bool {
+        matches!(m.trim(), "ctrl" | "alt" | "shift" | "mod")
     }
 }
 

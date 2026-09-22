@@ -3,7 +3,7 @@ use crate::renderer::{Pane as RendererPane, *};
 use crate::terminal::{Divider, PaneGeometry, PanePathStep, SessionId, SplitDirection};
 
 use gpui::*;
-use gpui_base::{ElementExt as _, StyledExt};
+use gpui_base::{ElementExt as _};
 use gpui_wgpu::{WgpuContextHandle, WgpuRenderTarget};
 
 pub struct Terminal {

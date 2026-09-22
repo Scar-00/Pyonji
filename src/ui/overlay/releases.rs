@@ -13,8 +13,16 @@ use self_update::{Release, backends::github};
 use smol::stream::StreamExt as _;
 use crate::{Next, Prev, Submit};
 
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("down", Next, Some(ReleasesView::CONTEXT)),
+        KeyBinding::new("up", Prev, Some(ReleasesView::CONTEXT)),
+        KeyBinding::new("enter", Submit, Some(ReleasesView::CONTEXT)),
+    ]);
+}
+
 pub struct ReleasesView {
-    pyonji: WeakEntity<Pyonji>,
+    _pyonji: WeakEntity<Pyonji>,
 
     releases: Option<Vec<Release>>,
 
@@ -45,7 +53,7 @@ impl ReleasesView {
         .detach();
 
         Self {
-            pyonji: pyonji.clone(),
+            _pyonji: pyonji.clone(),
 
             releases: None,
 

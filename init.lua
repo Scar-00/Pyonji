@@ -117,3 +117,8 @@ end
 py:config({
     editor = "nvim",
 });
+
+py:bind('<alt-shift> q', function()
+    py:close(py.active_session);
+end)
+
