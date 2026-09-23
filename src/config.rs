@@ -382,7 +382,9 @@ impl LuaUserData for LuaProxy {
                 let Some(current) = this.py.current_tab else {
                     return Ok(None);
                 };
-                Ok(this.py.tabs[current].as_mut().and_then(|tab| tab.focus_next()))
+                let res = this.py.tabs[current].as_mut().and_then(|tab| tab.focus_next());
+                this.cx.as_ctx().notify();
+                Ok(res)
             })
         });
         methods.add_function("detach", |lua, this: Option<LuaAnyUserData>| {
@@ -730,7 +732,7 @@ pub fn install_inspect(lua: &Lua) -> Result<()> {
     Ok(())
 }
 
-mod util {
+pub(crate) mod util {
     use std::path::Path;
 
     use super::*;

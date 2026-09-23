@@ -1208,15 +1208,5 @@ impl Theme {
             border: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
             focus_ring: Rgba::new(122.0 / 255.0, 162.0 / 255.0, 247.0 / 255.0, 1.0),
         }
-
-        /*Self {
-            background: Rgba::new(24.0 / 255.0, 24.0 / 255.0, 24.0 / 255.0, 1.0),
-            surface: Rgba::new(30.0 / 255.0, 30.0 / 255.0, 46.0 / 255.0, 1.0),
-            text: Rgba::new(0.9, 0.9, 0.9, 1.0),
-            selected: Rgba::new(58.0 / 255.0, 58.0 / 255.0, 92.0 / 255.0, 1.0),
-            unselected: Rgba::new(40.0 / 255.0, 40.0 / 255.0, 40.0 / 255.0, 1.0),
-            selected_border: Rgba::new(0.4, 0.4, 0.6, 1.0),
-            unselected_border: Rgba::new(0.2, 0.2, 0.2, 1.0),
-        }*/
     }
 }
