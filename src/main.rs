@@ -18,12 +18,13 @@ mod renderer;
 mod terminal;
 mod ui;
 mod util;
-#[cfg(feature = "install")]
 mod logging;
 
 use assets::{GlobalAssets, PyonjiAsset, PyonjiAssetsSource};
 use pty::Event;
 use terminal::{Tab as TerminalTab, *};
+use tracing::Level;
+use tracing_subscriber::fmt::time;
 use ui::Overlay;
 use ui::Terminal;
 
@@ -39,11 +40,15 @@ use gpui_component::{
     Icon, Root, ThemeMode, WindowExt,
     notification::{Notification, NotificationType},
 };
+use gpui_component_assets as gassets;
 use mlua::prelude::*;
 use smallvec::{SmallVec, smallvec};
 use tracing_subscriber::prelude::*;
 
 use crate::config::LuaAction;
+use crate::logging::LogEmitter;
+use crate::logging::ResultLogExt as _;
+use crate::logging::TracingLogSubscriber;
 use crate::ui::DividerDrag;
 use crate::{
     pty::SshConnection,
@@ -59,6 +64,7 @@ actions!([
     Submit,
     Next,
     Prev,
+    ClipboardPaste,
 ]);
 
 #[derive(clap::Parser)]
@@ -71,17 +77,26 @@ fn main() {
         feature = "install" => {
             logging::init();
         }
-        _ => {
-            tracing_subscriber::registry()
-                .with(tracing_subscriber::fmt::layer())
-                .with(tracing_subscriber::filter::LevelFilter::WARN)
-                .init();
-        }
+        _ => {}
     };
+
+    let log_emitter = LogEmitter::new();
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_file(false)
+                .with_level(false)
+                .with_timer(time::ChronoLocal::new("%H:%M:%S".into()))
+                .with_writer(TracingLogSubscriber::new(&log_emitter))
+        )
+        .with(tracing_subscriber::filter::LevelFilter::WARN)
+        .init();
 
     gpui_platform::application()
         .with_assets(GlobalAssets::new([
-            Box::new(gpui_component_assets::Assets),
+            Box::new(gassets::Assets),
             Box::new(PyonjiAssetsSource),
         ]))
         .run(|cx| {
@@ -91,6 +106,20 @@ fn main() {
             let window_options = Pyonji::window_options(cx);
             cx.open_window(window_options, |window, cx| {
                 gpui_component::Theme::change(ThemeMode::Dark, Some(window), cx);
+
+                window.spawn(cx, async move |cx| {
+                    while let Some(ev) = log_emitter.recv().await {
+                        _ = cx.update(|window, cx| {
+                            let action = match ev.level {
+                                Level::ERROR => PushError::new(ev.line).boxed_clone(),
+                                Level::WARN => PushWarning::new(ev.line).boxed_clone(),
+                                _ => PushInfo::new(ev.line).boxed_clone(),
+                            };
+                            window.dispatch_action(action, cx);
+                        })
+                    }
+                })
+                .detach();
 
                 let py = cx.new(|cx| Pyonji::new(window, cx));
                 cx.new(|cx| Root::new(py, window, cx))
@@ -141,10 +170,12 @@ impl Pyonji {
     const ICON: &[u8] = include_bytes!("../resources/icon.ico");
     const INITIAL_SIZE: (f32, f32) = (1280.0, 720.0);
 
-    const TERMINAL_CONTEXT: &str = "terminal";
-
     fn init(cx: &mut App) {
         use ui::overlay;
+
+        cx.bind_keys([
+            KeyBinding::new("ctrl-shift-v", ClipboardPaste, None),
+        ]);
 
         ui::status_bar::init(cx);
         overlay::sessions::init(cx);
@@ -156,6 +187,13 @@ impl Pyonji {
         let cli = Cli::parse();
         let lua = unsafe { Lua::unsafe_new() };
         _ = config::install_inspect(&lua);
+        for (name, source) in config::LUA_MODULES {
+            let function = lua.load(*source).into_function().unwrap();
+            let package: LuaTable = lua.globals().get("package").unwrap();
+            let preload: LuaTable = package.get("preload").unwrap();
+            preload.set(*name, function.clone()).unwrap();
+            function.call::<()>(()).unwrap();
+        }
         let (tx, rx) = async_channel::unbounded();
         {
             let tx = tx.clone();
@@ -232,15 +270,12 @@ impl Pyonji {
                 }
                 StatusBarEvent::ExecLua(code) => {
                     let lua = this.lua.clone();
-                    let res = config::with_env(this, window, cx, |_| lua.load(code).exec());
+                    config::with_env(this, window, cx, |_| lua.load(code).exec()).log();
                     this.status_bar.update(cx, |this, cx| {
                         this.push_lua_history(code.clone());
                         this.reset_history();
                         cx.notify();
                     });
-                    if let Err(e) = res {
-                        window.dispatch_action(Box::new(PushError::new(e)), cx);
-                    }
                 }
             },
         )
@@ -286,11 +321,7 @@ impl Pyonji {
                                     window.dispatch_action(Box::new(PushLuaPrint::new(text)), cx);
                                 }
                             }
-                            Event::Exit => {
-                                cx.quit();
-                            }
-                        })
-                        .unwrap();
+                        });
                 }
             }
         })
@@ -316,8 +347,7 @@ impl Pyonji {
                             window.dispatch_action(Box::new(PushError::new(e.to_string())), cx);
                         }
                     }
-                })
-                .unwrap()
+                });
         })
         .detach()
     }
@@ -672,7 +702,7 @@ impl Pyonji {
     }
 
     pub fn set_active_session(&mut self, id: SessionId) {
-        let Some(tab) = self.current_tab.clone() else {
+        let Some(tab) = self.current_tab else {
             return;
         };
         let Some(tab) = self.tabs[tab].as_mut() else {
@@ -707,7 +737,7 @@ impl Render for Pyonji {
                         div()
                             .size_full()
                             .track_focus(&self.focus_handle)
-                            .key_context(Self::TERMINAL_CONTEXT)
+                            .key_context(Terminal::CONTEXT)
                             .on_action(cx.listener(Self::on_enter_rename))
                             .on_action(cx.listener(Self::on_enter_lua))
                             .on_action(cx.listener(Self::on_switch_tab))
@@ -730,6 +760,13 @@ impl Render for Pyonji {
                                 this.overlay.update(cx, |this, cx| {
                                     this.open(OverlayScreen::Sessions, window, cx);
                                 });
+                            }))
+                            .on_action(cx.listener(|this, _: &ClipboardPaste, _, cx| {
+                                if let Some(session) = this.active_session()
+                                && let Some(item) = cx.read_from_clipboard()
+                                && let Some(text) = item.text() {
+                                    this.session_manager.send_text(session, &text);
+                                }
                             }))
                             .child(self.terminal.clone())
                             .children(Root::render_dialog_layer(window, cx)),
@@ -1124,6 +1161,7 @@ impl Theme {
         cx.set_global(Theme::new());
     }
 
+    #[allow(clippy::eq_op)]
     fn new() -> Self {
         Self {
             // Base layers (kept your background)

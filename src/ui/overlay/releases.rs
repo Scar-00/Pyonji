@@ -6,7 +6,7 @@ use async_compat::CompatExt;
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_base::{Disableable, ScrollbarAxis, StyledExt as _, h_flex, v_flex};
 use gpui_component::{
-    Icon, IconName, Sizable, WindowExt, badge::Badge, button::{Button, ButtonVariants}, input::{Input, InputEvent, InputState}, label::Label, scroll::ScrollableElement, spinner::Spinner, text::TextView
+    Icon, IconName, Sizable, button::{Button, ButtonVariants}, input::{Input, InputEvent, InputState}, label::Label, scroll::ScrollableElement, spinner::Spinner, text::TextView
 };
 use reqwest::Client;
 use self_update::{Release, backends::github};
@@ -102,7 +102,6 @@ impl ReleasesView {
                     || r.version().to_lowercase().contains(&query)
                     || r.name().to_lowercase().contains(&query)
                     || r.body()
-                        .as_deref()
                         .is_some_and(|b| b.to_lowercase().contains(&query))
             })
             .map(|(ix, _)| ix)
@@ -268,7 +267,6 @@ impl ReleasesView {
 
         let summary = release
             .body()
-            .as_deref()
             .and_then(|b| b.lines().find(|l| !l.trim().is_empty()))
             .map(|l| l.trim().to_string());
 

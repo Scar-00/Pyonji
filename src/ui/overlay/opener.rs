@@ -41,7 +41,7 @@ pub struct Entry {
     pub path: PathBuf,
     pub is_dir: bool,
     pub size: u64,
-    pub modified: Option<SystemTime>,
+    pub _modified: Option<SystemTime>,
 }
 
 pub struct FileOpener {
@@ -94,10 +94,10 @@ impl FileOpener {
         this
     }
 
-    pub fn directories_only(mut self, v: bool) -> Self {
+    /*pub fn directories_only(mut self, v: bool) -> Self {
         self.directories_only = v;
         self
-    }
+    }*/
 
     pub fn show_hidden(mut self, v: bool) -> Self {
         self.show_hidden = v;
@@ -113,10 +113,9 @@ impl FileOpener {
     // ------------------------------------------------------------- path logic
 
     fn expand_tilde(p: &str) -> PathBuf {
-        if let Some(rest) = p.strip_prefix('~') {
-            if let Some(home) = std::env::var_os("HOME") {
-                return PathBuf::from(home).join(rest.trim_start_matches('/'));
-            }
+        if let Some(rest) = p.strip_prefix('~')
+        && let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest.trim_start_matches('/'));
         }
         PathBuf::from(p)
     }
@@ -376,7 +375,7 @@ impl FileOpener {
                     .flex_1()
                     .truncate()
                     .text_sm()
-                    .text_color(if e.is_dir { t.text } else { t.text })
+                    .text_color(t.text)
                     .when(e.is_dir, |d| d.font_weight(gpui::FontWeight::MEDIUM))
                     .child(if e.is_dir { format!("{}/", e.name) } else { e.name.clone() }),
             )
@@ -535,7 +534,7 @@ fn read_dir_sorted(dir: &Path) -> io::Result<Vec<Entry>> {
                 path: e.path(),
                 is_dir,
                 size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
-                modified: meta.and_then(|m| m.modified().ok()),
+                _modified: meta.and_then(|m| m.modified().ok()),
             }
         })
         .collect();

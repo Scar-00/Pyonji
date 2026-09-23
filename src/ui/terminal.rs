@@ -25,6 +25,8 @@ pub struct Terminal {
 }
 
 impl Terminal {
+    pub const CONTEXT: &str = "terminal";
+
     pub fn new(pyonji: WeakEntity<Pyonji>, _cx: &mut Context<Self>) -> Self {
         Self {
             pyonji,
@@ -87,9 +89,7 @@ impl Terminal {
     }
 
     pub fn cursor_to_grid_position(&self, x: f32, y: f32, cx: &mut App) -> Option<(f32, f32)> {
-        let Some(pyonji) = self.pyonji.upgrade() else {
-            return None;
-        };
+        let pyonji = self.pyonji.upgrade()?;
 
         let font_size = pyonji.read(cx).font_size;
         let line_height = pyonji.read(cx).line_height * font_size;

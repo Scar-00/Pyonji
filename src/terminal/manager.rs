@@ -137,6 +137,7 @@ impl SessionManager {
         Ok(id)
     }
 
+    #[allow(dead_code)]
     pub fn create_remote_session(
         &mut self,
         rows: u16,

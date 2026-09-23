@@ -6,12 +6,11 @@ use crate::{EnterLuaRepl, EnterRename, ExecKeybind, Pyonji};
 use anyhow::{Context as _, Result, anyhow};
 use async_channel::Sender;
 use gpui::{
-    App, Context, Entity, EntityId, KeyBinding, KeyDownEvent, Modifiers, WeakEntity, Window,
+    App, Context, Entity, EntityId, KeyBinding, WeakEntity, Window,
 };
 use gpui_component::ThemeMode;
 use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
-use notify::event::ModifyKind;
 use path_absolutize::*;
 use std::fmt::Debug;
 use std::io::Write;
@@ -19,12 +18,12 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::thread;
-use std::time::Duration;
 
 const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
 pub const LUA_MODULES: &[(&str, &str)] =
     &[("lua.keybind", include_str!("../resources/lua/keybind.lua"))];
 
+#[allow(dead_code)]
 pub struct LuaAction {
     pub args: Vec<String>,
     pub is_var_arg: bool,
@@ -94,6 +93,7 @@ pub struct ProxyContext<T> {
     entity_state: WeakEntity<T>,
 }
 
+#[allow(dead_code)]
 impl<T: 'static> ProxyContext<T> {
     fn new(cx: &mut Context<T>) -> Self {
         Self {
@@ -118,7 +118,7 @@ impl<T: 'static> ProxyContext<T> {
         self.entity_state.clone()
     }
 
-    fn to_ctx(&mut self) -> Context<'_, T> {
+    fn as_ctx(&mut self) -> Context<'_, T> {
         Context::new_context(&mut self.app, self.entity_state.clone())
     }
 }
@@ -248,7 +248,7 @@ impl LuaUserData for LuaProxy {
             callable_action!(lua, this => {
                 let dir = dir.clone();
                 move |this: &mut Self| -> LuaResult<SessionId> {
-                    let id = this.py.create_session(dir.as_ref().map(|dir| Path::new(dir)), tab, parent, &mut this.cx.to_ctx())
+                    let id = this.py.create_session(dir.as_ref().map(Path::new), tab, parent, &mut this.cx.as_ctx())
                         .context("failed to create session")?;
                     Ok(id)
                 }
@@ -266,14 +266,14 @@ impl LuaUserData for LuaProxy {
                 if let Some(term_session) = this.py.session_manager.session_mut(id) {
                     term_session.pty.kill();
                 }
-                this.py.close_session(id, &mut this.cx.to_ctx());
+                this.py.close_session(id, &mut this.cx.as_ctx());
                 Ok(true)
             })
         });
         methods.add_function("switch_tab", |lua, args: LuaMultiValue| {
             let (this, (tab,)) = args!(args, lua, (usize,));
             callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
-                this.py.switch_tab(tab, &mut this.cx.to_ctx());
+                this.py.switch_tab(tab, &mut this.cx.as_ctx());
                 Ok(true)
             })
         });
@@ -373,7 +373,7 @@ impl LuaUserData for LuaProxy {
                     this.py.session_manager.remove_session(id);
                     return Ok(None);
                 }
-                this.py.resize_tab(current, &mut this.cx.to_ctx());
+                this.py.resize_tab(current, &mut this.cx.as_ctx());
                 Ok(Some(id))
             })
         });
@@ -449,6 +449,13 @@ impl LuaUserData for LuaProxy {
                 }
             })
         });
+        methods.add_function("write", |lua, args: LuaMultiValue| {
+            let (this, (id, string)) = args!(args, lua, (SessionId, String));
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                this.py.session_manager.send_text(id, &string);
+                Ok(())
+            })
+        });
         methods.add_function("open_sessions", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
                 let window = this.window.as_mut();
@@ -492,7 +499,7 @@ impl LuaUserData for LuaProxy {
         });
         methods.add_function("reload_config", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                load(&mut this.py, &mut this.window, &mut this.cx.to_ctx())?;
+                load(&mut this.py, &mut this.window, &mut this.cx.as_ctx())?;
                 Ok(())
             })
         });
@@ -835,7 +842,7 @@ impl ConfigKeyBinding {
                     None
                 } else {
                     Some(Modifier{
-                        parts: parts,
+                        parts,
                         split: is_split,
                     })
                 },

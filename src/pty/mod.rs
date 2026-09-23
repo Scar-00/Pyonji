@@ -28,7 +28,6 @@ pub enum Event {
     ProgramChanged((SessionId, String)),
     ConfigChanged,
     LuaPrint(String),
-    Exit,
 }
 
 impl Pty {
@@ -55,9 +54,10 @@ impl Pty {
             cmd.cwd(path);
         }
         cmd.env("TERM", "xterm-256color");
-        std::env::vars_os().for_each(|var| {
+        cmd.env("COLORTERM", "truecolor");
+        /*std::env::vars_os().for_each(|var| {
             cmd.env(var.0, var.1);
-        });
+        });*/
 
         let mut child = pair
             .slave
@@ -127,9 +127,10 @@ impl Pty {
         let mut cmd = CommandBuilder::new(program_name);
         cmd.arg(format!("{}@{}", ssh.user_name, ssh.ip));
         cmd.env("TERM", "xterm-256color");
-        std::env::vars_os().for_each(|var| {
+        cmd.env("COLORTERM", "truecolor");
+        /*std::env::vars_os().for_each(|var| {
             cmd.env(var.0, var.1);
-        });
+        });*/
 
         let mut child = pair
             .slave

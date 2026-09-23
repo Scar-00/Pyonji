@@ -67,7 +67,7 @@ function PY(current)
         main = py:create_session("C:/dev/learning/pyonji", next_tab)
     end
     py:rename(main, "nvim-py");
-    py:write_to(main, "nvim .\r");
+    py:write(main, "nvim .\r");
 end
 
 local function open(path)

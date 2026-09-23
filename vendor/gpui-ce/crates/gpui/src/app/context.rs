@@ -37,6 +37,7 @@ impl<'a, T> ops::DerefMut for Context<'a, T> {
 }
 
 impl<'a, T: 'static> Context<'a, T> {
+    /// Create a new `Context`
     pub fn new_context(app: &'a mut App, entity_state: WeakEntity<T>) -> Self {
         Self { app, entity_state }
     }

@@ -4,8 +4,8 @@ use crate::{PyTheme as _, Pyonji, terminal::SessionId, util};
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_base::*;
 use gpui_component::{
-    IconName, Sizable, WindowExt,
-    input::{Input, InputEvent, InputState},
+    IconName, WindowExt,
+    input::{Input, InputState},
     separator::Separator,
 };
 use crate::{Next, Prev, Submit};

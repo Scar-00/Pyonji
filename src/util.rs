@@ -22,6 +22,7 @@ impl<T> UnsafeRefMut<T> {
         Self(v as _)
     }
 
+    #[allow(clippy::mut_from_ref)]
     pub fn as_mut(&self) -> &mut T {
         unsafe { self.0.as_mut_unchecked() }
     }

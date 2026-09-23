@@ -59,8 +59,7 @@ require('lua.keybind');
 ---@field next_tab fun(self: Pyonji): integer
 ---@field prev_tab fun(self: Pyonji): integer
 ---@field focus_next_pane fun(self: Pyonji): integer?
----@field write fun(self: Pyonji, text: string): boolean
----@field write_to fun(self: Pyonji, session: integer, text: string): boolean
+---@field write fun(self: Pyonji, session: integer, text: string): boolean
 ---@field toggle_fullscreen fun(self: Pyonji): boolean
 ---@field toggle_decorations fun(self: Pyonji)
 ---@field toggle_status_bar fun(self: Pyonji)

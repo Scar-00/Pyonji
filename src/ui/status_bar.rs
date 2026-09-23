@@ -31,6 +31,7 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
+#[allow(dead_code)]
 pub enum StatusBarMode {
     Sessions,
     Cmd,
