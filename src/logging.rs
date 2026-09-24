@@ -112,6 +112,7 @@ impl<'a> MakeWriter<'a> for TracingLogSubscriber {
 /// Unlike a plain `tracing::error!` wrapper (which would attribute the event
 /// to this module), the event is dispatched with metadata built from the
 /// *caller's* location, so target/file/line point at the `.log()` call site.
+#[allow(unused)]
 pub trait ResultLogExt {
     fn log(self);
     fn log_msg(self, msg: &str);

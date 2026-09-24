@@ -328,7 +328,7 @@ impl Pyonji {
     }
 
     fn spawn_inital_session(window: &mut Window, cx: &mut Context<Self>) {
-        cx.spawn_in(window, async move |this, cx| {
+        cx.spawn_in_with_priority(Priority::High, window, async move |this, cx| {
             _ = this.update_in(cx, |this, window, cx| {
                 if let Err(e) = config::load(this, window, cx) {
                     window.dispatch_action(Box::new(PushError::new(e)), cx);
@@ -434,6 +434,33 @@ impl Pyonji {
         }
     }
 
+    fn on_open_sessions(&mut self, _: &OpenSessions, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlay.update(cx, |this, cx| {
+            this.open(OverlayScreen::Sessions, window, cx);
+        });
+    }
+
+    fn on_open_palette(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlay.update(cx, |this, cx| {
+            this.open(OverlayScreen::Palette, window, cx);
+        });
+    }
+
+    fn on_open_releases(&mut self, _: &OpenReleases, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlay.update(cx, |this, cx| {
+            this.open(OverlayScreen::Releases, window, cx);
+        });
+    }
+
+    fn on_paste(&mut self, _: &ClipboardPaste, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(session) = self.active_session()
+            && let Some(item) = cx.read_from_clipboard()
+            && let Some(text) = item.text()
+        {
+            self.session_manager.send_text(session, &text);
+        }
+    }
+
     fn push_note(
         kind: NotificationType,
         title: impl Into<SharedString>,
@@ -503,6 +530,304 @@ impl Pyonji {
             app_id: Some("pyonji".to_string()),
             icon,
             ..Default::default()
+        }
+    }
+}
+
+impl Pyonji {
+    fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .size_full()
+            .p_2()
+            .child(
+                div()
+                    .size_full()
+                    .track_focus(&self.focus_handle)
+                    .key_context(Terminal::CONTEXT)
+                    .on_action(cx.listener(Self::on_enter_rename))
+                    .on_action(cx.listener(Self::on_enter_lua))
+                    .on_action(cx.listener(Self::on_switch_tab))
+                    .on_key_down(cx.listener(Self::handle_key_down))
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_mouse_up))
+                    .on_mouse_move(cx.listener(Self::handle_mouse_move))
+                    .on_scroll_wheel(cx.listener(Self::handle_scroll))
+                    .on_action(cx.listener(Self::on_open_sessions))
+                    .on_action(cx.listener(Self::on_open_releases))
+                    .on_action(cx.listener(Self::on_open_palette))
+                    .on_action(cx.listener(Self::on_paste))
+                    .child(self.terminal.clone())
+                    .children(Root::render_dialog_layer(window, cx)),
+            )
+            .child(self.status_bar.clone())
+    }
+}
+
+impl Render for Pyonji {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+
+        v_flex()
+            .id("main-view")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .bg(theme.background)
+            .text_color(theme.text)
+            .on_action(cx.listener(Self::on_error))
+            .on_action(cx.listener(Self::on_warning))
+            .on_action(cx.listener(Self::on_info))
+            .on_action(cx.listener(Self::on_lua_print))
+            .on_action(cx.listener(Self::on_exec))
+            .child(Self::render_main(self, window, cx))
+            .children(Root::render_sheet_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
+    }
+}
+
+impl Pyonji {
+    fn handle_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
+        if event.is_held {
+            return self.handle_key_repeat(event, window, cx);
+        }
+
+        if self.terminal.read(cx).resize_mode_held {
+            let delta = match event.keystroke.key.as_str() {
+                "left" => Some((SplitDirection::Vertical, -1)),
+                "right" => Some((SplitDirection::Vertical, 1)),
+                "up" => Some((SplitDirection::Horizontal, -1)),
+                "down" => Some((SplitDirection::Horizontal, 1)),
+                _ => None,
+            };
+            if let Some((direction, delta)) = delta {
+                self.terminal.update(cx, |this, _| {
+                    this.resize_mode_held = true;
+                });
+                self.resize_active_pane(direction, delta, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+        }
+
+        let Some(active_session) = self.active_session() else {
+            return;
+        };
+        let reset_scrollback = self
+            .session_manager
+            .session_mut(active_session)
+            .is_some_and(TerminalSession::reset_scrollback);
+        let consumed = self
+            .session_manager
+            .session_mut(active_session)
+            .is_some_and(|session| session.handle_key_down(event));
+        if consumed {
+            window.prevent_default();
+            cx.stop_propagation();
+        }
+        if reset_scrollback {
+            cx.notify();
+        }
+    }
+
+    fn handle_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.focus_handle.is_focused(window) {
+            window.focus(&self.focus_handle, cx);
+        }
+        let terminal = self.terminal.clone();
+        // Divider drags start on left press, like before — they take over the
+        // gesture so the press never reaches the pane underneath.
+        let (x, y) = terminal.read(cx).pt_to_term(event.position);
+        if event.button == MouseButton::Left
+            && let Some(divider) = terminal.read(cx).divider_hit_test(x, y, self)
+        {
+            let drag = DividerDrag {
+                path: divider.path,
+                direction: divider.direction,
+            };
+            self.terminal
+                .read(cx)
+                .resize_dragged_divider(&drag, x, y, self);
+            terminal.update(cx, |this, cx| {
+                this.divider_drag = Some(drag);
+                cx.notify();
+            });
+            return;
+        }
+        let Some((col, row)) = terminal.read(cx).mouse_to_cell(event.position, self) else {
+            return;
+        };
+        let Some((session_id, col, row)) = terminal.read(cx).pane_at(col, row, self) else {
+            return;
+        };
+        self.set_active_session(session_id);
+        if let Some(session) = self.session_manager.session_mut(session_id) {
+            if !session.uses_local_scrollback() {
+                session.reset_scrollback();
+            }
+            session.handle_mouse_down(event.button, &event.modifiers, col, row);
+        }
+        cx.notify();
+    }
+
+    fn handle_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .terminal
+            .update(cx, |this, _| this.divider_drag.take().is_some())
+        {
+            return;
+        }
+        let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
+            return;
+        };
+        let Some((session_id, col, row)) = self.terminal.read(cx).pane_at(col, row, self) else {
+            return;
+        };
+        if let Some(session) = self.session_manager.session_mut(session_id) {
+            session.handle_mouse_up(event.button, &event.modifiers, col, row);
+        }
+    }
+
+    fn handle_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.pressed_button.is_none() {
+            return;
+        }
+        if let Some(drag) = self.terminal.read(cx).divider_drag.clone() {
+            let (x, y) = self.terminal.read(cx).pt_to_term(event.position);
+            self.terminal
+                .read(cx)
+                .resize_dragged_divider(&drag, x, y, self);
+            return;
+        }
+        let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
+            return;
+        };
+        let Some((session_id, col, row)) = self.terminal.read(cx).pane_at(col, row, self) else {
+            return;
+        };
+        if let Some(session) = self.session_manager.session_mut(session_id) {
+            session.handle_mouse_move(&event.modifiers, col, row);
+        }
+    }
+
+    fn take_wheel_steps(&mut self, delta_lines: f32) -> i32 {
+        let total = self.wheel_remainder + delta_lines;
+        let whole = if total > 0.0 {
+            total.floor() as i32
+        } else if total < 0.0 {
+            total.ceil() as i32
+        } else {
+            0
+        };
+        self.wheel_remainder = total - whole as f32;
+        whole
+    }
+
+    fn handle_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
+            return;
+        };
+        let Some((session_id, col, row)) = self.terminal.read(cx).pane_at(col, row, self) else {
+            return;
+        };
+        let line_height = self.font_size * self.line_height;
+        let lines = match event.delta {
+            ScrollDelta::Lines(lines) => lines.y,
+            ScrollDelta::Pixels(pixels) => {
+                let scale = self.terminal.read(cx).scale.max(f32::EPSILON);
+                f32::from(pixels.y) / (line_height / scale)
+            }
+        };
+        let uses_local_scrollback = self
+            .session_manager
+            .session(session_id)
+            .is_some_and(TerminalSession::uses_local_scrollback);
+        let whole_lines = if uses_local_scrollback {
+            self.take_wheel_steps(lines)
+        } else {
+            self.wheel_remainder = 0.0;
+            0
+        };
+        if let Some(session) = self.session_manager.session_mut(session_id) {
+            if uses_local_scrollback {
+                if whole_lines != 0 && session.scroll_scrollback(whole_lines) {
+                    cx.notify();
+                }
+            } else {
+                let reset_scrollback = session.reset_scrollback();
+                session.handle_mouse_wheel(lines, &event.modifiers, col, row);
+                if reset_scrollback {
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /*fn handle_key_up(&mut self, key: &str) -> bool {
+        if key.to_lowercase() == self.action.key {
+            self.resize_mode_held = false;
+            if self.resize_mode_used {
+                self.action_mode = false;
+            }
+            self.resize_mode_used = false;
+            true
+        } else {
+            false
+        }
+    }*/
+
+    fn handle_key_repeat(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.terminal.read(cx).resize_mode_held {
+            let delta = match event.keystroke.key.as_str() {
+                "left" => Some((SplitDirection::Vertical, -1)),
+                "right" => Some((SplitDirection::Vertical, 1)),
+                "up" => Some((SplitDirection::Horizontal, -1)),
+                "down" => Some((SplitDirection::Horizontal, 1)),
+                _ => None,
+            };
+            if let Some((direction, delta)) = delta {
+                self.terminal.update(cx, |this, _| {
+                    this.resize_mode_held = true;
+                });
+                self.resize_active_pane(direction, delta, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+        }
+        if let Some(active_session) = self.active_session() {
+            let consumed = self
+                .session_manager
+                .session_mut(active_session)
+                .is_some_and(|session| session.handle_key_down(event));
+            if consumed {
+                window.prevent_default();
+                cx.stop_propagation();
+            }
         }
     }
 
@@ -717,317 +1042,6 @@ impl Pyonji {
         };
         if tab.set_active_session(id) {
             self.wheel_remainder = 0.0;
-        }
-    }
-}
-
-impl Render for Pyonji {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        //window.request_animation_frame();
-        v_flex()
-            .id("main-view")
-            .track_focus(&self.focus_handle)
-            .size_full()
-            .bg(theme.background)
-            .text_color(theme.text)
-            .on_action(cx.listener(Self::on_error))
-            .on_action(cx.listener(Self::on_warning))
-            .on_action(cx.listener(Self::on_info))
-            .on_action(cx.listener(Self::on_lua_print))
-            .on_action(cx.listener(Self::on_exec))
-            .child(
-                v_flex()
-                    .size_full()
-                    .p_2()
-                    .child(
-                        div()
-                            .size_full()
-                            .track_focus(&self.focus_handle)
-                            .key_context(Terminal::CONTEXT)
-                            .on_action(cx.listener(Self::on_enter_rename))
-                            .on_action(cx.listener(Self::on_enter_lua))
-                            .on_action(cx.listener(Self::on_switch_tab))
-                            .on_key_down(cx.listener(Self::handle_key_down))
-                            .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
-                            .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_mouse_up))
-                            .on_mouse_move(cx.listener(Self::handle_mouse_move))
-                            .on_scroll_wheel(cx.listener(Self::handle_scroll))
-                            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
-                                this.overlay.update(cx, |this, cx| {
-                                    this.open(OverlayScreen::Palette, window, cx);
-                                });
-                            }))
-                            .on_action(cx.listener(|this, _: &OpenReleases, window, cx| {
-                                this.overlay.update(cx, |this, cx| {
-                                    this.open(OverlayScreen::Releases, window, cx);
-                                });
-                            }))
-                            .on_action(cx.listener(|this, _: &OpenSessions, window, cx| {
-                                this.overlay.update(cx, |this, cx| {
-                                    this.open(OverlayScreen::Sessions, window, cx);
-                                });
-                            }))
-                            .on_action(cx.listener(|this, _: &ClipboardPaste, _, cx| {
-                                if let Some(session) = this.active_session()
-                                    && let Some(item) = cx.read_from_clipboard()
-                                    && let Some(text) = item.text()
-                                {
-                                    this.session_manager.send_text(session, &text);
-                                }
-                            }))
-                            .child(self.terminal.clone())
-                            .children(Root::render_dialog_layer(window, cx)),
-                    )
-                    .child(self.status_bar.clone()),
-            )
-            .children(Root::render_sheet_layer(window, cx))
-            .children(Root::render_notification_layer(window, cx))
-    }
-}
-
-impl Pyonji {
-    fn handle_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.focus_handle.is_focused(window) {
-            return;
-        }
-        if event.is_held {
-            return self.handle_key_repeat(event, window, cx);
-        }
-
-        if self.terminal.read(cx).resize_mode_held {
-            let delta = match event.keystroke.key.as_str() {
-                "left" => Some((SplitDirection::Vertical, -1)),
-                "right" => Some((SplitDirection::Vertical, 1)),
-                "up" => Some((SplitDirection::Horizontal, -1)),
-                "down" => Some((SplitDirection::Horizontal, 1)),
-                _ => None,
-            };
-            if let Some((direction, delta)) = delta {
-                self.terminal.update(cx, |this, _| {
-                    this.resize_mode_held = true;
-                });
-                self.resize_active_pane(direction, delta, cx);
-                window.prevent_default();
-                cx.stop_propagation();
-                cx.notify();
-                return;
-            }
-        }
-
-        let Some(active_session) = self.active_session() else {
-            return;
-        };
-        let reset_scrollback = self
-            .session_manager
-            .session_mut(active_session)
-            .is_some_and(TerminalSession::reset_scrollback);
-        let consumed = self
-            .session_manager
-            .session_mut(active_session)
-            .is_some_and(|session| session.handle_key_down(event));
-        if consumed {
-            window.prevent_default();
-            cx.stop_propagation();
-        }
-        if reset_scrollback {
-            cx.notify();
-        }
-    }
-
-    fn handle_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.focus_handle.is_focused(window) {
-            window.focus(&self.focus_handle, cx);
-        }
-        let terminal = self.terminal.clone();
-        // Divider drags start on left press, like before — they take over the
-        // gesture so the press never reaches the pane underneath.
-        let (x, y) = terminal.read(cx).pt_to_term(event.position);
-        if event.button == MouseButton::Left
-            && let Some(divider) = terminal.read(cx).divider_hit_test(x, y, self)
-        {
-            let drag = DividerDrag {
-                path: divider.path,
-                direction: divider.direction,
-            };
-            terminal.update(cx, |this, cx| {
-                this.resize_dragged_divider(&drag, x, y, cx);
-                this.divider_drag = Some(drag);
-                cx.notify();
-            });
-            return;
-        }
-        let Some((col, row)) = terminal.read(cx).mouse_to_cell(event.position, self) else {
-            return;
-        };
-        let Some((session_id, col, row)) = terminal.read(cx).pane_at(col, row, self) else {
-            return;
-        };
-        self.set_active_session(session_id);
-        if let Some(session) = self.session_manager.session_mut(session_id) {
-            if !session.uses_local_scrollback() {
-                session.reset_scrollback();
-            }
-            session.handle_mouse_down(event.button, &event.modifiers, col, row);
-        }
-        cx.notify();
-    }
-
-    fn handle_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self
-            .terminal
-            .update(cx, |this, _| this.divider_drag.take().is_some())
-        {
-            return;
-        }
-        let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
-            return;
-        };
-        let Some((session_id, col, row)) = self.terminal.read(cx).pane_at(col, row, self) else {
-            return;
-        };
-        if let Some(session) = self.session_manager.session_mut(session_id) {
-            session.handle_mouse_up(event.button, &event.modifiers, col, row);
-        }
-    }
-
-    fn handle_mouse_move(
-        &mut self,
-        event: &MouseMoveEvent,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if event.pressed_button.is_none() {
-            return;
-        }
-        if let Some(drag) = self.terminal.read(cx).divider_drag.clone() {
-            let (x, y) = self.terminal.read(cx).pt_to_term(event.position);
-            self.terminal.update(cx, |this, cx| {
-                this.resize_dragged_divider(&drag, x, y, cx);
-            });
-            return;
-        }
-        let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
-            return;
-        };
-        let Some((session_id, col, row)) = self.terminal.read(cx).pane_at(col, row, self) else {
-            return;
-        };
-        if let Some(session) = self.session_manager.session_mut(session_id) {
-            session.handle_mouse_move(&event.modifiers, col, row);
-        }
-    }
-
-    fn take_wheel_steps(&mut self, delta_lines: f32) -> i32 {
-        let total = self.wheel_remainder + delta_lines;
-        let whole = if total > 0.0 {
-            total.floor() as i32
-        } else if total < 0.0 {
-            total.ceil() as i32
-        } else {
-            0
-        };
-        self.wheel_remainder = total - whole as f32;
-        whole
-    }
-
-    fn handle_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
-            return;
-        };
-        let Some((session_id, col, row)) = self.terminal.read(cx).pane_at(col, row, self) else {
-            return;
-        };
-        let line_height = self.font_size * self.line_height;
-        let lines = match event.delta {
-            ScrollDelta::Lines(lines) => lines.y,
-            ScrollDelta::Pixels(pixels) => {
-                let scale = self.terminal.read(cx).scale.max(f32::EPSILON);
-                f32::from(pixels.y) / (line_height / scale)
-            }
-        };
-        let uses_local_scrollback = self
-            .session_manager
-            .session(session_id)
-            .is_some_and(TerminalSession::uses_local_scrollback);
-        let whole_lines = if uses_local_scrollback {
-            self.take_wheel_steps(lines)
-        } else {
-            self.wheel_remainder = 0.0;
-            0
-        };
-        if let Some(session) = self.session_manager.session_mut(session_id) {
-            if uses_local_scrollback {
-                if whole_lines != 0 && session.scroll_scrollback(whole_lines) {
-                    cx.notify();
-                }
-            } else {
-                let reset_scrollback = session.reset_scrollback();
-                session.handle_mouse_wheel(lines, &event.modifiers, col, row);
-                if reset_scrollback {
-                    cx.notify();
-                }
-            }
-        }
-    }
-
-    /*fn handle_key_up(&mut self, key: &str) -> bool {
-        if key.to_lowercase() == self.action.key {
-            self.resize_mode_held = false;
-            if self.resize_mode_used {
-                self.action_mode = false;
-            }
-            self.resize_mode_used = false;
-            true
-        } else {
-            false
-        }
-    }*/
-
-    fn handle_key_repeat(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.terminal.read(cx).resize_mode_held {
-            let delta = match event.keystroke.key.as_str() {
-                "left" => Some((SplitDirection::Vertical, -1)),
-                "right" => Some((SplitDirection::Vertical, 1)),
-                "up" => Some((SplitDirection::Horizontal, -1)),
-                "down" => Some((SplitDirection::Horizontal, 1)),
-                _ => None,
-            };
-            if let Some((direction, delta)) = delta {
-                self.terminal.update(cx, |this, _| {
-                    this.resize_mode_held = true;
-                });
-                self.resize_active_pane(direction, delta, cx);
-                window.prevent_default();
-                cx.stop_propagation();
-                cx.notify();
-                return;
-            }
-        }
-        if let Some(active_session) = self.active_session() {
-            let consumed = self
-                .session_manager
-                .session_mut(active_session)
-                .is_some_and(|session| session.handle_key_down(event));
-            if consumed {
-                window.prevent_default();
-                cx.stop_propagation();
-            }
         }
     }
 }

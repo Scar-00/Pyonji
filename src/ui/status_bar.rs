@@ -1,12 +1,14 @@
 use async_compat::CompatExt as _;
-use async_lsp::ServerSocket;
 use async_lsp::lsp_types::CompletionItem;
 use async_lsp::lsp_types::CompletionTextEdit;
+use async_lsp::lsp_types::InsertTextFormat;
+use async_lsp::lsp_types::Position;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_base::input::InputEvent;
 use gpui_base::input::InputState;
 use gpui_base::*;
+use std::ops::Range;
 
 use crate::Next;
 use crate::Prev;
@@ -96,20 +98,25 @@ impl StatusBar {
 
     pub fn reset_history(&mut self) {
         self.lua_history.index = 0;
+    }
+
+    pub fn clear_completion(&mut self, cx: &mut Context<Self>) {
         self.items = None;
+        self.selected = None;
+        cx.notify();
     }
 
     fn spawn_lsp(cx: &mut Context<Self>) {
         cx.spawn(async |this, cx| {
-            match LspClient::start("rust-analyzer", cx).compat().await {
+            let path = "~/.local/share/nvim/mason/bin/lua-language-server";
+            match LspClient::start(path, cx).compat().await {
                 Ok(client) => {
                     _ = this.update(cx, |this, cx| {
                         this.lua_lsp = Some(client);
                         cx.notify();
                     });
-                    tracing::warn!("lua-language-server ready");
                 }
-                Err(e) => tracing::error!("lua-language-server start failed: {e:?}"),
+                Err(e) => tracing::error!("lua-lsp failed to start: {e:?}"),
             }
         })
         .detach();
@@ -154,48 +161,55 @@ impl Render for StatusBar {
                     this.child(RenameView::new(&self.pyonji, inital.clone(), *session))
                 }
                 Mode::Lua => {
-                    let view = LuaView::new(&self.pyonji, self.items.clone() ,self.selected.clone(), self.scroll_handle.clone())
-                        .on_next(cx.listener(|this, _, _, cx| {
-                            let Some(items) = this.items.as_ref() else {
-                                this.selected = None;
-                                cx.notify();
-                                return;
-                            };
-                            let len = items.len();
-                            if len == 0 {
-                                this.selected = None;
-                                return;
-                            }
-                            let next = match this.selected {
-                                None => 0,
-                                Some(index) => (index + 1) % len,
-                            };
-                            this.selected = Some(next);
-                            this.scroll_handle.scroll_to_item(next, ScrollStrategy::Nearest);
+                    let view = LuaView::new(
+                        &self.pyonji,
+                        self.items.clone(),
+                        self.selected,
+                        self.scroll_handle.clone(),
+                    )
+                    .on_next(cx.listener(|this, _, _, cx| {
+                        let Some(items) = this.items.as_ref() else {
+                            this.selected = None;
                             cx.notify();
-                        }))
-                        .on_prev(cx.listener(|this, _, _, cx| {
-                            let Some(items) = this.items.as_ref() else {
-                                this.selected = None;
-                                cx.notify();
-                                return;
-                            };
-                            let len = items.len();
-                            if len == 0 {
-                                this.selected = None;
-                                return;
-                            }
-                            let prev = match this.selected {
-                                None => len - 1,
-                                Some(0) => len - 1,
-                                Some(index) => (index - 1) % len,
-                            };
-                            this.scroll_handle.scroll_to_item(prev, ScrollStrategy::Nearest);
-                            this.selected = Some(prev);
+                            return;
+                        };
+                        let len = items.len();
+                        if len == 0 {
+                            this.selected = None;
+                            return;
+                        }
+                        let next = match this.selected {
+                            None => 0,
+                            Some(index) => (index + 1) % len,
+                        };
+                        this.selected = Some(next);
+                        this.scroll_handle
+                            .scroll_to_item(next, ScrollStrategy::Nearest);
+                        cx.notify();
+                    }))
+                    .on_prev(cx.listener(|this, _, _, cx| {
+                        let Some(items) = this.items.as_ref() else {
+                            this.selected = None;
                             cx.notify();
-                        }));
+                            return;
+                        };
+                        let len = items.len();
+                        if len == 0 {
+                            this.selected = None;
+                            return;
+                        }
+                        let prev = match this.selected {
+                            None => len - 1,
+                            Some(0) => len - 1,
+                            Some(index) => (index - 1) % len,
+                        };
+                        this.scroll_handle
+                            .scroll_to_item(prev, ScrollStrategy::Nearest);
+                        this.selected = Some(prev);
+                        cx.notify();
+                    }));
                     this.child(view)
-                },
+                }
                 _ => this,
             })
             .into_any_element()
@@ -306,7 +320,12 @@ struct LuaView {
 }
 
 impl LuaView {
-    fn new(pyonji: &WeakEntity<Pyonji>, items: Option<Vec<CompletionItem>>, selected: Option<usize>, scroll_handle: UniformListScrollHandle) -> Self {
+    fn new(
+        pyonji: &WeakEntity<Pyonji>,
+        items: Option<Vec<CompletionItem>>,
+        selected: Option<usize>,
+        scroll_handle: UniformListScrollHandle,
+    ) -> Self {
         Self {
             pyonji: pyonji.clone(),
 
@@ -315,7 +334,7 @@ impl LuaView {
 
             selected,
             scroll_handle,
-            items
+            items,
         }
     }
 
@@ -368,7 +387,14 @@ impl RenderOnce for LuaView {
                             let server = lsp.server.clone();
                             let uri = lsp.uri.clone();
                             cx.spawn(async move |this, cx| -> Result<()> {
-                                let items = LspClient::get_completions_for(server, uri, trigger, index as u32).compat().await?;
+                                let items = LspClient::get_completions_for(
+                                    server,
+                                    uri,
+                                    trigger,
+                                    index as u32,
+                                )
+                                .compat()
+                                .await?;
                                 this.update(cx, |this, cx| {
                                     this.items = items;
                                     cx.notify();
@@ -392,28 +418,44 @@ impl RenderOnce for LuaView {
             state
         });
 
-        let edit = self.selected.clone().and_then(|selected| {
-            self
-                .items
+        let edit = self.selected.and_then(|selected| {
+            self.items
                 .as_ref()
                 .and_then(|items| items.get(selected).cloned())
         });
 
-        let selected = self.selected.clone();
+        let selected = self.selected;
+        let py_accept = self.pyonji.clone();
 
         v_flex()
             .key_context(StatusBar::CONTEXT)
             .when_some(self.on_next, |this, a| this.on_action(a))
             .when_some(self.on_prev, |this, a| this.on_action(a))
-            .on_action(window.listener_for(&input_state, move |_, _: &LuaAcceptCompletion, _, _| {
-                if let Some(edit) = edit.clone() {
-                    println!("item = {edit:#?}");
-                }
-            }))
+            .on_action(window.listener_for(
+                &input_state,
+                move |input, _: &LuaAcceptCompletion, window, cx| {
+                    let Some(item) = edit.clone() else {
+                        return;
+                    };
+                    let value = input.value().to_string();
+                    let cursor = input.cursor().min(value.len());
+                    let range = completion_range(&item, &value, cursor);
+                    let new_text = completion_replacement(&item);
+                    input.set_selected_range(range, cx);
+                    input.replace(new_text, window, cx);
+                    if let Some(py) = py_accept.upgrade() {
+                        let status_bar = cx.read_entity(&py, |py, _| py.status_bar.clone());
+                        status_bar.update(cx, |bar, cx| {
+                            bar.clear_completion(cx);
+                        });
+                    }
+                },
+            ))
             .w_full()
-            .children(self.items.map(|items| {
-                CompletionMenu::new(items, selected, self.scroll_handle)
-            }))
+            .children(
+                self.items
+                    .map(|items| CompletionMenu::new(items, selected, self.scroll_handle)),
+            )
             .child(
                 h_flex()
                     .w_full()
@@ -449,7 +491,11 @@ struct CompletionMenu {
 }
 
 impl CompletionMenu {
-    fn new(items: Vec<CompletionItem>, selected: Option<usize>, scroll_handle: UniformListScrollHandle) -> Self {
+    fn new(
+        items: Vec<CompletionItem>,
+        selected: Option<usize>,
+        scroll_handle: UniformListScrollHandle,
+    ) -> Self {
         Self {
             items,
             selected,
@@ -459,93 +505,293 @@ impl CompletionMenu {
 
     fn render_item(item: &CompletionItem, selected: bool, cx: &mut App) -> Div {
         let theme = cx.theme();
-        let kind = item
-            .kind
-            .map(|k| format!("{k:?}"))
-            .unwrap_or_default();
-        h_flex()
-            .w_full()
-            .child(
-                h_flex()
-                    .w_full()
-                    .py_0p5()
-                    .px_1()
-                    .rounded_md()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .map(|this| {
-                        if selected {
-                            this.bg(theme.selected)
-                        }else {
-                            this
-                        }
-                    })
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .whitespace_nowrap()
-                            .child(item.label.clone()),
-                    )
-                    .child(
-                        h_flex()
-                            .flex_shrink_0()
-                            .w_20()
-                            .justify_start()
-                            .text_color(theme.text_muted)
-                            .font_extrabold()
-                            .child(kind),
-                    )
-            )
+        let kind = item.kind.map(|k| format!("{k:?}")).unwrap_or_default();
+        h_flex().w_full().child(
+            h_flex()
+                .w_full()
+                .py_0p5()
+                .px_1()
+                .rounded_md()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .map(|this| {
+                    if selected {
+                        this.bg(theme.selected)
+                    } else {
+                        this
+                    }
+                })
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
+                        .child(item.label.clone()),
+                )
+                .child(
+                    h_flex()
+                        .flex_shrink_0()
+                        .w_20()
+                        .justify_start()
+                        .text_color(theme.text_muted)
+                        .font_extrabold()
+                        .child(kind),
+                ),
+        )
     }
 }
 
 impl RenderOnce for CompletionMenu {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let Self { items, selected, scroll_handle } = self;
-        deferred(anchored()
-            .anchor(Anchor::BottomLeft)
-            .offset(point(px(0.0), px(-8.0)))
-            .child(
-                v_flex()
-                    .flex_none()
-                    .border_1()
-                    .border_color(gpui::white().opacity(0.5))
-                    .rounded_xl()
-                    .mb_1()
-                    .h_48()
-                    .min_w_128()
-                    .max_w(px(480.0))
-                    .overflow_hidden()
-                    .bg(theme.surface_elevated.opacity(0.2))
-                    .backdrop_blur(px(24.0))
-                    .p_2()
-                    .child(
-                        uniform_list(
-                            "completion-items-list",
-                            items.len(),
-                            move |range, _, cx|  {
-                                let start = range.start;
+        let Self {
+            items,
+            selected,
+            scroll_handle,
+        } = self;
+        deferred(
+            anchored()
+                .anchor(Anchor::BottomLeft)
+                .offset(point(px(0.0), px(-8.0)))
+                .child(
+                    v_flex()
+                        .flex_none()
+                        .border_1()
+                        .border_color(gpui::white().opacity(0.5))
+                        .rounded_xl()
+                        .mb_1()
+                        .h_48()
+                        .min_w_128()
+                        .max_w(px(480.0))
+                        .overflow_hidden()
+                        .bg(theme.surface_elevated.opacity(0.2))
+                        .backdrop_blur(px(24.0))
+                        .p_2()
+                        .child(
+                            uniform_list(
+                                "completion-items-list",
+                                items.len(),
+                                move |range, _, cx| {
+                                    let start = range.start;
 
-                                items[range]
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, item)| {
-                                        let i = i + start;
-                                        Self::render_item(item, Some(i) == selected, cx)
-                                    }).collect()
-                            }
-                        )
-                        .track_scroll(&scroll_handle)
-                        .with_sizing_behavior(ListSizingBehavior::Infer)
-                        .with_horizontal_sizing_behavior(
-                            ListHorizontalSizingBehavior::Unconstrained,
-                        )
-                        .h_full()
-                    )
-            ),
+                                    items[range]
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, item)| {
+                                            let i = i + start;
+                                            Self::render_item(item, Some(i) == selected, cx)
+                                        })
+                                        .collect()
+                                },
+                            )
+                            .track_scroll(&scroll_handle)
+                            .with_sizing_behavior(ListSizingBehavior::Infer)
+                            .with_horizontal_sizing_behavior(
+                                ListHorizontalSizingBehavior::Unconstrained,
+                            )
+                            .h_full(),
+                        ),
+                ),
         )
         .priority_auto()
     }
+}
+
+/// Whether `c` continues a Lua identifier (`foo`, `bar2`, `_x`).
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Byte offset where the identifier fragment ending at `cursor` starts.
+///
+/// `cursor` is a UTF-8 byte offset into `value` (as reported by
+/// [`InputState::cursor`]). Anything that is not an identifier char —
+/// `.`, `:`, whitespace, brackets, … — terminates the fragment, so
+/// `string.su|` yields the `su` range and `pr|` yields `pr`.
+fn word_start(value: &str, cursor: usize) -> usize {
+    let mut s = cursor.min(value.len());
+    // Snap a mid-character cursor back to a boundary before scanning.
+    if !value.is_char_boundary(s) {
+        s = value.floor_char_boundary(s);
+    }
+    while s > 0 {
+        let Some((idx, c)) = value
+            .get(..s)
+            .and_then(|prefix| prefix.chars().next_back())
+            .map(|c| (s - c.len_utf8(), c))
+        else {
+            break;
+        };
+        if is_ident_char(c) {
+            s = idx;
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+/// Convert an LSP `character` (UTF-16 code units) into a byte offset into
+/// single-line `line_text`.
+fn utf16_col_to_byte_offset(line_text: &str, utf16_col: u32) -> usize {
+    let target = utf16_col as usize;
+    let mut utf16 = 0;
+    for (byte, c) in line_text.char_indices() {
+        if utf16 >= target {
+            return byte;
+        }
+        utf16 += c.len_utf16();
+    }
+    if utf16 <= target {
+        return line_text.len();
+    }
+    line_text.len()
+}
+
+/// Convert an LSP [`Position`] into a byte offset into the single-line
+/// input `value`. Returns `None` for multi-line ranges, which cannot apply
+/// to the single-line Lua prompt.
+fn lsp_position_to_offset(value: &str, pos: Position) -> Option<usize> {
+    if pos.line != 0 {
+        return None;
+    }
+    Some(utf16_col_to_byte_offset(value, pos.character).min(value.len()))
+}
+
+/// Strip snippet placeholders (`$0`, `$1`, `${1:text}`) down to plain text.
+///
+/// `lua-language-server` marks function completions as snippets, e.g.
+/// `print(${1:...})`. Inserting that literally into the single-line REPL
+/// would leave placeholder syntax behind, so `${1:foo}` becomes `foo` and
+/// bare tabstops disappear.
+fn strip_snippet_placeholders(snippet: &str) -> String {
+    let mut out = String::with_capacity(snippet.len());
+    let mut chars = snippet.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('{') => {
+                chars.next();
+                let mut num = String::new();
+                while let Some(&d) = chars.peek() {
+                    if d.is_ascii_digit() {
+                        num.push(d);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if chars.peek() == Some(&':') {
+                    chars.next();
+                    let mut depth = 1;
+                    let mut placeholder = String::new();
+                    for ch in chars.by_ref() {
+                        if ch == '{' {
+                            depth += 1;
+                            placeholder.push(ch);
+                        } else if ch == '}' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                            placeholder.push(ch);
+                        } else {
+                            placeholder.push(ch);
+                        }
+                    }
+                    out.push_str(&placeholder);
+                } else {
+                    for ch in chars.by_ref() {
+                        if ch == '}' {
+                            break;
+                        }
+                    }
+                }
+            }
+            Some(d) if d.is_ascii_digit() => {
+                while let Some(&d) = chars.peek() {
+                    if d.is_ascii_digit() {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            _ => out.push('$'),
+        }
+    }
+    out
+}
+
+/// Text to insert for `item`: `textEdit.new_text`, falling back to
+/// `insertText`, then `label`. Snippet-formatted edits are returned as plain
+/// text.
+fn completion_replacement(item: &CompletionItem) -> String {
+    let (raw, is_snippet) = match item.text_edit.as_ref() {
+        Some(CompletionTextEdit::Edit(edit)) => (
+            edit.new_text.clone(),
+            item.insert_text_format == Some(InsertTextFormat::SNIPPET),
+        ),
+        Some(CompletionTextEdit::InsertAndReplace(edit)) => (
+            edit.new_text.clone(),
+            item.insert_text_format == Some(InsertTextFormat::SNIPPET),
+        ),
+        None => match item.insert_text.as_ref() {
+            Some(insert) => (
+                insert.clone(),
+                item.insert_text_format == Some(InsertTextFormat::SNIPPET),
+            ),
+            None => (item.label.clone(), false),
+        },
+    };
+    if is_snippet {
+        strip_snippet_placeholders(&raw)
+    } else {
+        raw
+    }
+}
+
+/// Byte range in `value` that accepting `item` should replace.
+///
+/// Prefers the range from `textEdit` when it targets the single input line;
+/// otherwise falls back to the identifier fragment before `cursor`, or to an
+/// empty range at `cursor` when there is no fragment. Mirrors
+/// `EditorState::insert_completion`'s `fallback_range` handling for the
+/// single-line prompt.
+fn completion_range(item: &CompletionItem, value: &str, cursor: usize) -> Range<usize> {
+    let cursor = cursor.min(value.len());
+    let snap = |offset: usize| {
+        let offset = offset.min(value.len());
+        if value.is_char_boundary(offset) {
+            offset
+        } else {
+            value.floor_char_boundary(offset)
+        }
+    };
+    if let Some(edit) = item.text_edit.as_ref() {
+        let lsp_range = match edit {
+            CompletionTextEdit::Edit(edit) => Some((edit.range.start, edit.range.end)),
+            CompletionTextEdit::InsertAndReplace(edit) => {
+                Some((edit.replace.start, edit.replace.end))
+            }
+        };
+        if let Some((start, end)) = lsp_range
+            && let (Some(s), Some(e)) = (
+                lsp_position_to_offset(value, start),
+                lsp_position_to_offset(value, end),
+            )
+        {
+            let (s, e) = (snap(s), snap(e));
+            if s <= e {
+                return s..e;
+            }
+        }
+    }
+    if item.insert_text.is_some() && item.text_edit.is_none() {
+        return cursor..cursor;
+    }
+    word_start(value, cursor)..cursor
 }

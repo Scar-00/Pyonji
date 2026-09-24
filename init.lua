@@ -122,3 +122,5 @@ py:bind('<alt-shift> q', function()
     py:close(py.active_session);
 end)
 
+py:bind('<ctrl-b> v', py.split('v'));
+py:bind('<ctrl-b> h', py.split('h'));

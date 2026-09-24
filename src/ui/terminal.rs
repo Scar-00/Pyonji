@@ -88,29 +88,29 @@ impl Terminal {
         )
     }
 
-    pub fn cursor_to_grid_position(&self, x: f32, y: f32, cx: &mut App) -> Option<(f32, f32)> {
-        let pyonji = self.pyonji.upgrade()?;
-
-        let font_size = pyonji.read(cx).font_size;
-        let line_height = pyonji.read(cx).line_height * font_size;
+    pub fn cursor_to_grid_position(
+        &self,
+        x: f32,
+        y: f32,
+        pyonji: &mut Pyonji,
+    ) -> Option<(f32, f32)> {
+        let font_size = pyonji.font_size;
+        let line_height = pyonji.line_height * font_size;
         let (cell_width, line_height) = self.cell_metrics(font_size, line_height)?;
         let col = (x.max(0.0) / cell_width).clamp(0.0, f32::from(self.cols));
         let row = (y.max(0.0) / line_height).clamp(0.0, f32::from(self.rows));
         Some((col, row))
     }
 
-    pub fn resize_dragged_divider(&mut self, drag: &DividerDrag, x: f32, y: f32, cx: &mut App) {
-        let Some((col, row)) = self.cursor_to_grid_position(x, y, cx) else {
+    pub fn resize_dragged_divider(&self, drag: &DividerDrag, x: f32, y: f32, pyonji: &mut Pyonji) {
+        let Some((col, row)) = self.cursor_to_grid_position(x, y, pyonji) else {
             return;
         };
         let position = match drag.direction {
             SplitDirection::Vertical => col,
             SplitDirection::Horizontal => row,
         };
-        let Some(pyonji) = self.pyonji.upgrade() else {
-            return;
-        };
-        let Some(tab) = pyonji.read(cx).current_tab else {
+        let Some(tab) = pyonji.current_tab else {
             return;
         };
         let area = PaneGeometry {
@@ -119,12 +119,10 @@ impl Terminal {
             cols: self.cols,
             rows: self.rows,
         };
-        pyonji.update(cx, |this, _| {
-            let Some(tab) = this.tabs[tab].as_mut() else {
-                return;
-            };
-            tab.resize_split_by_position(area, &drag.path, drag.direction, position);
-        });
+        let Some(tab) = pyonji.tabs[tab].as_mut() else {
+            return;
+        };
+        tab.resize_split_by_position(area, &drag.path, drag.direction, position);
     }
 
     pub fn pane_at(&self, col: u16, row: u16, py: &Pyonji) -> Option<(SessionId, u16, u16)> {
