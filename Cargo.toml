@@ -56,13 +56,14 @@ gpui_ce_components = { path = "../oss/gpui-component/crates/ui/", features = ["i
 gpui_ce_components_base = { path = "../oss/gpui-component/crates/base/", features = ["inspector"] }
 gpui_ce_components_assets = { path = "../oss/gpui-component/crates/assets/" }
 gpui_ce_components_macros = { path = "../oss/gpui-component/crates/macros/" }
+gpui_ce_components_shell = { path = "../oss/gpui-component/crates/shell/" }
 rust-embed = "8.11.0"
 chrono = "0.4.45"
 async-lsp = { version = "0.2.4", features = ["async-io"] }
 tower = "0.5.3"
 
 [dev-dependencies]
-gpui = { git = "https://github.com/gpui-ce/gpui-ce", features = ["test-support"], package = "gpui-ce" }
+#gpui = { git = "https://github.com/gpui-ce/gpui-ce", features = ["test-support"], package = "gpui-ce" }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.30"

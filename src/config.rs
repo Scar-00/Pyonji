@@ -484,6 +484,15 @@ impl LuaUserData for LuaProxy {
                 Ok(())
             })
         });
+        methods.add_function("open_palette", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                let window = this.window.as_mut();
+                this.py.overlay.update(this.cx.app.as_mut(), |this, cx| {
+                    this.open(OverlayScreen::Palette, window, cx);
+                });
+                Ok(())
+            })
+        });
         methods.add_function("open_rename", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
                 let window = this.window.as_mut();

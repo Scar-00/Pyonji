@@ -7,10 +7,11 @@ use async_compat::CompatExt;
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_base::{Disableable, ScrollbarAxis, StyledExt as _, h_flex, v_flex};
 use gpui_component::{
-    Icon, IconName, Sizable,
+    Icon, IconName, Sizable, WindowExt,
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState},
     label::Label,
+    progress::Progress,
     scroll::ScrollableElement,
     spinner::Spinner,
     text::TextView,
@@ -27,10 +28,18 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum UpdateState {
+    Idle,
+    Updating { progress: f32 },
+    Complete,
+}
+
 pub struct ReleasesView {
     _pyonji: WeakEntity<Pyonji>,
 
     releases: Option<Vec<Release>>,
+    update_state: UpdateState,
 
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
@@ -62,6 +71,7 @@ impl ReleasesView {
             _pyonji: pyonji.clone(),
 
             releases: None,
+            update_state: UpdateState::Idle,
 
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
@@ -159,6 +169,10 @@ impl ReleasesView {
     }
 
     fn on_confirm(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
+        if self.update_state != UpdateState::Idle {
+            return;
+        }
+
         let Some(ix) = self.selected else { return };
         let Some(release) = self.releases.as_ref().and_then(|r| r.get(ix)).cloned() else {
             return;
@@ -169,9 +183,16 @@ impl ReleasesView {
         };
 
         let url = asset.download_url().to_string();
+        self.update_state = UpdateState::Updating { progress: 0.0 };
+        cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
+            let update_entity = this.clone();
             if let Err(e) = Self::download_self(this, url, cx).await {
+                _ = update_entity.update(cx, |this, cx| {
+                    this.update_state = UpdateState::Idle;
+                    cx.notify();
+                });
                 _ = cx.update(|window, cx| {
                     window.dispatch_action(Box::new(PushError::new(e)), cx);
                 });
@@ -181,7 +202,7 @@ impl ReleasesView {
     }
 
     async fn download_self(
-        _: WeakEntity<Self>,
+        this: WeakEntity<Self>,
         url: String,
         cx: &mut AsyncWindowContext,
     ) -> Result<()> {
@@ -204,6 +225,9 @@ impl ReleasesView {
             .get(reqwest::header::CONTENT_LENGTH)
             .context("no content-length in download")?;
         let length = header.to_str().map(str::parse::<usize>)??;
+        if length == 0 {
+            return Err(anyhow::anyhow!("update download is empty"));
+        }
         let mut stream = res.bytes_stream();
         let mut file = tempfile::NamedTempFile::new()?;
         let mut downloaded = 0;
@@ -211,13 +235,21 @@ impl ReleasesView {
             let chunk = chunk?;
             file.write_all(&chunk)?;
             downloaded += chunk.len();
-            let progress = (downloaded as f64 / length as f64) * 100.0;
-            println!("progress = {progress}");
+            let progress = ((downloaded as f64 / length as f64) * 100.0).clamp(0.0, 100.0) as f32;
+            _ = this.update(cx, |this, cx| {
+                this.update_state = UpdateState::Updating { progress };
+                cx.notify();
+            });
         }
+        _ = this.update(cx, |this, cx| {
+            this.update_state = UpdateState::Updating { progress: 100.0 };
+            cx.notify();
+        });
         let path = file.path();
         self_replace::self_replace(path)?;
-        _ = cx.update(|_, cx| {
-            cx.restart();
+        _ = this.update(cx, |this, cx| {
+            this.update_state = UpdateState::Complete;
+            cx.notify();
         });
         Ok(())
     }
@@ -378,7 +410,7 @@ impl ReleasesView {
             .into_any_element()
     }
 
-    fn render_footer(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_install_footer(&self, cx: &Context<Self>) -> impl IntoElement {
         let selected = self.selected.and_then(|ix| self.releases.as_ref()?.get(ix));
 
         h_flex()
@@ -404,6 +436,76 @@ impl ReleasesView {
                         cx.listener(|this, _, window, cx| this.on_confirm(&Submit, window, cx)),
                     ),
             )
+    }
+
+    fn render_update_footer(&self, progress: f32, cx: &Context<Self>) -> impl IntoElement {
+        let progress = progress.clamp(0.0, 100.0);
+        let theme = cx.theme();
+
+        v_flex()
+            .p_3()
+            .gap_2()
+            .border_t_1()
+            .border_color(theme.unselected_border)
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .child(Label::new("Downloading update…").text_sm())
+                    .child(
+                        Label::new(format!("{progress:.0}%"))
+                            .text_sm()
+                            .text_color(theme.text_muted),
+                    ),
+            )
+            .child(
+                Progress::new("release-update-progress")
+                    .value(progress)
+                    .small()
+                    .accessibility_label("Release update progress"),
+            )
+    }
+
+    fn render_complete_footer(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+
+        v_flex()
+            .p_3()
+            .gap_2()
+            .border_t_1()
+            .border_color(theme.unselected_border)
+            .child(Label::new("Update complete.").text_sm())
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("restart")
+                            .primary()
+                            .small()
+                            .label("Restart")
+                            .on_click(cx.listener(|_, _, _, cx| cx.restart())),
+                    )
+                    .child(
+                        Button::new("restart-later")
+                            .secondary()
+                            .small()
+                            .label("Not now")
+                            .on_click(cx.listener(|_, _, window, cx| {
+                                window.close_dialog(cx);
+                            })),
+                    ),
+            )
+    }
+
+    fn render_footer(&self, cx: &Context<Self>) -> impl IntoElement {
+        match self.update_state {
+            UpdateState::Idle => self.render_install_footer(cx).into_any_element(),
+            UpdateState::Updating { progress } => {
+                self.render_update_footer(progress, cx).into_any_element()
+            }
+            UpdateState::Complete => self.render_complete_footer(cx).into_any_element(),
+        }
     }
 }
 

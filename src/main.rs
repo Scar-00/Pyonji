@@ -1143,6 +1143,7 @@ impl PyTheme for App {
 
 impl Global for Theme {}
 
+#[derive(serde::Serialize)]
 pub struct Theme {
     // Base layers
     pub background: Rgba,
