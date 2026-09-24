@@ -1,11 +1,11 @@
+pub mod opener;
 pub mod palette;
 pub mod releases;
 pub mod sessions;
-pub mod opener;
 
-use sessions::SessionsView;
-use releases::ReleasesView;
 use opener::{FileOpener, FileOpenerEvent};
+use releases::ReleasesView;
+use sessions::SessionsView;
 
 use gpui::*;
 use gpui_component::{WindowExt, dialog::Dialog};
@@ -57,17 +57,12 @@ impl Overlay {
                 .backdrop_blur(px(24.0))
                 .bg(cx.theme().surface.opacity(0.15))
                 .close_button(false)
-                .child(
-                    div()
-                        .size_full()
-                        .p_1()
-                        .child(match screen {
-                            OverlayScreen::Sessions => this.sessions.clone().into_any_element(),
-                            OverlayScreen::Releases => this.releases.clone().into_any_element(),
-                            OverlayScreen::Opener => this.opener.clone().into_any_element(),
-                            _ => div().into_any_element(),
-                        }),
-            )
+                .child(div().size_full().p_1().child(match screen {
+                    OverlayScreen::Sessions => this.sessions.clone().into_any_element(),
+                    OverlayScreen::Releases => this.releases.clone().into_any_element(),
+                    OverlayScreen::Opener => this.opener.clone().into_any_element(),
+                    _ => div().into_any_element(),
+                }))
         });
         window.open_dialog(cx, builder);
         let handle = match screen {
@@ -83,12 +78,13 @@ impl Overlay {
 
     fn setup_opener(window: &mut Window, cx: &mut Context<Self>) -> Entity<FileOpener> {
         let opener = cx.new(|cx| {
-            FileOpener::new(std::env::current_dir().unwrap(), window, cx)
-                .show_hidden(true)
+            FileOpener::new(std::env::current_dir().unwrap(), window, cx).show_hidden(true)
         });
-        cx.subscribe_in(&opener, window, |this, _, ev: &FileOpenerEvent, window, cx| {
-            _ = this.pyonji.update(cx, |this, cx| {
-                match ev {
+        cx.subscribe_in(
+            &opener,
+            window,
+            |this, _, ev: &FileOpenerEvent, window, cx| {
+                _ = this.pyonji.update(cx, |this, cx| match ev {
                     FileOpenerEvent::Opened(path) => {
                         let id = match this.create_session(Some(path), None, None, cx) {
                             Err(e) => {
@@ -98,7 +94,9 @@ impl Overlay {
                             }
                             Ok(id) => id,
                         };
-                        if path.is_file() && let Some(editor) = this.editor.as_ref() {
+                        if path.is_file()
+                            && let Some(editor) = this.editor.as_ref()
+                        {
                             this.session_manager.send_text(id, &format!("{editor} .\r"));
                         }
                         window.close_dialog(cx);
@@ -106,9 +104,9 @@ impl Overlay {
                     FileOpenerEvent::Cancelled => {
                         window.close_dialog(cx);
                     }
-                }
-            });
-        })
+                });
+            },
+        )
         .detach();
         opener
     }

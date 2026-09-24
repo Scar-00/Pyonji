@@ -55,9 +55,9 @@ impl Pty {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        /*std::env::vars_os().for_each(|var| {
+        std::env::vars_os().for_each(|var| {
             cmd.env(var.0, var.1);
-        });*/
+        });
 
         let mut child = pair
             .slave
@@ -128,9 +128,9 @@ impl Pty {
         cmd.arg(format!("{}@{}", ssh.user_name, ssh.ip));
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        /*std::env::vars_os().for_each(|var| {
+        std::env::vars_os().for_each(|var| {
             cmd.env(var.0, var.1);
-        });*/
+        });
 
         let mut child = pair
             .slave

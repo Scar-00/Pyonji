@@ -1,33 +1,34 @@
+use async_compat::CompatExt as _;
+use async_lsp::ServerSocket;
+use async_lsp::lsp_types::CompletionItem;
+use async_lsp::lsp_types::CompletionTextEdit;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_base::input::InputEvent;
 use gpui_base::input::InputState;
 use gpui_base::*;
 
+use crate::Next;
+use crate::Prev;
 use crate::PyTheme as _;
 use crate::Pyonji;
+use crate::lua_complete::LspClient;
 use crate::terminal::SessionId;
 use crate::util;
 
-actions!([DismissStatusBarState, HistoryPrev, HistoryNext]);
+actions!([
+    DismissStatusBarState,
+    HistoryPrev,
+    HistoryNext,
+    LuaAcceptCompletion
+]);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new(
-                "escape",
-                DismissStatusBarState,
-                Some(StatusBar::CONTEXT),
-            ),
-            KeyBinding::new(
-                "up",
-                HistoryNext,
-                Some(StatusBar::CONTEXT),
-            ),
-            KeyBinding::new(
-                "down",
-                HistoryPrev,
-                Some(StatusBar::CONTEXT),
-            )
+        KeyBinding::new("escape", DismissStatusBarState, Some(StatusBar::CONTEXT)),
+        KeyBinding::new("down", Next, Some(StatusBar::CONTEXT)),
+        KeyBinding::new("up", Prev, Some(StatusBar::CONTEXT)),
+        KeyBinding::new("tab", LuaAcceptCompletion, Some(StatusBar::CONTEXT)),
     ]);
 }
 
@@ -58,18 +59,29 @@ pub struct StatusBar {
     mode: Mode,
 
     lua_history: HistoryManager,
+
+    //lsp
+    lua_lsp: Option<LspClient>,
+    selected: Option<usize>,
+    scroll_handle: UniformListScrollHandle,
+    items: Option<Vec<CompletionItem>>,
 }
 
 impl StatusBar {
     pub const CONTEXT: &str = "STATUS-BAR";
 
     pub fn new(pyonji: WeakEntity<Pyonji>, cx: &mut Context<Self>) -> Self {
+        Self::spawn_lsp(cx);
         Self {
             pyonji,
             focus_handle: cx.focus_handle(),
             mode: Mode::Sessions,
 
             lua_history: HistoryManager::new(),
+            lua_lsp: None,
+            selected: None,
+            scroll_handle: UniformListScrollHandle::new(),
+            items: None,
         }
     }
 
@@ -84,6 +96,23 @@ impl StatusBar {
 
     pub fn reset_history(&mut self) {
         self.lua_history.index = 0;
+        self.items = None;
+    }
+
+    fn spawn_lsp(cx: &mut Context<Self>) {
+        cx.spawn(async |this, cx| {
+            match LspClient::start("rust-analyzer", cx).compat().await {
+                Ok(client) => {
+                    _ = this.update(cx, |this, cx| {
+                        this.lua_lsp = Some(client);
+                        cx.notify();
+                    });
+                    tracing::warn!("lua-language-server ready");
+                }
+                Err(e) => tracing::error!("lua-language-server start failed: {e:?}"),
+            }
+        })
+        .detach();
     }
 
     fn on_dismiss(
@@ -92,6 +121,7 @@ impl StatusBar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.items = None;
         self.set_mode(Mode::Sessions, cx);
         let focus_handle = util::read!(self.pyonji, cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
@@ -123,7 +153,49 @@ impl Render for StatusBar {
                 Mode::Rename { inital, session } => {
                     this.child(RenameView::new(&self.pyonji, inital.clone(), *session))
                 }
-                Mode::Lua => this.child(LuaView::new(&self.pyonji)),
+                Mode::Lua => {
+                    let view = LuaView::new(&self.pyonji, self.items.clone() ,self.selected.clone(), self.scroll_handle.clone())
+                        .on_next(cx.listener(|this, _, _, cx| {
+                            let Some(items) = this.items.as_ref() else {
+                                this.selected = None;
+                                cx.notify();
+                                return;
+                            };
+                            let len = items.len();
+                            if len == 0 {
+                                this.selected = None;
+                                return;
+                            }
+                            let next = match this.selected {
+                                None => 0,
+                                Some(index) => (index + 1) % len,
+                            };
+                            this.selected = Some(next);
+                            this.scroll_handle.scroll_to_item(next, ScrollStrategy::Nearest);
+                            cx.notify();
+                        }))
+                        .on_prev(cx.listener(|this, _, _, cx| {
+                            let Some(items) = this.items.as_ref() else {
+                                this.selected = None;
+                                cx.notify();
+                                return;
+                            };
+                            let len = items.len();
+                            if len == 0 {
+                                this.selected = None;
+                                return;
+                            }
+                            let prev = match this.selected {
+                                None => len - 1,
+                                Some(0) => len - 1,
+                                Some(index) => (index - 1) % len,
+                            };
+                            this.scroll_handle.scroll_to_item(prev, ScrollStrategy::Nearest);
+                            this.selected = Some(prev);
+                            cx.notify();
+                        }));
+                    this.child(view)
+                },
                 _ => this,
             })
             .into_any_element()
@@ -224,13 +296,37 @@ impl RenderOnce for RenameView {
 #[derive(IntoElement)]
 struct LuaView {
     pyonji: WeakEntity<Pyonji>,
+
+    on_next: Option<Box<dyn Fn(&Next, &mut Window, &mut App)>>,
+    on_prev: Option<Box<dyn Fn(&Prev, &mut Window, &mut App)>>,
+
+    selected: Option<usize>,
+    scroll_handle: UniformListScrollHandle,
+    items: Option<Vec<CompletionItem>>,
 }
 
 impl LuaView {
-    fn new(pyonji: &WeakEntity<Pyonji>) -> Self {
+    fn new(pyonji: &WeakEntity<Pyonji>, items: Option<Vec<CompletionItem>>, selected: Option<usize>, scroll_handle: UniformListScrollHandle) -> Self {
         Self {
             pyonji: pyonji.clone(),
+
+            on_next: None,
+            on_prev: None,
+
+            selected,
+            scroll_handle,
+            items
         }
+    }
+
+    fn on_next(mut self, f: impl 'static + Fn(&Next, &mut Window, &mut App)) -> Self {
+        self.on_next = Some(Box::new(f));
+        self
+    }
+
+    fn on_prev(mut self, f: impl 'static + Fn(&Prev, &mut Window, &mut App)) -> Self {
+        self.on_prev = Some(Box::new(f));
+        self
     }
 }
 
@@ -250,15 +346,45 @@ impl RenderOnce for LuaView {
             .detach();
             cx.subscribe_in(&cx.entity(), window, {
                 let py = py.clone();
-                move |this, _, ev: &InputEvent, window, cx| {
-                    let InputEvent::PressEnter { .. } = ev else {
-                        return;
-                    };
-                    let val = this.value();
-                    let status_bar = util::read!(py, cx).status_bar.clone();
-                    AppContext::emit(cx, &status_bar, Event::ExecLua(val.to_string()));
-                    AppContext::emit(cx, &status_bar, Event::Dismiss);
-                    this.set_value("", window, cx);
+                move |this, _, ev: &InputEvent, window, cx| match ev {
+                    InputEvent::Change => {
+                        let val = this.value();
+                        let len = val.len();
+                        let status_bar = util::read!(py, cx).status_bar.clone();
+                        let index = this.cursor();
+                        let chars = val.chars().collect::<Vec<_>>();
+                        let Some(&trigger) = chars.get(index.saturating_sub(1)) else {
+                            status_bar.update(cx, |this, cx| {
+                                this.items = None;
+                                cx.notify();
+                            });
+                            return;
+                        };
+                        status_bar.update(cx, |this, cx| {
+                            let Some(lsp) = this.lua_lsp.as_mut() else {
+                                return;
+                            };
+                            _ = lsp.push_changes(0..len, val.as_str());
+                            let server = lsp.server.clone();
+                            let uri = lsp.uri.clone();
+                            cx.spawn(async move |this, cx| -> Result<()> {
+                                let items = LspClient::get_completions_for(server, uri, trigger, index as u32).compat().await?;
+                                this.update(cx, |this, cx| {
+                                    this.items = items;
+                                    cx.notify();
+                                })
+                            })
+                            .detach();
+                        });
+                    }
+                    InputEvent::PressEnter { .. } => {
+                        let val = this.value();
+                        let status_bar = util::read!(py, cx).status_bar.clone();
+                        AppContext::emit(cx, &status_bar, Event::ExecLua(val.to_string()));
+                        AppContext::emit(cx, &status_bar, Event::Dismiss);
+                        this.set_value("", window, cx);
+                    }
+                    _ => {}
                 }
             })
             .detach();
@@ -266,55 +392,34 @@ impl RenderOnce for LuaView {
             state
         });
 
-        let on_next = window.listener_for(&input_state, {
-            let py = py.clone();
-            move |this, _: &HistoryNext, window, cx| {
-                let value = {
-                    let status_bar = util::read!(py, cx).status_bar.clone();
-                    status_bar.update(cx, |this, _| {
-                        let history = this
-                            .lua_history
-                            .history
-                            .get(this.lua_history.index)
-                            .cloned()?;
-                        this.lua_history.index = this
-                            .lua_history
-                            .index
-                            .saturating_add(1)
-                            .min(this.lua_history.history.len());
-                        Some(history)
-                    })
-                };
-                if let Some(value) = value {
-                    this.set_value(value, window, cx);
-                }
-            }
+        let edit = self.selected.clone().and_then(|selected| {
+            self
+                .items
+                .as_ref()
+                .and_then(|items| items.get(selected).cloned())
         });
-        let on_prev = window.listener_for(&input_state, {
-            let py = py.clone();
-            move |this, _: &HistoryPrev, window, cx| {
-                let value = {
-                    let status_bar = util::read!(py, cx).status_bar.clone();
-                    status_bar.update(cx, |this, _| {
-                        let history = this
-                            .lua_history
-                            .history
-                            .get(this.lua_history.index)
-                            .cloned()?;
-                        this.lua_history.index = this.lua_history.index.saturating_sub(1);
-                        Some(history)
-                    })
-                };
-                if let Some(value) = value {
-                    this.set_value(value, window, cx);
+
+        let selected = self.selected.clone();
+
+        v_flex()
+            .key_context(StatusBar::CONTEXT)
+            .when_some(self.on_next, |this, a| this.on_action(a))
+            .when_some(self.on_prev, |this, a| this.on_action(a))
+            .on_action(window.listener_for(&input_state, move |_, _: &LuaAcceptCompletion, _, _| {
+                if let Some(edit) = edit.clone() {
+                    println!("item = {edit:#?}");
                 }
-            }
-        });
-        h_flex()
-            .on_action(on_next)
-            .on_action(on_prev)
+            }))
             .w_full()
-            .child(Input::new(&input_state))
+            .children(self.items.map(|items| {
+                CompletionMenu::new(items, selected, self.scroll_handle)
+            }))
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .child(Input::new(&input_state)),
+            )
     }
 }
 
@@ -333,5 +438,114 @@ impl HistoryManager {
 
     fn push(&mut self, code: String) {
         self.history.push(code);
+    }
+}
+
+#[derive(IntoElement)]
+struct CompletionMenu {
+    items: Vec<CompletionItem>,
+    selected: Option<usize>,
+    scroll_handle: UniformListScrollHandle,
+}
+
+impl CompletionMenu {
+    fn new(items: Vec<CompletionItem>, selected: Option<usize>, scroll_handle: UniformListScrollHandle) -> Self {
+        Self {
+            items,
+            selected,
+            scroll_handle,
+        }
+    }
+
+    fn render_item(item: &CompletionItem, selected: bool, cx: &mut App) -> Div {
+        let theme = cx.theme();
+        let kind = item
+            .kind
+            .map(|k| format!("{k:?}"))
+            .unwrap_or_default();
+        h_flex()
+            .w_full()
+            .child(
+                h_flex()
+                    .w_full()
+                    .py_0p5()
+                    .px_1()
+                    .rounded_md()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .map(|this| {
+                        if selected {
+                            this.bg(theme.selected)
+                        }else {
+                            this
+                        }
+                    })
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .child(item.label.clone()),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_shrink_0()
+                            .w_20()
+                            .justify_start()
+                            .text_color(theme.text_muted)
+                            .font_extrabold()
+                            .child(kind),
+                    )
+            )
+    }
+}
+
+impl RenderOnce for CompletionMenu {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        let Self { items, selected, scroll_handle } = self;
+        deferred(anchored()
+            .anchor(Anchor::BottomLeft)
+            .offset(point(px(0.0), px(-8.0)))
+            .child(
+                v_flex()
+                    .flex_none()
+                    .border_1()
+                    .border_color(gpui::white().opacity(0.5))
+                    .rounded_xl()
+                    .mb_1()
+                    .h_48()
+                    .min_w_128()
+                    .max_w(px(480.0))
+                    .overflow_hidden()
+                    .bg(theme.surface_elevated.opacity(0.2))
+                    .backdrop_blur(px(24.0))
+                    .p_2()
+                    .child(
+                        uniform_list(
+                            "completion-items-list",
+                            items.len(),
+                            move |range, _, cx|  {
+                                let start = range.start;
+
+                                items[range]
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, item)| {
+                                        let i = i + start;
+                                        Self::render_item(item, Some(i) == selected, cx)
+                                    }).collect()
+                            }
+                        )
+                        .track_scroll(&scroll_handle)
+                        .with_sizing_behavior(ListSizingBehavior::Infer)
+                        .with_horizontal_sizing_behavior(
+                            ListHorizontalSizingBehavior::Unconstrained,
+                        )
+                        .h_full()
+                    )
+            ),
+        )
+        .priority_auto()
     }
 }

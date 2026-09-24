@@ -48,7 +48,6 @@ ssh2 = "0.9.6"
 mio = { version = "1.2.2", features = ["net", "os-poll"] }
 smallvec = "1.16.1"
 path-absolutize = "4.0.1"
-lsp-types = { version = "0.97.0", features = ["proposed"] }
 gpui = { git = "https://github.com/gpui-ce/gpui-ce", features = ["custom-gpu"], package = "gpui-ce" }
 gpui_platform = { git = "https://github.com/gpui-ce/gpui-ce", package = "gpui_ce_platform" }
 gpui_tokio = { git = "https://github.com/gpui-ce/gpui-ce", package = "gpui_ce_tokio" }
@@ -59,12 +58,18 @@ gpui_ce_components_assets = { path = "../oss/gpui-component/crates/assets/" }
 gpui_ce_components_macros = { path = "../oss/gpui-component/crates/macros/" }
 rust-embed = "8.11.0"
 chrono = "0.4.45"
+async-lsp = { version = "0.2.4", features = ["async-io"] }
+tower = "0.5.3"
 
 [dev-dependencies]
 gpui = { git = "https://github.com/gpui-ce/gpui-ce", features = ["test-support"], package = "gpui-ce" }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.30"
+
+[profile.dev.package]
+gpui-ce = { opt-level = 3 }
+gpui_ce_components = { opt-level = 3 }
 
 # Local patch for the gpui-ce MSAA validation crash (see
 # `vendor/gpui-ce/README.md`): redirects every package from the gpui-ce git

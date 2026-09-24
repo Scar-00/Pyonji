@@ -5,9 +5,7 @@ use crate::util::UnsafeRefMut;
 use crate::{EnterLuaRepl, EnterRename, ExecKeybind, Pyonji};
 use anyhow::{Context as _, Result, anyhow};
 use async_channel::Sender;
-use gpui::{
-    App, Context, Entity, EntityId, KeyBinding, WeakEntity, Window,
-};
+use gpui::{App, Context, Entity, EntityId, KeyBinding, WeakEntity, Window};
 use gpui_component::ThemeMode;
 use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
@@ -19,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::thread;
 
-const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
+pub(crate) const DEFAULT_CONFIG: &str = include_str!("../resources/default.lua");
 pub const LUA_MODULES: &[(&str, &str)] =
     &[("lua.keybind", include_str!("../resources/lua/keybind.lua"))];
 
@@ -168,7 +166,8 @@ impl LuaUserData for LuaProxy {
                 let Some(renderer) = term.renderer.as_mut() else {
                     return;
                 };
-                renderer.set_font_metrics(this.py.font_size, this.py.font_size * this.py.line_height);
+                renderer
+                    .set_font_metrics(this.py.font_size, this.py.font_size * this.py.line_height);
                 if let Some(font) = this.py.font_family.as_deref() {
                     renderer.set_font_family(font);
                 }
@@ -667,7 +666,9 @@ pub fn watch(tx: Sender<PtyEvent>) {
             watcher.watch(&path.absolutize()?, RecursiveMode::Recursive)?;
             loop {
                 let ev = rx.recv();
-                let Ok(Ok(event)) = ev else { continue; };
+                let Ok(Ok(event)) = ev else {
+                    continue;
+                };
                 if matches!(event.kind, EventKind::Modify(_)) {
                     tx.force_send(PtyEvent::ConfigChanged)
                         .expect("event tx closed");
@@ -837,20 +838,23 @@ impl ConfigKeyBinding {
                 .context("failed to find `>` while parsing keybinding")?;
             let inside = &binding[1..end].trim();
             let rest = &binding[end + 1..].trim();
-            let parts = inside.split('-').map(Self::canonical_key).collect::<Vec<_>>();
+            let parts = inside
+                .split('-')
+                .map(Self::canonical_key)
+                .collect::<Vec<_>>();
             let is_split = parts.iter().any(|part| !Self::is_mod(part));
             Ok(Self {
                 mods: if parts.is_empty() {
                     None
                 } else {
-                    Some(Modifier{
+                    Some(Modifier {
                         parts,
                         split: is_split,
                     })
                 },
                 key: Self::canonical_key(rest),
             })
-        }else {
+        } else {
             Err(anyhow!("{binding} is not a valid keybind"))
         }
     }

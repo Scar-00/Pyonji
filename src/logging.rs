@@ -9,14 +9,18 @@ const LOG_FILE: &str = "C:/dev/learning/pyonji/pyonji.log";
 
 #[cfg(feature = "install")]
 pub fn init() {
-    use std::{backtrace::Backtrace, fs::File, io::Write, panic, path::{PathBuf, Path}};
     use crate::config;
+    use std::{
+        backtrace::Backtrace,
+        fs::File,
+        io::Write,
+        panic,
+        path::{Path, PathBuf},
+    };
 
     let log_path = config::util::config_path();
     let log_path = log_path
-        .and_then(|path| {
-            path.parent().map(Path::to_path_buf)
-        })
+        .and_then(|path| path.parent().map(Path::to_path_buf))
         .map(|path| path.join("pyonji.log"))
         .unwrap_or(PathBuf::from(LOG_FILE));
 
@@ -58,7 +62,9 @@ pub struct TracingLogSubscriber {
 
 impl TracingLogSubscriber {
     pub fn new(emitter: &LogEmitter) -> Self {
-        Self{ tx: emitter.tx.clone() }
+        Self {
+            tx: emitter.tx.clone(),
+        }
     }
 }
 
@@ -70,7 +76,10 @@ pub struct ChannelWriter {
 impl io::Write for ChannelWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let line = String::from_utf8_lossy(buf).trim_end().to_string();
-        let _ = self.tx.force_send(LogEvent { level: self.level, line });
+        let _ = self.tx.force_send(LogEvent {
+            level: self.level,
+            line,
+        });
         Ok(buf.len())
     }
 
@@ -83,11 +92,17 @@ impl<'a> MakeWriter<'a> for TracingLogSubscriber {
     type Writer = ChannelWriter;
 
     fn make_writer(&'a self) -> Self::Writer {
-        ChannelWriter { tx: self.tx.clone(), level: tracing::Level::INFO }
+        ChannelWriter {
+            tx: self.tx.clone(),
+            level: tracing::Level::INFO,
+        }
     }
 
     fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> Self::Writer {
-        ChannelWriter { tx: self.tx.clone(), level: *meta.level() }
+        ChannelWriter {
+            tx: self.tx.clone(),
+            level: *meta.level(),
+        }
     }
 }
 
@@ -125,7 +140,9 @@ fn callsite_cache() -> &'static std::sync::Mutex<
     std::collections::HashMap<(&'static str, u32, bool), &'static CallerCallsite>,
 > {
     static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<(&'static str, u32, bool), &'static CallerCallsite>>,
+        std::sync::Mutex<
+            std::collections::HashMap<(&'static str, u32, bool), &'static CallerCallsite>,
+        >,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
@@ -142,10 +159,7 @@ fn target_for_caller(file: &'static str) -> &'static str {
         .and_then(|p| p.strip_prefix(['/', '\\']))
     {
         Some(p) => p.strip_prefix("src/"),
-        None => file
-            .strip_prefix("./")
-            .unwrap_or(file)
-            .strip_prefix("src/"),
+        None => file.strip_prefix("./").unwrap_or(file).strip_prefix("src/"),
     }
     .and_then(|p| p.strip_suffix(".rs"));
     let Some(rel) = rel else {
@@ -298,7 +312,11 @@ mod tests {
     }
 
     impl tracing_core::field::Visit for MessageVisitor {
-        fn record_debug(&mut self, field: &tracing_core::field::Field, value: &dyn std::fmt::Debug) {
+        fn record_debug(
+            &mut self,
+            field: &tracing_core::field::Field,
+            value: &dyn std::fmt::Debug,
+        ) {
             if field.name() == "message" {
                 self.message = Some(format!("{value:?}"));
             }
@@ -318,12 +336,7 @@ mod tests {
                 tracing_core::span::Id::from_u64(1)
             }
             fn record(&self, _: &tracing_core::span::Id, _: &tracing_core::span::Record<'_>) {}
-            fn record_follows_from(
-                &self,
-                _: &tracing_core::span::Id,
-                _: &tracing_core::span::Id,
-            ) {
-            }
+            fn record_follows_from(&self, _: &tracing_core::span::Id, _: &tracing_core::span::Id) {}
             fn event(&self, event: &Event<'_>) {
                 let mut visitor = MessageVisitor::default();
                 event.record(&mut visitor);
@@ -355,10 +368,24 @@ mod tests {
             // Attributed to the caller (this test in src/logging.rs), not to the
             // helper's own module path alone: target derives from the caller file.
             assert_eq!(ev.target, "pyonji::logging");
-            assert!(ev.file.as_deref().is_some_and(|f| f.ends_with("src/logging.rs")), "file: {:?}", ev.file);
-            assert_eq!(ev.line, Some(call_line + 1), "event line should be the .log_msg() call");
+            assert!(
+                ev.file
+                    .as_deref()
+                    .is_some_and(|f| f.ends_with("src/logging.rs")),
+                "file: {:?}",
+                ev.file
+            );
+            assert_eq!(
+                ev.line,
+                Some(call_line + 1),
+                "event line should be the .log_msg() call"
+            );
             assert!(ev.message.contains("demo boom"), "message: {}", ev.message);
-            assert!(ev.message.contains("demo context"), "message: {}", ev.message);
+            assert!(
+                ev.message.contains("demo context"),
+                "message: {}",
+                ev.message
+            );
         }
 
         // Same for the warn variants.
@@ -369,6 +396,10 @@ mod tests {
         let guard = events.lock().unwrap();
         assert_eq!(guard.len(), 2, "expected error + warn events");
         assert_eq!(guard[1].level, tracing_core::Level::WARN);
-        assert!(guard[1].message.contains("demo warn"), "message: {}", guard[1].message);
+        assert!(
+            guard[1].message.contains("demo warn"),
+            "message: {}",
+            guard[1].message
+        );
     }
 }

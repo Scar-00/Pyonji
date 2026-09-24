@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+use crate::{Next, Prev, Submit};
 use crate::{PyTheme as _, Pyonji, terminal::SessionId, util};
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_base::*;
@@ -8,7 +9,6 @@ use gpui_component::{
     input::{Input, InputState},
     separator::Separator,
 };
-use crate::{Next, Prev, Submit};
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([

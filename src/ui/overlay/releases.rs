@@ -1,17 +1,23 @@
 use std::{collections::HashMap, io::Write as _};
 
+use crate::{Next, Prev, Submit};
 use crate::{PushError, PyTheme as _, Pyonji};
 use anyhow::Context as _;
 use async_compat::CompatExt;
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_base::{Disableable, ScrollbarAxis, StyledExt as _, h_flex, v_flex};
 use gpui_component::{
-    Icon, IconName, Sizable, button::{Button, ButtonVariants}, input::{Input, InputEvent, InputState}, label::Label, scroll::ScrollableElement, spinner::Spinner, text::TextView
+    Icon, IconName, Sizable,
+    button::{Button, ButtonVariants},
+    input::{Input, InputEvent, InputState},
+    label::Label,
+    scroll::ScrollableElement,
+    spinner::Spinner,
+    text::TextView,
 };
 use reqwest::Client;
 use self_update::{Release, backends::github};
 use smol::stream::StreamExt as _;
-use crate::{Next, Prev, Submit};
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -69,14 +75,21 @@ impl ReleasesView {
             let list = github::ReleaseList::configure()
                 .repo_owner("Scar-00")
                 .repo_name("Pyonji")
-                .build().inspect_err(|e| {
+                .build()
+                .inspect_err(|e| {
                     _ = cx.update(|window, cx| {
-                        window.dispatch_action(Box::new(PushError::new(format!("failed to build release list: {e}"))), cx);
+                        window.dispatch_action(
+                            Box::new(PushError::new(format!("failed to build release list: {e}"))),
+                            cx,
+                        );
                     });
                 })?;
             let releases = list.fetch_async().compat().await.inspect_err(|e| {
                 _ = cx.update(|window, cx| {
-                    window.dispatch_action(Box::new(PushError::new(format!("failed to fetch release list: {e}"))), cx);
+                    window.dispatch_action(
+                        Box::new(PushError::new(format!("failed to fetch release list: {e}"))),
+                        cx,
+                    );
                 });
             })?;
             _ = this.update(cx, |this, cx| {
@@ -101,8 +114,7 @@ impl ReleasesView {
                 query.is_empty()
                     || r.version().to_lowercase().contains(&query)
                     || r.name().to_lowercase().contains(&query)
-                    || r.body()
-                        .is_some_and(|b| b.to_lowercase().contains(&query))
+                    || r.body().is_some_and(|b| b.to_lowercase().contains(&query))
             })
             .map(|(ix, _)| ix)
             .collect()
@@ -116,38 +128,30 @@ impl ReleasesView {
         cx.notify();
     }
 
-    fn on_select_next(
-        &mut self,
-        _: &Next,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_select_next(&mut self, _: &Next, _: &mut Window, cx: &mut Context<Self>) {
         let visible = self.filtered(cx);
         if visible.is_empty() {
             return;
         }
-        let next = match self.selected.and_then(|s| {
-            visible.iter().position(|&ix| ix == s)
-        }) {
+        let next = match self
+            .selected
+            .and_then(|s| visible.iter().position(|&ix| ix == s))
+        {
             Some(pos) => visible[(pos + 1).min(visible.len() - 1)],
             None => visible[0],
         };
         self.select(Some(next), cx);
     }
 
-    fn on_select_prev(
-        &mut self,
-        _: &Prev,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_select_prev(&mut self, _: &Prev, _: &mut Window, cx: &mut Context<Self>) {
         let visible = self.filtered(cx);
         if visible.is_empty() {
             return;
         }
-        let prev = match self.selected.and_then(|s| {
-            visible.iter().position(|&ix| ix == s)
-        }) {
+        let prev = match self
+            .selected
+            .and_then(|s| visible.iter().position(|&ix| ix == s))
+        {
             Some(pos) => visible[pos.saturating_sub(1)],
             None => visible[visible.len() - 1],
         };
@@ -156,12 +160,7 @@ impl ReleasesView {
 
     fn on_confirm(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.selected else { return };
-        let Some(release) = self
-            .releases
-            .as_ref()
-            .and_then(|r| r.get(ix))
-            .cloned()
-        else {
+        let Some(release) = self.releases.as_ref().and_then(|r| r.get(ix)).cloned() else {
             return;
         };
 
@@ -181,7 +180,11 @@ impl ReleasesView {
         .detach();
     }
 
-    async fn download_self(_: WeakEntity<Self>, url: String, cx: &mut AsyncWindowContext) -> Result<()> {
+    async fn download_self(
+        _: WeakEntity<Self>,
+        url: String,
+        cx: &mut AsyncWindowContext,
+    ) -> Result<()> {
         let client = Client::new();
         let res = client
             .get(url)
@@ -235,7 +238,7 @@ impl ReleasesView {
                         h_flex()
                             .gap_2()
                             .items_center()
-                            .child(Label::new("Releases").font_semibold())
+                            .child(Label::new("Releases").font_semibold()),
                     )
                     .child(
                         Button::new("reload")
@@ -255,12 +258,7 @@ impl ReleasesView {
             )
     }
 
-    fn render_release(
-        &self,
-        ix: usize,
-        release: &Release,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
+    fn render_release(&self, ix: usize, release: &Release, cx: &Context<Self>) -> impl IntoElement {
         let selected = self.selected == Some(ix);
         let is_latest = ix == 0;
         let theme = cx.theme();
@@ -278,7 +276,9 @@ impl ReleasesView {
             .rounded_md()
             .cursor_pointer()
             .when(selected, |this| this.bg(theme.selected.opacity(0.15)))
-            .when(!selected, |this| this.hover(|s| s.bg(theme.selected.opacity(0.15))))
+            .when(!selected, |this| {
+                this.hover(|s| s.bg(theme.selected.opacity(0.15)))
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select(Some(ix), cx);
             }))
@@ -309,23 +309,13 @@ impl ReleasesView {
                                         )
                                     }),
                             )
-                            .child(
-                                Label::new(release.date())
-                                    .text_xs()
-                                    .text_color(theme.text),
-                            ),
+                            .child(Label::new(release.date()).text_xs().text_color(theme.text)),
                     )
                     .when(release.name() != release.version(), |this| {
-                        this.child(
-                            Label::new(release.name())
-                                .text_sm()
-                                .text_color(theme.text),
-                        )
+                        this.child(Label::new(release.name()).text_sm().text_color(theme.text))
                     })
                     .when_some(summary, |this, s| {
-                        this.child(
-                            TextView::markdown(("summary", ix), s)
-                        )
+                        this.child(TextView::markdown(("summary", ix), s))
                     })
                     .child(
                         Label::new(format!(
@@ -349,10 +339,7 @@ impl ReleasesView {
                 .justify_center()
                 .gap_2()
                 .child(Spinner::new())
-                .child(
-                    Label::new("Loading releases…")
-                        .text_color(theme.text),
-                )
+                .child(Label::new("Loading releases…").text_color(theme.text))
                 .into_any_element();
         };
 
@@ -369,11 +356,7 @@ impl ReleasesView {
                 .items_center()
                 .justify_center()
                 .gap_2()
-                .child(
-                    Icon::new(IconName::Inbox)
-                        .size_8()
-                        .text_color(theme.text),
-                )
+                .child(Icon::new(IconName::Inbox).size_8().text_color(theme.text))
                 .child(Label::new(msg).text_color(theme.text))
                 .into_any_element();
         }
@@ -396,9 +379,7 @@ impl ReleasesView {
     }
 
     fn render_footer(&self, cx: &Context<Self>) -> impl IntoElement {
-        let selected = self
-            .selected
-            .and_then(|ix| self.releases.as_ref()?.get(ix));
+        let selected = self.selected.and_then(|ix| self.releases.as_ref()?.get(ix));
 
         h_flex()
             .p_3()
@@ -411,7 +392,7 @@ impl ReleasesView {
                     Some(r) => format!("Selected: v{}", r.version()),
                     None => "Select a release".to_string(),
                 })
-                .text_sm()
+                .text_sm(),
             )
             .child(
                 Button::new("install")
@@ -419,9 +400,9 @@ impl ReleasesView {
                     .small()
                     .label("Install")
                     .disabled(selected.is_none())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.on_confirm(&Submit, window, cx)
-                    })),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.on_confirm(&Submit, window, cx)),
+                    ),
             )
     }
 }

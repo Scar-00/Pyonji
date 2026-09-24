@@ -1,7 +1,5 @@
 ---@meta
 
-require('lua.keybind');
-
 ---@class SshSession
 ---@field name string
 ---@field user_name ?string

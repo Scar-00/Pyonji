@@ -3,7 +3,7 @@ use crate::renderer::{Pane as RendererPane, *};
 use crate::terminal::{Divider, PaneGeometry, PanePathStep, SessionId, SplitDirection};
 
 use gpui::*;
-use gpui_base::{ElementExt as _};
+use gpui_base::ElementExt as _;
 use gpui_wgpu::{WgpuContextHandle, WgpuRenderTarget};
 
 pub struct Terminal {
@@ -315,8 +315,6 @@ impl Render for Terminal {
     }
 }
 
-
-
 pub fn hit_divider(
     dividers: &[Divider],
     x: f32,
@@ -331,9 +329,7 @@ pub fn hit_divider(
                 let line_x = cell_width * f32::from(divider.x);
                 let min_y = line_height * f32::from(divider.y);
                 let max_y = line_height * f32::from(divider.y + divider.rows);
-                if (x - line_x).abs() <= HIT_SLOP
-                    && y >= min_y - HIT_SLOP
-                    && y <= max_y + HIT_SLOP
+                if (x - line_x).abs() <= HIT_SLOP && y >= min_y - HIT_SLOP && y <= max_y + HIT_SLOP
                 {
                     return Some(divider.clone());
                 }
@@ -342,9 +338,7 @@ pub fn hit_divider(
                 let line_y = line_height * f32::from(divider.y);
                 let min_x = cell_width * f32::from(divider.x);
                 let max_x = cell_width * f32::from(divider.x + divider.cols);
-                if (y - line_y).abs() <= HIT_SLOP
-                    && x >= min_x - HIT_SLOP
-                    && x <= max_x + HIT_SLOP
+                if (y - line_y).abs() <= HIT_SLOP && x >= min_x - HIT_SLOP && x <= max_x + HIT_SLOP
                 {
                     return Some(divider.clone());
                 }

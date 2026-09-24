@@ -5,14 +5,12 @@ use std::{
 };
 
 use gpui::{
-    actions, div, prelude::*, App, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, KeyBinding, ScrollHandle, Window,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, ScrollHandle, Window,
+    actions, div, prelude::*,
 };
 use gpui_base::input::{Input, InputEvent, InputState};
 
-use crate::{
-    Next, Prev, Submit, PyTheme
-};
+use crate::{Next, Prev, PyTheme, Submit};
 
 // Two extra actions this component needs on top of Next/Prev/Submit.
 actions!(file_opener, [Parent, Cancel]);
@@ -62,15 +60,9 @@ pub struct FileOpener {
 impl EventEmitter<FileOpenerEvent> for FileOpener {}
 
 impl FileOpener {
-    pub fn new(
-        start_dir: impl Into<PathBuf>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(start_dir: impl Into<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let start_dir: PathBuf = start_dir.into();
-        let path_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Type a path…")
-        });
+        let path_input = cx.new(|cx| InputState::new(window, cx).placeholder("Type a path…"));
 
         cx.subscribe(&path_input, |this, _, ev: &InputEvent, cx| {
             if matches!(ev, InputEvent::Change) {
@@ -114,7 +106,8 @@ impl FileOpener {
 
     fn expand_tilde(p: &str) -> PathBuf {
         if let Some(rest) = p.strip_prefix('~')
-        && let Some(home) = std::env::var_os("HOME") {
+            && let Some(home) = std::env::var_os("HOME")
+        {
             return PathBuf::from(home).join(rest.trim_start_matches('/'));
         }
         PathBuf::from(p)
@@ -143,7 +136,8 @@ impl FileOpener {
         if !s.ends_with('/') {
             s.push('/');
         }
-        self.path_input.update(cx, |state, cx| state.set_value(s, window, cx));
+        self.path_input
+            .update(cx, |state, cx| state.set_value(s, window, cx));
         // set_value may or may not emit Change depending on version; be safe.
         self.on_input_changed(cx);
     }
@@ -187,16 +181,16 @@ impl FileOpener {
     fn visible(&self, cx: &App) -> Vec<usize> {
         let (_, frag) = self.parse_input(cx);
         let frag = frag.to_lowercase();
-        let Some(entries) = &self.entries else { return vec![] };
+        let Some(entries) = &self.entries else {
+            return vec![];
+        };
 
         entries
             .iter()
             .enumerate()
             .filter(|(_, e)| self.show_hidden || !e.name.starts_with('.'))
             .filter(|(_, e)| !self.directories_only || e.is_dir)
-            .filter(|(_, e)| {
-                frag.is_empty() || e.name.to_lowercase().contains(&frag)
-            })
+            .filter(|(_, e)| frag.is_empty() || e.name.to_lowercase().contains(&frag))
             .map(|(ix, _)| ix)
             .collect()
     }
@@ -210,8 +204,7 @@ impl FileOpener {
     }
 
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(entry) = self.entries.as_ref().and_then(|e| e.get(ix)).cloned()
-        else {
+        let Some(entry) = self.entries.as_ref().and_then(|e| e.get(ix)).cloned() else {
             return;
         };
         if entry.is_dir {
@@ -225,7 +218,9 @@ impl FileOpener {
 
     fn on_next(&mut self, _: &Next, _: &mut Window, cx: &mut Context<Self>) {
         let vis = self.visible(cx);
-        if vis.is_empty() { return; }
+        if vis.is_empty() {
+            return;
+        }
         let next = match self.selected.and_then(|s| vis.iter().position(|&i| i == s)) {
             Some(pos) => vis[(pos + 1) % vis.len()],
             None => vis[0],
@@ -235,7 +230,9 @@ impl FileOpener {
 
     fn on_prev(&mut self, _: &Prev, _: &mut Window, cx: &mut Context<Self>) {
         let vis = self.visible(cx);
-        if vis.is_empty() { return; }
+        if vis.is_empty() {
+            return;
+        }
         let prev = match self.selected.and_then(|s| vis.iter().position(|&i| i == s)) {
             Some(pos) => vis[(pos + vis.len() - 1) % vis.len()],
             None => vis[vis.len() - 1],
@@ -300,23 +297,29 @@ impl FileOpener {
             .gap_1()
             .text_xs()
             .text_color(t.text_muted)
-            .children(parts.into_iter().enumerate().flat_map(|(i, (label, path))| {
-                let is_root = label == "/";
-                let crumb = div()
-                    .id(("crumb", i))
-                    .px_1()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(t.hovered).text_color(t.text))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.set_input_path(&path, window, cx);
-                    }))
-                    .child(label);
-                let sep = (!is_root && i > 0)
-                    .then(|| div().text_color(t.text_disabled).child("/"));
-                sep.into_iter().map(IntoElement::into_any_element)
-                    .chain(std::iter::once(crumb.into_any_element()))
-            }))
+            .children(
+                parts
+                    .into_iter()
+                    .enumerate()
+                    .flat_map(|(i, (label, path))| {
+                        let is_root = label == "/";
+                        let crumb = div()
+                            .id(("crumb", i))
+                            .px_1()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(t.hovered).text_color(t.text))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.set_input_path(&path, window, cx);
+                            }))
+                            .child(label);
+                        let sep = (!is_root && i > 0)
+                            .then(|| div().text_color(t.text_disabled).child("/"));
+                        sep.into_iter()
+                            .map(IntoElement::into_any_element)
+                            .chain(std::iter::once(crumb.into_any_element()))
+                    }),
+            )
     }
 
     fn render_input(&self, window: &mut Window, cx: &Context<Self>) -> impl IntoElement {
@@ -351,7 +354,11 @@ impl FileOpener {
             .rounded_sm()
             .cursor_pointer()
             .border_l_2()
-            .border_color(if selected { t.selected_border } else { t.unselected_border })
+            .border_color(if selected {
+                t.selected_border
+            } else {
+                t.unselected_border
+            })
             .bg(if selected { t.selected } else { t.unselected })
             .when(!selected, |d| d.hover(|s| s.bg(t.hovered)))
             .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
@@ -377,14 +384,22 @@ impl FileOpener {
                     .text_sm()
                     .text_color(t.text)
                     .when(e.is_dir, |d| d.font_weight(gpui::FontWeight::MEDIUM))
-                    .child(if e.is_dir { format!("{}/", e.name) } else { e.name.clone() }),
+                    .child(if e.is_dir {
+                        format!("{}/", e.name)
+                    } else {
+                        e.name.clone()
+                    }),
             )
             // size
             .child(
                 div()
                     .text_xs()
                     .text_color(t.text_disabled)
-                    .child(if e.is_dir { String::new() } else { human_size(e.size) }),
+                    .child(if e.is_dir {
+                        String::new()
+                    } else {
+                        human_size(e.size)
+                    }),
             )
     }
 
@@ -422,7 +437,11 @@ impl FileOpener {
                 .justify_center()
                 .text_sm()
                 .text_color(t.text_muted)
-                .child(if entries.is_empty() { "Empty directory" } else { "No matches" })
+                .child(if entries.is_empty() {
+                    "Empty directory"
+                } else {
+                    "No matches"
+                })
                 .into_any_element();
         }
 
@@ -436,7 +455,10 @@ impl FileOpener {
             .p_1()
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
-            .children(vis.into_iter().map(|ix| self.render_entry(ix, &entries[ix], cx)))
+            .children(
+                vis.into_iter()
+                    .map(|ix| self.render_entry(ix, &entries[ix], cx)),
+            )
             .into_any_element()
     }
 
@@ -465,7 +487,11 @@ impl FileOpener {
                             .id("toggle-hidden")
                             .cursor_pointer()
                             .hover(|s| s.text_color(t.text))
-                            .text_color(if self.show_hidden { t.accent } else { t.text_muted })
+                            .text_color(if self.show_hidden {
+                                t.accent
+                            } else {
+                                t.text_muted
+                            })
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_hidden(cx)))
                             .child("hidden"),
                     )
@@ -527,8 +553,7 @@ fn read_dir_sorted(dir: &Path) -> io::Result<Vec<Entry>> {
         .filter_map(|e| e.ok())
         .map(|e| {
             let meta = e.metadata().ok();
-            let is_dir = meta.as_ref().is_some_and(|m| m.is_dir())
-                || e.path().is_dir(); // follow symlinks to dirs
+            let is_dir = meta.as_ref().is_some_and(|m| m.is_dir()) || e.path().is_dir(); // follow symlinks to dirs
             Entry {
                 name: e.file_name().to_string_lossy().to_string(),
                 path: e.path(),
@@ -555,5 +580,9 @@ fn human_size(bytes: u64) -> String {
         v /= 1024.0;
         i += 1;
     }
-    if i == 0 { format!("{bytes} B") } else { format!("{v:.1}{}", UNITS[i]) }
+    if i == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{v:.1}{}", UNITS[i])
+    }
 }

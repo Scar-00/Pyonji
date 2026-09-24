@@ -13,12 +13,13 @@
 
 mod assets;
 mod config;
+mod logging;
+mod lua_complete;
 mod pty;
 mod renderer;
 mod terminal;
 mod ui;
 mod util;
-mod logging;
 
 use assets::{GlobalAssets, PyonjiAsset, PyonjiAssetsSource};
 use pty::Event;
@@ -89,7 +90,7 @@ fn main() {
                 .with_file(false)
                 .with_level(false)
                 .with_timer(time::ChronoLocal::new("%H:%M:%S".into()))
-                .with_writer(TracingLogSubscriber::new(&log_emitter))
+                .with_writer(TracingLogSubscriber::new(&log_emitter)),
         )
         .with(tracing_subscriber::filter::LevelFilter::WARN)
         .init();
@@ -101,25 +102,27 @@ fn main() {
         ]))
         .run(|cx| {
             gpui_component::init(cx);
+            gpui_tokio::init(cx);
             Theme::init(cx);
 
             let window_options = Pyonji::window_options(cx);
             cx.open_window(window_options, |window, cx| {
                 gpui_component::Theme::change(ThemeMode::Dark, Some(window), cx);
 
-                window.spawn(cx, async move |cx| {
-                    while let Some(ev) = log_emitter.recv().await {
-                        _ = cx.update(|window, cx| {
-                            let action = match ev.level {
-                                Level::ERROR => PushError::new(ev.line).boxed_clone(),
-                                Level::WARN => PushWarning::new(ev.line).boxed_clone(),
-                                _ => PushInfo::new(ev.line).boxed_clone(),
-                            };
-                            window.dispatch_action(action, cx);
-                        })
-                    }
-                })
-                .detach();
+                window
+                    .spawn(cx, async move |cx| {
+                        while let Some(ev) = log_emitter.recv().await {
+                            _ = cx.update(|window, cx| {
+                                let action = match ev.level {
+                                    Level::ERROR => PushError::new(ev.line).boxed_clone(),
+                                    Level::WARN => PushWarning::new(ev.line).boxed_clone(),
+                                    _ => PushInfo::new(ev.line).boxed_clone(),
+                                };
+                                window.dispatch_action(action, cx);
+                            })
+                        }
+                    })
+                    .detach();
 
                 let py = cx.new(|cx| Pyonji::new(window, cx));
                 cx.new(|cx| Root::new(py, window, cx))
@@ -173,9 +176,7 @@ impl Pyonji {
     fn init(cx: &mut App) {
         use ui::overlay;
 
-        cx.bind_keys([
-            KeyBinding::new("ctrl-shift-v", ClipboardPaste, None),
-        ]);
+        cx.bind_keys([KeyBinding::new("ctrl-shift-v", ClipboardPaste, None)]);
 
         ui::status_bar::init(cx);
         overlay::sessions::init(cx);
@@ -291,37 +292,36 @@ impl Pyonji {
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 if let Ok(event) = rx.recv().await {
-                    _ = this
-                        .update_in(cx, |this, window, cx| match event {
-                            Event::Closed(id) => {
-                                if this.close_session(id, cx) && this.session_manager.is_empty() {
-                                    cx.quit();
-                                }
+                    _ = this.update_in(cx, |this, window, cx| match event {
+                        Event::Closed(id) => {
+                            if this.close_session(id, cx) && this.session_manager.is_empty() {
+                                cx.quit();
+                            }
+                            cx.notify();
+                        }
+                        Event::Data(id, data) => {
+                            this.session_manager.update_session(id, &data);
+                            cx.notify();
+                        }
+                        Event::ProgramChanged((id, title)) => {
+                            if let Some(session) = this.session_manager.session_mut(id) {
+                                session.set_title(title);
                                 cx.notify();
                             }
-                            Event::Data(id, data) => {
-                                this.session_manager.update_session(id, &data);
-                                cx.notify();
+                        }
+                        Event::ConfigChanged => {
+                            if let Err(e) = config::load(this, window, cx) {
+                                window.dispatch_action(Box::new(PushError::new(e)), cx);
                             }
-                            Event::ProgramChanged((id, title)) => {
-                                if let Some(session) = this.session_manager.session_mut(id) {
-                                    session.set_title(title);
-                                    cx.notify();
-                                }
+                            cx.notify();
+                        }
+                        Event::LuaPrint(text) => {
+                            let text = text.replace(['\r'], " ");
+                            if !text.is_empty() {
+                                window.dispatch_action(Box::new(PushLuaPrint::new(text)), cx);
                             }
-                            Event::ConfigChanged => {
-                                if let Err(e) = config::load(this, window, cx) {
-                                    window.dispatch_action(Box::new(PushError::new(e)), cx);
-                                }
-                                cx.notify();
-                            }
-                            Event::LuaPrint(text) => {
-                                let text = text.replace(['\r'], " ");
-                                if !text.is_empty() {
-                                    window.dispatch_action(Box::new(PushLuaPrint::new(text)), cx);
-                                }
-                            }
-                        });
+                        }
+                    });
                 }
             }
         })
@@ -329,25 +329,24 @@ impl Pyonji {
 
     fn spawn_inital_session(window: &mut Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| {
-            _ = this
-                .update_in(cx, |this, window, cx| {
-                    if let Err(e) = config::load(this, window, cx) {
-                        window.dispatch_action(Box::new(PushError::new(e)), cx);
+            _ = this.update_in(cx, |this, window, cx| {
+                if let Err(e) = config::load(this, window, cx) {
+                    window.dispatch_action(Box::new(PushError::new(e)), cx);
+                }
+                let res = this
+                    .session_manager
+                    .create_session(20, 80, this.cli.path.as_deref());
+                match res {
+                    Ok(id) => {
+                        this.tabs[0] = Some(TerminalTab::new(id));
+                        this.current_tab = Some(0);
+                        cx.notify();
                     }
-                    let res = this
-                        .session_manager
-                        .create_session(20, 80, this.cli.path.as_deref());
-                    match res {
-                        Ok(id) => {
-                            this.tabs[0] = Some(TerminalTab::new(id));
-                            this.current_tab = Some(0);
-                            cx.notify();
-                        }
-                        Err(e) => {
-                            window.dispatch_action(Box::new(PushError::new(e.to_string())), cx);
-                        }
+                    Err(e) => {
+                        window.dispatch_action(Box::new(PushError::new(e.to_string())), cx);
                     }
-                });
+                }
+            });
         })
         .detach()
     }
@@ -507,7 +506,13 @@ impl Pyonji {
         }
     }
 
-    pub fn create_session(&mut self, dir: Option<&Path>, tab: Option<usize>, parent: Option<SessionId>, cx: &mut Context<Self>) -> Result<SessionId> {
+    pub fn create_session(
+        &mut self,
+        dir: Option<&Path>,
+        tab: Option<usize>,
+        parent: Option<SessionId>,
+        cx: &mut Context<Self>,
+    ) -> Result<SessionId> {
         let slot = match tab.or(self.current_tab) {
             Some(slot) if slot < self.tabs.len() => slot,
             _ => return Err(anyhow!("tab index out of range")),
@@ -524,10 +529,12 @@ impl Pyonji {
         } else {
             let placed = self.tabs[slot]
                 .as_mut()
-                .map(|tab| match parent.filter(|id| tab.sessions().contains(id)) {
-                    Some(at) => tab.split_on(at, SplitDirection::Vertical, id),
-                    None => tab.split_active(SplitDirection::Vertical, id),
-                })
+                .map(
+                    |tab| match parent.filter(|id| tab.sessions().contains(id)) {
+                        Some(at) => tab.split_on(at, SplitDirection::Vertical, id),
+                        None => tab.split_active(SplitDirection::Vertical, id),
+                    },
+                )
                 .unwrap_or(false);
             if !placed {
                 self.session_manager.remove_session(id);
@@ -636,7 +643,7 @@ impl Pyonji {
         &mut self,
         direction: SplitDirection,
         delta_first: i16,
-        cx: &mut Context<Self>
+        cx: &mut Context<Self>,
     ) {
         let (rows, cols) = {
             let terminal = self.terminal.read(cx);
@@ -763,8 +770,9 @@ impl Render for Pyonji {
                             }))
                             .on_action(cx.listener(|this, _: &ClipboardPaste, _, cx| {
                                 if let Some(session) = this.active_session()
-                                && let Some(item) = cx.read_from_clipboard()
-                                && let Some(text) = item.text() {
+                                    && let Some(item) = cx.read_from_clipboard()
+                                    && let Some(text) = item.text()
+                                {
                                     this.session_manager.send_text(session, &text);
                                 }
                             }))
@@ -832,7 +840,12 @@ impl Pyonji {
         }
     }
 
-    fn handle_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.focus_handle.is_focused(window) {
             window.focus(&self.focus_handle, cx);
         }
@@ -871,9 +884,10 @@ impl Pyonji {
     }
 
     fn handle_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.terminal.update(cx, |this, _| {
-            this.divider_drag.take().is_some()
-        }) {
+        if self
+            .terminal
+            .update(cx, |this, _| this.divider_drag.take().is_some())
+        {
             return;
         }
         let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
@@ -887,7 +901,12 @@ impl Pyonji {
         }
     }
 
-    fn handle_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn handle_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if event.pressed_button.is_none() {
             return;
         }
