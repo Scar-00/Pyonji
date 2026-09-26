@@ -1,22 +1,14 @@
 use std::ops::Range;
 
-use crate::{Next, Prev, Submit};
 use crate::{PyTheme as _, Pyonji, terminal::SessionId, util};
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_base::*;
 use gpui_component::{
     IconName, WindowExt,
     input::{Input, InputState},
-    separator::Separator,
 };
 
-pub fn init(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("enter", Submit, Some(SessionsView::CONTEXT)),
-        KeyBinding::new("up", Prev, Some(SessionsView::CONTEXT)),
-        KeyBinding::new("down", Next, Some(SessionsView::CONTEXT)),
-    ]);
-}
+pub fn init(_: &mut App) {}
 
 pub struct SessionsView {
     pyonji: WeakEntity<Pyonji>,
@@ -27,8 +19,6 @@ pub struct SessionsView {
 }
 
 impl SessionsView {
-    pub const CONTEXT: &str = "SessionsView";
-
     pub fn new(py: &WeakEntity<Pyonji>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions…"));
         let focus_handle = cx.focus_handle();
@@ -46,6 +36,32 @@ impl SessionsView {
         }
     }
 
+    fn on_next(&mut self, sessions_len: usize, cx: &mut Context<Self>) {
+        if sessions_len == 0 {
+            self.selected = None;
+            cx.notify();
+            return;
+        }
+        self.selected = Some(match self.selected {
+            None => 0,
+            Some(index) => (index + 1) % sessions_len,
+        });
+        cx.notify();
+    }
+
+    fn on_prev(&mut self, sessions_len: usize, cx: &mut Context<Self>) {
+        if sessions_len == 0 {
+            self.selected = None;
+            cx.notify();
+            return;
+        }
+        self.selected = Some(match self.selected {
+            None => sessions_len - 1,
+            Some(index) => (index + sessions_len - 1) % sessions_len,
+        });
+        cx.notify();
+    }
+
     fn on_submit(
         &mut self,
         tab: usize,
@@ -53,7 +69,7 @@ impl SessionsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        _ = self.pyonji.update(cx, |this, cx| {
+        let _ = self.pyonji.update(cx, |this, cx| {
             this.switch_tab(tab, cx);
             if let Some(tab) = &mut this.tabs[tab] {
                 tab.set_active_session(id);
@@ -72,35 +88,63 @@ impl SessionsView {
         let theme = cx.theme();
         let select_color = theme.selected;
         Button::new(format!("{tab}-{sid}"))
-            .border_1()
+            .border_l_2()
             .border_color(if selected {
-                theme.selected_border.opacity(0.15)
+                theme.selected_border
             } else {
-                theme.unselected_border.opacity(0.15)
+                theme.unselected_border
             })
             .w_full()
-            .h_16()
+            .h_12()
+            .rounded_md()
             .map(|this| {
                 if selected {
                     this.bg(select_color)
                 } else {
-                    this.bg(theme.surface.opacity(0.15))
+                    this.bg(theme.surface.opacity(0.55))
                 }
             })
-            .shadow_md()
             .child(
-                v_flex()
+                h_flex()
                     .size_full()
+                    .px_3()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                h_flex()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .text_color(theme.text)
+                                    .truncate()
+                                    .child(title),
+                            )
+                            .child(
+                                h_flex()
+                                    .text_xs()
+                                    .text_color(theme.text_muted)
+                                    .child(format!("Session {}", sid)),
+                            ),
+                    )
                     .child(
                         h_flex()
-                            .px_3()
-                            .size_full()
-                            .justify_between()
-                            .child(title)
-                            .child(format!("Tab: {tab}")),
-                    )
-                    .child(Separator::horizontal().h_0p5().w_full())
-                    .child(h_flex().size_full()),
+                            .px_2()
+                            .py_1()
+                            .items_center()
+                            .rounded_sm()
+                            .bg(theme.background.opacity(0.55))
+                            .text_xs()
+                            .text_color(if selected {
+                                theme.accent
+                            } else {
+                                theme.text_muted
+                            })
+                            .child(format!("Tab {}", tab + 1)),
+                    ),
             )
             .hover(|style| style.cursor_pointer())
             .on_click(
@@ -139,53 +183,79 @@ impl Render for SessionsView {
         v_flex()
             .track_focus(&self.focus_handle)
             .size_full()
-            .on_action(cx.listener({
+            .on_key_down({
                 let sessions = sessions.clone();
-                move |this, _: &Submit, window, cx| {
-                    let Some(index) = this.selected else {
+                cx.listener(move |this, event: &KeyDownEvent, window: &mut Window, cx| {
+                    if event.is_held {
                         return;
-                    };
-                    let (tab, id, _) = sessions[index];
-                    Self::on_submit(this, tab, id, window, cx);
-                }
-            }))
-            .on_action(cx.listener(move |this, _: &Next, _, cx| {
-                if sessions_len == 0 {
-                    this.selected = None;
-                    return;
-                }
-                let next = match this.selected {
-                    None => 0,
-                    Some(index) => (index + 1) % sessions_len,
-                };
-                this.selected = Some(next);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &Prev, _, cx| {
-                if sessions_len == 0 {
-                    this.selected = None;
-                    return;
-                }
-                let prev = match this.selected {
-                    None => sessions_len - 1,
-                    Some(0) => sessions_len - 1,
-                    Some(index) => (index - 1) % sessions_len,
-                };
-                this.selected = Some(prev);
-                cx.notify();
-            }))
+                    }
+                    match event.keystroke.key.as_str() {
+                        "enter" => {
+                            if let Some(index) = this.selected
+                                && let Some((tab, id, _)) = sessions.get(index)
+                            {
+                                Self::on_submit(this, *tab, *id, window, cx);
+                            }
+                        }
+                        "down" => this.on_next(sessions_len, cx),
+                        "up" => this.on_prev(sessions_len, cx),
+                        _ => {}
+                    }
+                })
+            })
             .child(
-                h_flex().w_full().py_1().child(
-                    Input::new(&self.search_input)
-                        .prefix(IconName::Search)
-                        .w_full()
-                        .bordered(false)
-                        .appearance(false)
-                        .bg(cx.theme().background.opacity(0.15)),
-                ),
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .px_3()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .h(px(40.0))
+                            .px_3()
+                            .items_center()
+                            .rounded_md()
+                            .bg(cx.theme().surface)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .child(
+                                Input::new(&self.search_input)
+                                    .prefix(IconName::Search)
+                                    .flex_1()
+                                    .bordered(false)
+                                    .appearance(false),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .px_1()
+                            .child(
+                                h_flex()
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(cx.theme().text_muted)
+                                    .child("Sessions"),
+                            )
+                            .child(
+                                h_flex()
+                                    .text_xs()
+                                    .text_color(cx.theme().text_disabled)
+                                    .child(if sessions_len == 1 {
+                                        "1 session"
+                                    } else {
+                                        "multiple sessions"
+                                    }),
+                            ),
+                    ),
             )
             .child(
-                v_flex().flex_1().child(
+                v_flex().flex_1().px_2().pt_2().child(
                     uniform_list(
                         "sessions-list",
                         sessions.len(),
@@ -196,12 +266,13 @@ impl Render for SessionsView {
                                 .enumerate()
                                 .map(|(i, (tab, id, title))| {
                                     let selected = this.selected == Some(i + start);
-                                    h_flex()
-                                        .w_full()
-                                        .py_2()
-                                        .justify_center()
-                                        .items_center()
-                                        .child(Self::layout(*tab, title.clone(), *id, selected, cx))
+                                    h_flex().w_full().py_1().child(Self::layout(
+                                        *tab,
+                                        title.clone(),
+                                        *id,
+                                        selected,
+                                        cx,
+                                    ))
                                 })
                                 .collect()
                         }),

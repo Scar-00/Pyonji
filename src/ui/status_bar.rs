@@ -14,7 +14,7 @@ use crate::Next;
 use crate::Prev;
 use crate::PyTheme as _;
 use crate::Pyonji;
-use crate::lua_complete::LspClient;
+use crate::lua_complete::{LspClient, default_command};
 use crate::terminal::SessionId;
 use crate::util;
 
@@ -108,7 +108,7 @@ impl StatusBar {
 
     fn spawn_lsp(cx: &mut Context<Self>) {
         cx.spawn(async |this, cx| {
-            let path = "~/.local/share/nvim/mason/bin/lua-language-server";
+            let path = default_command();
             match LspClient::start(path, cx).compat().await {
                 Ok(client) => {
                     _ = this.update(cx, |this, cx| {

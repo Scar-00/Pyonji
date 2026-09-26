@@ -1212,23 +1212,23 @@ impl Theme {
             selected: Rgba::new(44.0 / 255.0, 44.0 / 255.0, 44.0 / 255.0, 1.0),
             unselected: Rgba::new(28.0 / 255.0, 28.0 / 255.0, 28.0 / 255.0, 1.0),
             hovered: Rgba::new(36.0 / 255.0, 36.0 / 255.0, 36.0 / 255.0, 1.0),
-            selected_border: Rgba::new(122.0 / 255.0, 162.0 / 255.0, 247.0 / 255.0, 1.0),
+            selected_border: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 1.0),
             unselected_border: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
 
             // Accent (one hue, used everywhere emphasis is needed)
-            accent: Rgba::new(122.0 / 255.0, 162.0 / 255.0, 247.0 / 255.0, 1.0),
-            accent_muted: Rgba::new(122.0 / 255.0, 162.0 / 255.0, 247.0 / 255.0, 0.25),
+            accent: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 1.0),
+            accent_muted: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 0.25),
 
             // Terminal-specific
             cursor: Rgba::new(220.0 / 255.0, 220.0 / 255.0, 220.0 / 255.0, 1.0),
             cursor_text: Rgba::new(24.0 / 255.0, 24.0 / 255.0, 24.0 / 255.0, 1.0),
-            selection: Rgba::new(122.0 / 255.0, 162.0 / 255.0, 247.0 / 255.0, 0.3),
+            selection: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 0.3),
             search_match: Rgba::new(224.0 / 255.0, 175.0 / 255.0, 104.0 / 255.0, 0.4),
             search_match_active: Rgba::new(224.0 / 255.0, 175.0 / 255.0, 104.0 / 255.0, 0.8),
             scrollbar: Rgba::new(255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0, 0.12),
             scrollbar_hover: Rgba::new(255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0, 0.25),
             split_divider: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
-            split_divider_active: Rgba::new(122.0 / 255.0, 162.0 / 255.0, 247.0 / 255.0, 1.0),
+            split_divider_active: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 1.0),
 
             // Semantic status (bell, exit codes, warnings, etc.)
             success: Rgba::new(158.0 / 255.0, 206.0 / 255.0, 106.0 / 255.0, 1.0),
@@ -1240,7 +1240,7 @@ impl Theme {
             overlay_backdrop: Rgba::new(0.0, 0.0, 0.0, 0.5),
             tooltip_background: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
             border: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
-            focus_ring: Rgba::new(122.0 / 255.0, 162.0 / 255.0, 247.0 / 255.0, 1.0),
+            focus_ring: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 1.0),
         }
     }
 }

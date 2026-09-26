@@ -75,8 +75,9 @@ local function open(path)
     if tab == nil then
         return;
     end
-    py:create_session(path, tab);
+    local session = py:create_session(path, tab);
     py:switch_tab(tab);
+    return session;
 end
 
 py:register("open", open);
@@ -107,7 +108,10 @@ py:bind('<ctrl-b> l', py.open_lua());
 py:bind('<ctrl-b> r', py.open_rename());
 py:bind('<ctrl-b> f', py.open_sessions());
 py:bind('<ctrl-b> o', function ()
-    open("/home/ahri/dev/core/");
+    local session = open("/home/ahri/dev/core/");
+    if session ~= nil then
+        py:write(session, "nvim core.h\r");
+    end
 end);
 
 for i = 1, 9 do

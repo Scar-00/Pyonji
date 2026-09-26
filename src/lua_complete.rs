@@ -16,7 +16,11 @@ use gpui::{AsyncApp, Task};
 use gpui_tokio::{JoinError, Tokio};
 use lsp_types::*;
 use smol::process::{Child, Command, Stdio};
-use std::{ffi::OsStr, ops::ControlFlow, path::Path};
+use std::{
+    ffi::OsStr,
+    ops::ControlFlow,
+    path::{Path, PathBuf},
+};
 use tower::ServiceBuilder;
 
 use crate::config;
@@ -37,9 +41,32 @@ struct ClientState {
 
 struct Stop;
 
+pub fn default_command() -> PathBuf {
+    if let Ok(path) = std::env::var("LUA_LANGUAGE_SERVER") {
+        return PathBuf::from(path);
+    }
+    if let Some(home) = dirs::home_dir() {
+        let candidates = [
+            home.join(".local/share/nvim/mason/bin/lua-language-server"),
+            home.join(".local/bin/lua-language-server"),
+            home.join("bin/lua-language-server"),
+        ];
+        if let Some(path) = candidates.into_iter().find(|path| path.exists()) {
+            return path;
+        }
+    }
+    PathBuf::from("lua-language-server")
+}
+
 impl LspClient {
     pub async fn start(cmd: impl AsRef<OsStr>, cx: &mut AsyncApp) -> Result<Self> {
-        let root_dir = Path::new("/home/ahri/.config/pyonji/").canonicalize()?;
+        let root_dir = config::util::config_path()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(|path| path.canonicalize())
+            .transpose()?
+            .or_else(|| std::env::current_dir().ok())
+            .ok_or_else(|| anyhow!("failed to resolve Pyonji config directory"))?;
 
         let (tx, _) = oneshot::channel();
 
@@ -110,7 +137,16 @@ impl LspClient {
             .await?;
         server.initialized(InitializedParams {})?;
 
-        let uri = Url::from_file_path("/home/ahri/.config/pyonji/init.lua")
+        let config_path = config::util::config_path()
+            .map(|path| {
+                if path.is_absolute() {
+                    path
+                } else {
+                    root_dir.join(path)
+                }
+            })
+            .unwrap_or_else(|| root_dir.join("init.lua"));
+        let uri = Url::from_file_path(config_path)
             .map_err(|_| anyhow!("failed to parse url"))?;
         server.did_open(DidOpenTextDocumentParams {
             text_document: TextDocumentItem {

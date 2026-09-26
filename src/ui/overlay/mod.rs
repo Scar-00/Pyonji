@@ -3,7 +3,7 @@ pub mod palette;
 pub mod releases;
 pub mod sessions;
 
-use gpui_shell::{ShellRoot, action::ShellAction};
+//use gpui_shell::{ShellRoot, action::ShellAction};
 use opener::{FileOpener, FileOpenerEvent};
 use releases::ReleasesView;
 use sessions::SessionsView;
@@ -27,7 +27,7 @@ pub struct Overlay {
     sessions: Entity<SessionsView>,
     releases: Entity<ReleasesView>,
     opener: Entity<FileOpener>,
-    js: Entity<ShellRoot>,
+    //js: Entity<ShellRoot>,
 }
 
 impl Overlay {
@@ -43,7 +43,7 @@ impl Overlay {
             sessions: cx.new(|cx| SessionsView::new(&pyonji, window, cx)),
             releases: cx.new(|cx| ReleasesView::new(&pyonji, window, cx)),
             opener: Self::setup_opener(window, cx),
-            js: init_shell(window, cx).unwrap(),
+            //js: init_shell(window, cx).unwrap(),
         }
     }
 }
@@ -53,19 +53,26 @@ impl Overlay {
         if window.has_active_dialog(cx) {
             window.close_dialog(cx);
         }
+        let (width, height) = Self::dialog_size(screen, window);
         let builder = cx.processor(move |this, dialog: Dialog, _window, cx| {
-            dialog
+            let dialog = dialog
                 .p_0()
-                .h_4_5()
                 .backdrop_blur(px(24.0))
                 .bg(cx.theme().surface.opacity(0.15))
-                .close_button(false)
-                .child(div().size_full().p_1().child(match screen {
-                    OverlayScreen::Sessions => this.sessions.clone().into_any_element(),
-                    OverlayScreen::Releases => this.releases.clone().into_any_element(),
-                    OverlayScreen::Opener => this.opener.clone().into_any_element(),
-                    OverlayScreen::Palette => this.js.clone().into_any_element(),
-                }))
+                .close_button(false);
+            let dialog = match (width, height) {
+                (Some(width), Some(height)) => dialog.w(width).h(height),
+                (Some(width), None) => dialog.w(width).h_4_5(),
+                (None, Some(height)) => dialog.h(height),
+                (None, None) => dialog.h_4_5(),
+            };
+            dialog.child(div().size_full().p_1().child(match screen {
+                OverlayScreen::Sessions => this.sessions.clone().into_any_element(),
+                OverlayScreen::Releases => this.releases.clone().into_any_element(),
+                OverlayScreen::Opener => this.opener.clone().into_any_element(),
+                //OverlayScreen::Palette => this.js.clone().into_any_element(),
+                _ => todo!(),
+            }))
         });
         window.open_dialog(cx, builder);
         let handle = match screen {
@@ -73,13 +80,29 @@ impl Overlay {
             OverlayScreen::Releases => self.releases.focus_handle(cx),
             OverlayScreen::Opener => self.opener.focus_handle(cx),
             OverlayScreen::Palette => {
-                window.dispatch_action(ShellAction::new("focus-in").boxed_clone(), cx);
+                //window.dispatch_action(ShellAction::new("focus-in").boxed_clone(), cx);
                 return;
             },
         };
         window.defer(cx, move |window, cx| {
             window.focus(&handle, cx);
         });
+    }
+
+    /// The size a screen's dialog needs; `None` per axis keeps the default.
+    ///
+    /// A dialog is 448px wide, which suits a single column. The releases screen
+    /// sets a rail beside the manifest and needs twice that, but never more than
+    /// the window it floats in.
+    fn dialog_size(screen: OverlayScreen, window: &Window) -> (Option<Pixels>, Option<Pixels>) {
+        if !matches!(screen, OverlayScreen::Releases) {
+            return (None, None);
+        }
+        let size = window.viewport_size();
+        let inset = px(64.);
+        let width = px(920.).min((size.width - inset).max(px(320.)));
+        let height = px(500.).min((size.height - inset).max(px(280.)));
+        (Some(width), Some(height))
     }
 
     fn setup_opener(window: &mut Window, cx: &mut Context<Self>) -> Entity<FileOpener> {
@@ -117,7 +140,7 @@ impl Overlay {
         opener
     }
 }
-
+/*
 pub fn init_shell(window: &mut Window, cx: &mut App) -> Result<Entity<ShellRoot>> {
     use gpui_shell::*;
     gpui_shell::init(cx);
@@ -225,3 +248,4 @@ fn theme_color(color: Rgba) -> gpui_shell::HostValue {
         color.red, color.green, color.blue, color.alpha
     ))
 }
+*/
