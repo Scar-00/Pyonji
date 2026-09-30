@@ -24,6 +24,15 @@ impl FromLua for SessionId {
     }
 }
 
+/// Parsed from a command line, where a session is written as its bare number.
+impl std::str::FromStr for SessionId {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.trim().parse()?))
+    }
+}
+
 impl IntoLua for SessionId {
     fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue> {
         self.0.into_lua(lua)

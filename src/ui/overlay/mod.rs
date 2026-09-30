@@ -5,6 +5,7 @@ pub mod sessions;
 
 //use gpui_shell::{ShellRoot, action::ShellAction};
 use opener::{FileOpener, FileOpenerEvent};
+use palette::PaletteView;
 use releases::ReleasesView;
 use sessions::SessionsView;
 
@@ -24,6 +25,7 @@ pub enum OverlayScreen {
 pub struct Overlay {
     pyonji: WeakEntity<Pyonji>,
 
+    palette: Entity<PaletteView>,
     sessions: Entity<SessionsView>,
     releases: Entity<ReleasesView>,
     opener: Entity<FileOpener>,
@@ -40,6 +42,7 @@ impl Overlay {
         Self {
             pyonji: pyonji.clone(),
 
+            palette: cx.new(|cx| PaletteView::new(&pyonji, window, cx)),
             sessions: cx.new(|cx| SessionsView::new(&pyonji, window, cx)),
             releases: cx.new(|cx| ReleasesView::new(&pyonji, window, cx)),
             opener: Self::setup_opener(window, cx),
@@ -67,42 +70,36 @@ impl Overlay {
                 (None, None) => dialog.h_4_5(),
             };
             dialog.child(div().size_full().p_1().child(match screen {
+                OverlayScreen::Palette => this.palette.clone().into_any_element(),
                 OverlayScreen::Sessions => this.sessions.clone().into_any_element(),
                 OverlayScreen::Releases => this.releases.clone().into_any_element(),
                 OverlayScreen::Opener => this.opener.clone().into_any_element(),
-                //OverlayScreen::Palette => this.js.clone().into_any_element(),
-                _ => todo!(),
             }))
         });
         window.open_dialog(cx, builder);
         let handle = match screen {
+            OverlayScreen::Palette => self.palette.focus_handle(cx),
             OverlayScreen::Sessions => self.sessions.focus_handle(cx),
             OverlayScreen::Releases => self.releases.focus_handle(cx),
             OverlayScreen::Opener => self.opener.focus_handle(cx),
-            OverlayScreen::Palette => {
-                //window.dispatch_action(ShellAction::new("focus-in").boxed_clone(), cx);
-                return;
-            },
         };
         window.defer(cx, move |window, cx| {
             window.focus(&handle, cx);
         });
     }
 
-    /// The size a screen's dialog needs; `None` per axis keeps the default.
-    ///
-    /// A dialog is 448px wide, which suits a single column. The releases screen
-    /// sets a rail beside the manifest and needs twice that, but never more than
-    /// the window it floats in.
     fn dialog_size(screen: OverlayScreen, window: &Window) -> (Option<Pixels>, Option<Pixels>) {
-        if !matches!(screen, OverlayScreen::Releases) {
-            return (None, None);
-        }
+        let (width, height) = match screen {
+            OverlayScreen::Palette => (px(620.), px(520.)),
+            OverlayScreen::Releases => (px(920.), px(500.)),
+            _ => return (None, None),
+        };
         let size = window.viewport_size();
         let inset = px(64.);
-        let width = px(920.).min((size.width - inset).max(px(320.)));
-        let height = px(500.).min((size.height - inset).max(px(280.)));
-        (Some(width), Some(height))
+        (
+            Some(width.min((size.width - inset).max(px(320.)))),
+            Some(height.min((size.height - inset).max(px(280.)))),
+        )
     }
 
     fn setup_opener(window: &mut Window, cx: &mut Context<Self>) -> Entity<FileOpener> {

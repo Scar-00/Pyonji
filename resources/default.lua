@@ -38,13 +38,12 @@
 ---@field bind BindFn
 ---@field register fun(self: Pyonji, name: string, action: function)
 ---@field config fun(self: Pyonji, config: Config)
----@field open_palette fun(self: Pyonji?)
+---@field open_palette fun(self: Pyonji?) command palette: filter, pick, run
 ---@field open_sessions fun(self: Pyonji?)
----@field open_detached fun(self: Pyonji?)
 ---@field open_releases fun(self: Pyonji?)
 ---@field open_opener fun(self: Pyonji?)
----@field open_command fun(self: Pyonji?) opens the `:` command prompt
----@field open_lua fun(self: Pyonji?) opens the `>` lua prompt
+---@field open_command fun(self: Pyonji?) opens the `:` command line
+---@field open_lua fun() opens the `>` lua prompt
 ---@field open_rename fun(self: Pyonji?)
 ---@field rename RenameFn
 ---@field detach fun(self: Pyonji): boolean
@@ -58,10 +57,10 @@
 ---@field prev_tab fun(self: Pyonji): integer
 ---@field focus_next_pane fun(self: Pyonji): integer?
 ---@field write fun(self: Pyonji, session: integer, text: string): boolean
+---@field reload_config fun(self: Pyonji)
 ---@field toggle_fullscreen fun(self: Pyonji): boolean
 ---@field toggle_decorations fun(self: Pyonji)
 ---@field toggle_status_bar fun(self: Pyonji)
----@field reload_config fun(self: Pyonji)
 ---@field quit fun(self: Pyonji)
 
 ---@type Pyonji
@@ -83,10 +82,18 @@ py:config({
 --  * py:method(...) runs the action immediately and returns a real value
 --    (e.g. py:create_session() returns the new session id)
 --  * py.method(...) returns a callback instead, which can be used with py:bind
-py:bind({ "ctrl", "shift" }, "F", py.open_palette());
+py:bind({ "ctrl", "shift" }, "F", py.open_salette());
 py:bind({ "ctrl", "shift" }, "S", py.open_sessions());
 
-py:register("test", function (...)
+-- Nothing is bound by default except paste on ctrl-shift-v. The two command
+-- surfaces are on the right of the status bar, and the bar shows the key here
+-- once one is bound:
+py:bind('<ctrl-b> p', py.open_palette());
+py:bind('<ctrl-b> g', py.open_command());
+
+-- py:register adds a command to both the palette and the `:` line. The
+-- argument names are read off the function, so they show up as <placeholders>:
+py:register("open", function (...)
     print(...);
 end);
 --]]

@@ -72,30 +72,28 @@ winresource = "0.1.30"
 gpui-ce = { opt-level = 3 }
 gpui_ce_components = { opt-level = 3 }
 
-# Local patch for the gpui-ce MSAA validation crash (see
-# `vendor/gpui-ce/README.md`): redirects every package from the gpui-ce git
-# source at this directory, so the whole graph — including the crates pulled
-# in via the `../oss/gpui-component` path deps — builds against the patched
-# copy with identical versions. Drop this table once the git source is
-# bumped past upstream fix 8e36ac0 *and* `../oss/gpui-component` supports
-# the new API.
+# The `gpui-ce` checkout in `../oss`, rather than the git source, so the whole
+# graph — including the crates reached through the `../oss/gpui-component` path
+# deps — resolves to one rev without a network fetch, and stays on the API that
+# checkout of gpui-component is written against. Drop this table once the
+# `Cargo.toml` git deps carry a rev and that rev matches.
 [patch."https://github.com/gpui-ce/gpui-ce"]
-gpui-ce = { path = "vendor/gpui-ce/crates/gpui" }
-gpui_ce_apple = { path = "vendor/gpui-ce/crates/gpui_apple" }
-gpui_ce_collections = { path = "vendor/gpui-ce/crates/gpui_collections" }
-gpui_ce_derive_refineable = { path = "vendor/gpui-ce/crates/gpui_derive_refineable" }
-gpui_ce_linux = { path = "vendor/gpui-ce/crates/gpui_linux" }
-gpui_ce_macos = { path = "vendor/gpui-ce/crates/gpui_macos" }
-gpui_ce_macros = { path = "vendor/gpui-ce/crates/gpui_macros" }
-gpui_ce_media = { path = "vendor/gpui-ce/crates/gpui_media" }
-gpui_ce_platform = { path = "vendor/gpui-ce/crates/gpui_platform" }
-gpui_ce_refineable = { path = "vendor/gpui-ce/crates/gpui_refineable" }
-gpui_ce_render = { path = "vendor/gpui-ce/crates/gpui_render" }
-gpui_ce_scheduler = { path = "vendor/gpui-ce/crates/gpui_scheduler" }
-gpui_ce_shared_string = { path = "vendor/gpui-ce/crates/gpui_shared_string" }
-gpui_ce_sum_tree = { path = "vendor/gpui-ce/crates/gpui_sum_tree" }
-gpui_ce_tokio = { path = "vendor/gpui-ce/crates/gpui_tokio" }
-gpui_ce_util = { path = "vendor/gpui-ce/crates/gpui_ce_util" }
-gpui_ce_web = { path = "vendor/gpui-ce/crates/gpui_web" }
-gpui_ce_wgpu = { path = "vendor/gpui-ce/crates/gpui_wgpu" }
-gpui_ce_windows = { path = "vendor/gpui-ce/crates/gpui_windows" }
+gpui-ce = { path = "../oss/gpui-ce/crates/gpui" }
+gpui_ce_apple = { path = "../oss/gpui-ce/crates/gpui_apple" }
+gpui_ce_collections = { path = "../oss/gpui-ce/crates/gpui_collections" }
+gpui_ce_derive_refineable = { path = "../oss/gpui-ce/crates/gpui_derive_refineable" }
+gpui_ce_linux = { path = "../oss/gpui-ce/crates/gpui_linux" }
+gpui_ce_macos = { path = "../oss/gpui-ce/crates/gpui_macos" }
+gpui_ce_macros = { path = "../oss/gpui-ce/crates/gpui_macros" }
+gpui_ce_media = { path = "../oss/gpui-ce/crates/gpui_media" }
+gpui_ce_platform = { path = "../oss/gpui-ce/crates/gpui_platform" }
+gpui_ce_refineable = { path = "../oss/gpui-ce/crates/gpui_refineable" }
+gpui_ce_render = { path = "../oss/gpui-ce/crates/gpui_render" }
+gpui_ce_scheduler = { path = "../oss/gpui-ce/crates/gpui_scheduler" }
+gpui_ce_shared_string = { path = "../oss/gpui-ce/crates/gpui_shared_string" }
+gpui_ce_sum_tree = { path = "../oss/gpui-ce/crates/gpui_sum_tree" }
+gpui_ce_tokio = { path = "../oss/gpui-ce/crates/gpui_tokio" }
+gpui_ce_util = { path = "../oss/gpui-ce/crates/gpui_ce_util" }
+gpui_ce_web = { path = "../oss/gpui-ce/crates/gpui_web" }
+gpui_ce_wgpu = { path = "../oss/gpui-ce/crates/gpui_wgpu" }
+gpui_ce_windows = { path = "../oss/gpui-ce/crates/gpui_windows" }

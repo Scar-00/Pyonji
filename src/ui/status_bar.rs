@@ -8,6 +8,7 @@ use gpui::*;
 use gpui_base::input::InputEvent;
 use gpui_base::input::InputState;
 use gpui_base::*;
+use gpui_component::scroll::ScrollableElement;
 use std::ops::Range;
 
 use crate::Next;
@@ -227,31 +228,51 @@ impl SessionView {
             pyonji: pyonji.clone(),
         }
     }
+
+    fn on_click(pyonji: WeakEntity<Pyonji>, tab: usize, _: &mut Window, cx: &mut App) {
+        _ = pyonji.update(cx, |this, cx| {
+            this.switch_tab(tab, cx);
+        });
+    }
 }
 
 impl RenderOnce for SessionView {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let py = util::read!(self.pyonji, cx);
+        let pyonji = self.pyonji.clone();
         h_flex()
-            .gap_1()
-            .children(py.tabs.iter().enumerate().filter_map(|(i, tab)| {
+            .id("status-sessions-list")
+            .gap_3()
+            .overflow_x_scroll()
+            .children(py.tabs.iter().enumerate().filter_map(move |(i, tab)| {
                 let id = tab.as_ref().and_then(|tab| tab.active_session())?;
                 let title = py.session_manager.session(id)?.title();
                 let label = format!("[{i}] - {title}");
+                let selected = py.current_tab == Some(i);
+                let pyonji = pyonji.clone();
                 Some(
                     h_flex()
+                        .id(("sessions-label", i))
                         .items_center()
                         .justify_center()
                         .px_1()
                         .map(|this| {
-                            if py.current_tab == Some(i) {
-                                this.bg(theme.selected).font_bold()
+                            if selected {
+                                this
+                                    .bg(theme.selected)
+                                    .font_bold()
+                                    .border_b_2()
+                                    .border_color(theme.accent)
                             } else {
-                                this.bg(theme.unselected)
+                                this.bg(theme.unselected).pb_0p5()
                             }
                         })
-                        .child(label),
+                        .child(label)
+                        .hover(|style| style.cursor_pointer())
+                        .on_click(move |_, window, cx| {
+                            Self::on_click(pyonji.clone(), i, window, cx);
+                        })
                 )
             }))
     }

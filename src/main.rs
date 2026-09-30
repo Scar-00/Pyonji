@@ -20,6 +20,7 @@ mod renderer;
 mod terminal;
 mod ui;
 mod util;
+mod commands;
 
 use assets::{GlobalAssets, PyonjiAsset, PyonjiAssetsSource};
 use pty::Event;
@@ -179,6 +180,7 @@ impl Pyonji {
         cx.bind_keys([KeyBinding::new("ctrl-shift-v", ClipboardPaste, None)]);
 
         ui::status_bar::init(cx);
+        overlay::palette::init(cx);
         overlay::sessions::init(cx);
         overlay::releases::init(cx);
         overlay::opener::init(cx);
@@ -870,6 +872,42 @@ impl Pyonji {
         Ok(id)
     }
 
+    pub fn create_remote_session(
+        &mut self,
+        connection: &SshConnection,
+        tab: Option<usize>,
+        parent: Option<SessionId>,
+        cx: &mut Context<Self>,
+    ) -> Result<SessionId> {
+        let slot = match tab.or(self.current_tab) {
+            Some(slot) if slot < self.tabs.len() => slot,
+            _ => return Err(anyhow!("tab index out of range")),
+        };
+        let id = self
+            .session_manager
+            .create_remote_session(20, 80, connection)
+            .map_err(mlua::Error::external)?;
+        if self.tabs[slot].is_none() {
+            self.tabs[slot] = Some(TerminalTab::new(id));
+        } else {
+            let placed = self.tabs[slot]
+                .as_mut()
+                .map(
+                    |tab| match parent.filter(|id| tab.sessions().contains(id)) {
+                        Some(at) => tab.split_on(at, SplitDirection::Vertical, id),
+                        None => tab.split_active(SplitDirection::Vertical, id),
+                    },
+                )
+                .unwrap_or(false);
+            if !placed {
+                self.session_manager.remove_session(id);
+                return Err(anyhow!("failed to place session"));
+            }
+        }
+        self.resize_tab(slot, cx);
+        Ok(id)
+    }
+
     pub fn close_session(&mut self, session: SessionId, cx: &mut Context<Self>) -> bool {
         if self.session_manager.session(session).is_none() {
             return false;
@@ -904,10 +942,10 @@ impl Pyonji {
         true
     }
 
-    pub fn switch_tab(&mut self, tab: usize, cx: &mut Context<Self>) {
+    pub fn switch_tab(&mut self, tab: usize, cx: &mut Context<Self>) -> bool {
         let terminal = self.terminal.read(cx);
         if tab >= self.tabs.len() {
-            return;
+            return false;
         }
         if self.tabs[tab].is_none() {
             let id = match self.session_manager.create_session(
@@ -918,7 +956,7 @@ impl Pyonji {
                 Ok(id) => id,
                 Err(error) => {
                     tracing::error!(error = ?error, "failed to create tab session");
-                    return;
+                    return false;
                 }
             };
             self.tabs[tab] = Some(TerminalTab::new(id));
@@ -929,6 +967,39 @@ impl Pyonji {
         self.resize_tab(tab, cx);
         //self.update_ime_cursor_area();
         cx.notify();
+        true
+    }
+
+    pub fn next_tab(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(curr) = self.current_tab else {
+            return false;
+        };
+        self.switch_tab(curr + 1, cx)
+    }
+
+    pub fn prev_tab(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(curr) = self.current_tab else {
+            return false;
+        };
+        self.switch_tab(curr.saturating_sub(1), cx)
+    }
+
+    pub fn move_session(&mut self, from: Option<usize>, to: usize, session: SessionId) -> bool {
+        let Some(from) = from.or(self.current_tab) else {
+            return false;
+        };
+        if from >= self.tabs.len() || to >= self.tabs.len() {
+            return false;
+        }
+        let contains = self.tabs[from].as_ref().is_some_and(|tab| tab.sessions().contains(&session));
+        if contains {
+            let Some(to) = self.tabs[to].as_mut() else {
+                self.tabs[to] = Some(TerminalTab::new(session));
+                return true;
+            };
+            return to.split_active(SplitDirection::Horizontal, session);
+        }
+        true
     }
 
     fn switch_to_previous_live_tab_or_stay(&mut self, closed_tab: usize, cx: &mut Context<Self>) {

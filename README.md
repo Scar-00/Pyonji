@@ -4,7 +4,8 @@ A terminal emulator whose grid is drawn on the GPU, configured from Lua.
 
 > **Status: not yet buildable from a fresh clone.** Four dependencies in
 > `Cargo.toml` are `path` deps pointing outside the repository, at
-> `../oss/gpui-component`. See [Building](#building).
+> `../oss/gpui-component` and `../oss/gpui-ce`. See
+> [Building](#building).
 
 ## What it does
 
@@ -24,10 +25,14 @@ A terminal emulator whose grid is drawn on the GPU, configured from Lua.
   or underline — so applications that set it are honoured.
 - **IME preedit** and clipboard paste on <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd>.
 - **SSH sessions** over libssh2, declared in the config.
-- **Overlays** for the session list, a directory picker, and the release
-  screen.
+- **Overlays** for the command palette, the session list, a directory picker,
+  and the release screen.
+- **A command palette and a `:` prompt**, over one command table: everything
+  Pyonji can do, one entry per configured SSH host, and one per callback the
+  config registers.
 - **A status bar** that doubles as a prompt: tab chips, a session rename field,
-  and a `>` Lua line with LSP completion.
+  a `:` command line with history and completion, and a `>` Lua line with LSP
+  completion.
 - **Self-update** from GitHub releases, showing which build matches the
   machine it is running on.
 - **Lua configuration**, reloaded from disk when it changes and written on
@@ -51,15 +56,13 @@ multiplexer.
     Pyonji/            <- this repository
     oss/
       gpui-component/  <- required
+      gpui-ce/         <- required; the [patch] table in Cargo.toml points here
   ```
 
-  `Cargo.toml` points four crates at `../oss/gpui-component/`. They are not
+  `Cargo.toml` points four crates at `../oss/gpui-component/`, and a `[patch]`
+  table redirects every `gpui-ce` package to `../oss/gpui-ce/`. Neither is
   vendored, so `cargo build` in a fresh clone fails on a missing path
-  dependency until that checkout is in place.
-
-`vendor/gpui-ce/` *is* in the repository. It is a patched copy of
-gpui-ce — see [vendor/gpui-ce/README.md](vendor/gpui-ce/README.md) for why,
-and drop it once the upstream fix it carries has been picked up.
+  dependency until both checkouts are in place.
 
 ### Build
 
@@ -145,17 +148,77 @@ py:bind('<ctrl-b> v', py.split('v'))
 ```
 
 `py:bind` takes a binding string and a callback. A method called with `py:`
-returns its value; called as `py.method` it returns the callback to bind.
+returns its value; called as `py.method` it returns the callback to bind. The
+`(modifiers, key, callback)` form works too, and is the same binding written
+out:
+
+```lua
+py:bind({ "ctrl", "shift" }, "F", py.open_sessions())   -- '<ctrl-shift> F'
+```
+
+A binding whose modifiers are followed by another word is a *sequence*, not a
+chord: `'<ctrl-b> f'` waits for <kbd>Ctrl</kbd>+<kbd>B</kbd> and then for
+<kbd>F</kbd>, like a prefix key. `<ctrl-shift>F` is the chord. The status bar
+writes sequences the same way when it shows you a key.
+
+`py.open_palette()`, `py.open_command()` and the other `open_*` methods bind as
+the action they stand for rather than as a Lua wrapper, so a key bound to one
+of them is the same key the action answers to everywhere else.
 
 Inside an overlay, <kbd>↑</kbd><kbd>↓</kbd> move, <kbd>Enter</kbd> confirms
-and <kbd>Esc</kbd> closes — with one deliberate exception: on the release
-screen <kbd>Esc</kbd> clears the version filter first, and closes on the second
-press.
+and <kbd>Esc</kbd> closes — with two deliberate exceptions: on the release
+screen <kbd>Esc</kbd> clears the version filter first, and on the palette it
+peels the line back one word at a time. Both close on the press that finds
+nothing left to peel.
+
+### Commands
+
+There is one command table, and two ways to reach it.
+
+The **palette** (`py:open_palette()`) is a command line with the matching
+commands listed under it. <kbd>Tab</kbd> completes the word being typed, and
+pressing it again offers the next-best match. The list is fuzzy-matched on the
+name, the summary and the placeholders, and grouped by where each command came
+from.
+
+The **`:` prompt** in the status bar takes the same grammar without the list:
+`switch 2`, `rename my logs`, `ssh server`. <kbd>↑</kbd> and <kbd>↓</kbd> walk
+what you have already run, and <kbd>Tab</kbd> completes. A name that matches
+nothing is reported in the bar rather than ignored, with the nearest command
+offered as a suggestion.
+
+Both are on the right of the status bar as `commands` and `command`, and each
+shows the key your config has bound to it. Nothing is bound by default, so
+bind them if you want them on the home row:
+
+```lua
+py:bind('<ctrl-b> p', py.open_palette())
+py:bind('<ctrl-b> g', py.open_command())
+```
+
+The built-in commands are `switch`, `next-tab`, `prev-tab`, `close`,
+`move-to`, `split-h`, `split-v`, `focus-next-pane`, `detach`, `rename`, `ssh`,
+`open-in`, `sessions`, `releases`, `commands`, `lua` and `reload-config`. Tabs
+are written 1-based, the way the status bar counts them; sessions by the bare
+number the status bar shows.
+
+`py:register` puts a callback in the same table, so it is reachable from both
+surfaces. The argument names are read off the Lua function and show up as
+placeholders:
+
+```lua
+py:register("open", function (path, tab)
+    local id = py:create_session(path, tab);
+    py:write(id, "nvim .\r");
+end);
+```
 
 ### Opening things
 
 | Call | Opens |
 |---|---|
+| `py:open_palette()` | command palette |
+| `py:open_command()` | the `:` line in the status bar |
 | `py:open_sessions()` | session list |
 | `py:open_opener()` | directory picker |
 | `py:open_releases()` | release screen and updater |
@@ -164,30 +227,24 @@ press.
 
 ## Not implemented
 
-The **command palette does not exist** in this build. `py:open_palette()` and
-the `OpenPalette` action both reach an unimplemented branch in `Overlay::open`
-and will panic; `resources/main.ts` is an unused prototype that is not
-compiled into the binary. Remove those calls from your config.
+`resources/default.lua` annotates four methods that `config.rs` never
+registers, so calling them from a config errors: `toggle_fullscreen`,
+`toggle_decorations`, `toggle_status_bar` and `quit`. It also documents a
+`status_height` config field that nothing reads.
 
-`nucleo-matcher` is present in `Cargo.toml` but unused — there is no fuzzy
-matching anywhere yet.
+The Lua prompt keeps no history. Its line lives inside the prompt's own view
+rather than on the bar, which is also why <kbd>↑</kbd> and <kbd>↓</kbd> there
+move the language server's suggestions instead of walking what came before.
 
-`resources/default.lua` annotates six methods that `config.rs` never registers,
-so calling them from a config errors: `open_command`, `open_detached`, `quit`,
-`toggle_fullscreen`, `toggle_decorations`, `toggle_status_bar`. It also
-documents a `status_height` config field that nothing reads. The status bar's
-`:` command mode exists in the type but is never entered, so the command prompt
-is unreachable.
-
-`py:bind` also accepts a `(modifiers, key, callback)` form, which
-`default.lua` shows. That branch is a `todo!()` and panics; use the binding
-string form.
+`resources/main.ts` was the palette's first prototype, in TypeScript for a
+`gpui-shell` host that is not part of the build. The palette in
+`src/ui/overlay/palette.rs` replaces it; the prototype is gone.
 
 ## Tech stack
 
 - [wgpu](https://wgpu.rs/) — GPU rasterisation
 - [gpui-ce](https://github.com/gpui-ce/gpui-ce) — windowing, input, and the
-  UI toolkit the overlays are built from (vendored, see above)
+  UI toolkit the overlays are built from (a sibling checkout, see above)
 - [gpui-component](https://github.com/gpui-ce/gpui-component) — dialogs,
   inputs, buttons, scrollbars, and the theme
 - [vt100](https://github.com/doy/vt100-rust) — terminal emulation
