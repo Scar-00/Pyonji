@@ -2658,6 +2658,7 @@ dependencies = [
 [[package]]
 name = "gpui-ce"
 version = "0.2.2"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -2729,6 +2730,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_apple"
 version = "0.1.0"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "anyhow",
  "block",
@@ -2754,6 +2756,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_collections"
 version = "0.2.2"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "gpui_ce_util",
  "indexmap",
@@ -2763,6 +2766,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_components"
 version = "0.2.0"
+source = "git+https://github.com/Scar-00/gpui-component-fork#aa38d86f5ad5d631aa6fa770dd280f0a5020790b"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2808,6 +2812,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_components_assets"
 version = "0.2.0"
+source = "git+https://github.com/Scar-00/gpui-component-fork#aa38d86f5ad5d631aa6fa770dd280f0a5020790b"
 dependencies = [
  "anyhow",
  "gpui-ce",
@@ -2821,6 +2826,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_components_base"
 version = "0.2.0"
+source = "git+https://github.com/Scar-00/gpui-component-fork#aa38d86f5ad5d631aa6fa770dd280f0a5020790b"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2852,6 +2858,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_components_fps"
 version = "0.2.0"
+source = "git+https://github.com/Scar-00/gpui-component-fork#aa38d86f5ad5d631aa6fa770dd280f0a5020790b"
 dependencies = [
  "gpui-ce",
  "libc",
@@ -2865,6 +2872,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_components_macros"
 version = "0.2.0"
+source = "git+https://github.com/Scar-00/gpui-component-fork#aa38d86f5ad5d631aa6fa770dd280f0a5020790b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2874,6 +2882,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_components_shell"
 version = "0.2.0"
+source = "git+https://github.com/Scar-00/gpui-component-fork#aa38d86f5ad5d631aa6fa770dd280f0a5020790b"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2906,6 +2915,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_derive_refineable"
 version = "0.2.2"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2915,6 +2925,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_linux"
 version = "0.1.0"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -2961,6 +2972,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_macos"
 version = "0.1.0"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -3009,6 +3021,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_macros"
 version = "0.1.0"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3019,6 +3032,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_media"
 version = "0.2.2"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -3032,6 +3046,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_platform"
 version = "0.1.0"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "console_error_panic_hook",
  "gpui-ce",
@@ -3045,6 +3060,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_refineable"
 version = "0.2.2"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "gpui_ce_derive_refineable",
 ]
@@ -3052,6 +3068,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_render"
 version = "0.1.0"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "gpui-ce",
  "naga 24.0.0",
@@ -3063,6 +3080,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_scheduler"
 version = "0.2.2"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "async-task",
  "backtrace",
@@ -3077,6 +3095,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_shared_string"
 version = "0.1.0"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "schemars",
  "serde",
@@ -3086,6 +3105,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_sum_tree"
 version = "0.2.2"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "heapless",
  "log",
@@ -3096,6 +3116,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_tokio"
 version = "0.1.0"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "anyhow",
  "gpui-ce",
@@ -3106,6 +3127,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_util"
 version = "0.2.6"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "anyhow",
  "log",
@@ -3115,6 +3137,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_web"
 version = "0.1.0"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3137,6 +3160,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_wgpu"
 version = "0.1.0"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -3174,6 +3198,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_windows"
 version = "0.1.0"
+source = "git+https://github.com/Scar-00/gpui-ce-fork#39e947ae560c4c85021e0c7341a7a50abe8c44e3"
 dependencies = [
  "accesskit",
  "accesskit_windows",
