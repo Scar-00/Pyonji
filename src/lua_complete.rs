@@ -1,15 +1,15 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_lsp::lsp_types;
 use async_lsp::{
+    LanguageServer as _, ServerSocket,
     concurrency::ConcurrencyLayer,
     lsp_types::{
-        notification::{LogMessage, Progress, PublishDiagnostics, ShowMessage},
         InitializeParams,
+        notification::{LogMessage, Progress, PublishDiagnostics, ShowMessage},
     },
     panic::CatchUnwindLayer,
     router::Router,
     tracing::TracingLayer,
-    LanguageServer as _, ServerSocket,
 };
 use futures::channel::oneshot::{self, Sender};
 use gpui::{AsyncApp, Task};
@@ -33,6 +33,7 @@ pub struct LspClient {
     _child: Child,
     pub server: ServerSocket,
     pub uri: Url,
+    pub resolve_completions: bool,
     version: usize,
     _task: Task<Result<(), JoinError>>,
 }
@@ -122,7 +123,7 @@ impl LspClient {
         let root_uri =
             Url::from_file_path(&root_dir).map_err(|_| anyhow!("failed to parse url"))?;
         #[allow(deprecated)]
-        server
+        let initialized = server
             .initialize(InitializeParams {
                 root_uri: Some(root_uri.clone()),
                 workspace_folders: Some(vec![WorkspaceFolder {
@@ -140,6 +141,11 @@ impl LspClient {
             })
             .await?;
         server.initialized(InitializedParams {})?;
+        let resolve_completions = initialized
+            .capabilities
+            .completion_provider
+            .and_then(|provider| provider.resolve_provider)
+            .unwrap_or(false);
 
         let config_path = config::util::config_path()
             .map(|path| {
@@ -175,23 +181,13 @@ impl LspClient {
             _child: child,
             server,
             uri,
+            resolve_completions,
             version: 0,
             _task: task,
         })
     }
 
-    pub fn push_changes(&mut self, range: std::ops::Range<usize>, text: &str) -> Result<()> {
-        let len = range.end - range.start;
-        let range = Range {
-            start: Position {
-                line: 0,
-                character: range.start as u32,
-            },
-            end: Position {
-                line: 0,
-                character: range.end as u32,
-            },
-        };
+    pub fn push_changes(&mut self, text: &str) -> Result<()> {
         let version = self.version + 1;
         self.version = version;
         self.server.did_change(DidChangeTextDocumentParams {
@@ -200,8 +196,10 @@ impl LspClient {
                 version: version as i32,
             },
             content_changes: vec![TextDocumentContentChangeEvent {
-                range: Some(range),
-                range_length: Some(len as u32),
+                // A full replacement also handles deletions, empty input and
+                // Unicode without referring to offsets in the previous value.
+                range: None,
+                range_length: None,
                 text: text.to_string(),
             }],
         })?;
@@ -211,17 +209,14 @@ impl LspClient {
     pub async fn get_completions_for(
         mut server: ServerSocket,
         uri: Url,
-        trigger: char,
-        position: u32,
+        position: Position,
+        resolve_completions: bool,
     ) -> Result<Option<Vec<CompletionItem>>> {
         let r = server
             .completion(CompletionParams {
                 text_document_position: TextDocumentPositionParams {
                     text_document: TextDocumentIdentifier { uri },
-                    position: Position {
-                        line: 0,
-                        character: position,
-                    },
+                    position,
                 },
                 work_done_progress_params: WorkDoneProgressParams {
                     work_done_token: None,
@@ -230,8 +225,8 @@ impl LspClient {
                     partial_result_token: None,
                 },
                 context: Some(CompletionContext {
-                    trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
-                    trigger_character: Some(trigger.into()),
+                    trigger_kind: CompletionTriggerKind::INVOKED,
+                    trigger_character: None,
                 }),
             })
             .await?;
@@ -240,9 +235,11 @@ impl LspClient {
             CompletionResponse::List(list) => list.items,
         });
 
-        if let Some(items) = &mut items {
+        if resolve_completions && let Some(items) = &mut items {
             for item in items {
-                *item = Self::resolve_item(&mut server, item.clone()).await.unwrap();
+                if let Ok(resolved) = Self::resolve_item(&mut server, item.clone()).await {
+                    *item = resolved;
+                }
             }
         }
 
