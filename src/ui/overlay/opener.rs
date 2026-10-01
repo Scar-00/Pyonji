@@ -9,6 +9,10 @@ use gpui::{
     actions, div, prelude::*,
 };
 use gpui_base::input::{Input, InputEvent, InputState};
+use gpui_component::{
+    Sizable,
+    button::{Button, ButtonVariants},
+};
 
 use crate::{Next, Prev, PyTheme, Submit};
 
@@ -28,7 +32,7 @@ pub fn init(cx: &mut App) {
 }
 
 pub enum FileOpenerEvent {
-    /// A file (or, when `directories_only`, a directory) was chosen.
+    /// A file or directory was chosen for a new session.
     Opened(PathBuf),
     Cancelled,
 }
@@ -42,6 +46,36 @@ pub struct Entry {
     pub _modified: Option<SystemTime>,
 }
 
+#[derive(Default)]
+struct DirectoryListing {
+    generation: u64,
+    entries: Option<Vec<Entry>>,
+    error: Option<String>,
+}
+
+impl DirectoryListing {
+    fn begin_load(&mut self) -> u64 {
+        self.generation += 1;
+        self.entries = None;
+        self.error = None;
+        self.generation
+    }
+
+    fn finish_load(&mut self, generation: u64, result: io::Result<Vec<Entry>>) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        match result {
+            Ok(entries) => self.entries = Some(entries),
+            Err(error) => {
+                self.entries = Some(Vec::new());
+                self.error = Some(error.to_string());
+            }
+        }
+        true
+    }
+}
+
 pub struct FileOpener {
     focus_handle: FocusHandle,
     path_input: Entity<InputState>,
@@ -49,12 +83,10 @@ pub struct FileOpener {
 
     /// Directory whose entries are currently loaded.
     cwd: PathBuf,
-    entries: Option<Vec<Entry>>,
-    error: Option<String>,
+    listing: DirectoryListing,
     selected: Option<usize>,
 
     show_hidden: bool,
-    directories_only: bool,
 }
 
 impl EventEmitter<FileOpenerEvent> for FileOpener {}
@@ -76,20 +108,13 @@ impl FileOpener {
             path_input,
             scroll_handle: ScrollHandle::new(),
             cwd: PathBuf::new(),
-            entries: None,
-            error: None,
+            listing: DirectoryListing::default(),
             selected: None,
             show_hidden: false,
-            directories_only: false,
         };
         this.set_input_path(&start_dir, window, cx);
         this
     }
-
-    /*pub fn directories_only(mut self, v: bool) -> Self {
-        self.directories_only = v;
-        self
-    }*/
 
     pub fn show_hidden(mut self, v: bool) -> Self {
         self.show_hidden = v;
@@ -153,8 +178,7 @@ impl FileOpener {
     }
 
     fn load(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
-        self.entries = None;
-        self.error = None;
+        let generation = self.listing.begin_load();
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -163,14 +187,9 @@ impl FileOpener {
                 .await;
 
             this.update(cx, |this, cx| {
-                match result {
-                    Ok(entries) => this.entries = Some(entries),
-                    Err(e) => {
-                        this.entries = Some(Vec::new());
-                        this.error = Some(e.to_string());
-                    }
+                if this.listing.finish_load(generation, result) {
+                    cx.notify();
                 }
-                cx.notify();
             })
             .ok();
         })
@@ -181,7 +200,7 @@ impl FileOpener {
     fn visible(&self, cx: &App) -> Vec<usize> {
         let (_, frag) = self.parse_input(cx);
         let frag = frag.to_lowercase();
-        let Some(entries) = &self.entries else {
+        let Some(entries) = &self.listing.entries else {
             return vec![];
         };
 
@@ -189,7 +208,6 @@ impl FileOpener {
             .iter()
             .enumerate()
             .filter(|(_, e)| self.show_hidden || !e.name.starts_with('.'))
-            .filter(|(_, e)| !self.directories_only || e.is_dir)
             .filter(|(_, e)| frag.is_empty() || e.name.to_lowercase().contains(&frag))
             .map(|(ix, _)| ix)
             .collect()
@@ -197,14 +215,22 @@ impl FileOpener {
 
     fn select(&mut self, ix: Option<usize>, cx: &mut Context<Self>) {
         self.selected = ix;
-        if let Some(ix) = ix {
-            self.scroll_handle.scroll_to_item(ix);
+        if let Some(position) =
+            ix.and_then(|ix| self.visible(cx).iter().position(|entry| *entry == ix))
+        {
+            self.scroll_handle.scroll_to_item(position);
         }
         cx.notify();
     }
 
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(entry) = self.entries.as_ref().and_then(|e| e.get(ix)).cloned() else {
+        let Some(entry) = self
+            .listing
+            .entries
+            .as_ref()
+            .and_then(|e| e.get(ix))
+            .cloned()
+        else {
             return;
         };
         if entry.is_dir {
@@ -244,20 +270,26 @@ impl FileOpener {
         let vis = self.visible(cx);
         let (dir, frag) = self.parse_input(cx);
 
-        // Prefer selection, then the single match, then literal typed path.
+        // A selected directory is browsed; an unfiltered path opens that directory.
         if let Some(ix) = self.selected {
             self.activate(ix, window, cx);
+        } else if frag.is_empty() {
+            self.open_directory(cx);
         } else if vis.len() == 1 {
             self.activate(vis[0], window, cx);
-        } else if frag.is_empty() && self.directories_only {
-            cx.emit(FileOpenerEvent::Opened(dir));
-        } else if !frag.is_empty() {
+        } else {
             let path = dir.join(&frag);
             if path.is_dir() {
                 self.set_input_path(&path, window, cx);
-            } else if path.is_file() || !self.directories_only {
+            } else if path.is_file() {
                 cx.emit(FileOpenerEvent::Opened(path));
             }
+        }
+    }
+
+    fn open_directory(&self, cx: &mut Context<Self>) {
+        if self.cwd.is_dir() {
+            cx.emit(FileOpenerEvent::Opened(self.cwd.clone()));
         }
     }
 
@@ -406,7 +438,7 @@ impl FileOpener {
     fn render_list(&self, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.theme();
 
-        let Some(entries) = &self.entries else {
+        let Some(entries) = &self.listing.entries else {
             return div()
                 .flex_1()
                 .flex()
@@ -418,7 +450,7 @@ impl FileOpener {
                 .into_any_element();
         };
 
-        if let Some(err) = &self.error {
+        if let Some(err) = &self.listing.error {
             return div()
                 .flex_1()
                 .p_3()
@@ -477,6 +509,13 @@ impl FileOpener {
             .text_xs()
             .text_color(t.text_muted)
             .child(format!("{count} item{}", if count == 1 { "" } else { "s" }))
+            .child(
+                Button::new("open-directory")
+                    .ghost()
+                    .small()
+                    .label("Open directory")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_directory(cx))),
+            )
             .child(
                 div()
                     .flex()
@@ -584,5 +623,41 @@ fn human_size(bytes: u64) -> String {
         format!("{bytes} B")
     } else {
         format!("{v:.1}{}", UNITS[i])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn late_directory_results_cannot_replace_the_current_listing() {
+        let mut listing = DirectoryListing::default();
+        let first = listing.begin_load();
+        let second = listing.begin_load();
+        let entry = Entry {
+            name: "current.txt".into(),
+            path: PathBuf::from("current/current.txt"),
+            is_dir: false,
+            size: 0,
+            _modified: None,
+        };
+        assert!(listing.finish_load(second, Ok(vec![entry])));
+        assert!(!listing.finish_load(first, Err(io::Error::other("old error"))));
+        assert!(!listing.finish_load(first, Ok(Vec::new())));
+        assert_eq!(listing.entries.as_ref().unwrap()[0].name, "current.txt");
+        assert!(listing.error.is_none());
+    }
+
+    #[test]
+    fn returning_to_a_directory_still_discards_its_previous_load() {
+        let mut listing = DirectoryListing::default();
+        let old = listing.begin_load();
+        listing.begin_load();
+        let current = listing.begin_load();
+        assert!(!listing.finish_load(old, Ok(Vec::new())));
+        assert!(listing.entries.is_none());
+        assert!(listing.finish_load(current, Err(io::Error::other("current error"))));
+        assert_eq!(listing.error.as_deref(), Some("current error"));
     }
 }

@@ -13,6 +13,44 @@ use gpui::*;
 use gpui_component::{WindowExt, dialog::Dialog};
 
 use crate::{PushError, PyTheme, Pyonji, util};
+use std::path::{Path, PathBuf};
+
+struct SessionTarget {
+    directory: PathBuf,
+    command: Option<String>,
+}
+
+fn session_target(path: &Path, editor: Option<&str>) -> anyhow::Result<SessionTarget> {
+    let metadata = path.metadata()?;
+    if metadata.is_dir() {
+        return Ok(SessionTarget {
+            directory: path.to_path_buf(),
+            command: None,
+        });
+    }
+    if !metadata.is_file() {
+        anyhow::bail!("selected path is not a file or directory");
+    }
+    let directory = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("selected file has no name"))?
+        .to_string_lossy();
+    let command = editor.map(|editor| {
+        // Use a name relative to the session's cwd; the prefix prevents a filename
+        // starting with '-' from being interpreted as an editor option.
+        #[cfg(windows)]
+        let argument = format!("\".\\{name}\"");
+        #[cfg(not(windows))]
+        let argument = format!("'./{}'", name.replace('\'', "'\\''"));
+        format!("{editor} {argument}\r")
+    });
+    Ok(SessionTarget { directory, command })
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum OverlayScreen {
@@ -112,7 +150,15 @@ impl Overlay {
             |this, _, ev: &FileOpenerEvent, window, cx| {
                 _ = this.pyonji.update(cx, |this, cx| match ev {
                     FileOpenerEvent::Opened(path) => {
-                        let id = match this.create_session(Some(path), None, None, cx) {
+                        let target = match session_target(path, this.editor.as_deref()) {
+                            Ok(target) => target,
+                            Err(error) => {
+                                window.dispatch_action(Box::new(PushError::new(error)), cx);
+                                return;
+                            }
+                        };
+                        let id = match this.create_session(Some(&target.directory), None, None, cx)
+                        {
                             Err(e) => {
                                 window.dispatch_action(Box::new(PushError::new(e)), cx);
                                 window.close_dialog(cx);
@@ -120,10 +166,8 @@ impl Overlay {
                             }
                             Ok(id) => id,
                         };
-                        if path.is_file()
-                            && let Some(editor) = this.editor.as_ref()
-                        {
-                            this.session_manager.send_text(id, &format!("{editor} .\r"));
+                        if let Some(command) = target.command {
+                            this.session_manager.send_text(id, &command);
                         }
                         window.close_dialog(cx);
                     }
@@ -135,6 +179,37 @@ impl Overlay {
         )
         .detach();
         opener
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_target;
+
+    #[test]
+    fn a_file_opens_in_its_parent_and_is_passed_to_the_editor() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("-my notes.txt");
+        std::fs::write(&file, "").unwrap();
+        let target = session_target(&file, Some("nvim")).unwrap();
+        assert_eq!(target.directory, dir.path());
+        #[cfg(windows)]
+        assert_eq!(
+            target.command.as_deref(),
+            Some("nvim \".\\-my notes.txt\"\r")
+        );
+        #[cfg(not(windows))]
+        assert_eq!(target.command.as_deref(), Some("nvim './-my notes.txt'\r"));
+        assert!(session_target(&file, None).unwrap().command.is_none());
+    }
+
+    #[test]
+    fn a_directory_opens_itself_without_starting_the_editor() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = session_target(dir.path(), Some("nvim")).unwrap();
+        assert_eq!(target.directory, dir.path());
+        assert!(target.command.is_none());
+        assert!(session_target(&dir.path().join("missing"), Some("nvim")).is_err());
     }
 }
 /*
