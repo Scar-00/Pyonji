@@ -8,7 +8,6 @@ use gpui::*;
 use gpui_base::input::InputEvent;
 use gpui_base::input::InputState;
 use gpui_base::*;
-use gpui_component::scroll::ScrollableElement;
 use std::ops::Range;
 
 use crate::Next;

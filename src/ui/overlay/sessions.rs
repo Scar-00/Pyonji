@@ -1,14 +1,23 @@
 use std::ops::Range;
 
-use crate::{PyTheme as _, Pyonji, terminal::SessionId, util};
+use crate::{logging::ResultLogExt as _, terminal::SessionId, util, PyTheme as _, Pyonji};
+use crate::{Next, Prev, Submit};
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_base::*;
 use gpui_component::{
-    IconName, WindowExt,
     input::{Input, InputState},
+    IconName, WindowExt,
 };
 
-pub fn init(_: &mut App) {}
+const CONTEXT: &str = "SessionsView";
+
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("down", Next, Some(CONTEXT)),
+        KeyBinding::new("up", Prev, Some(CONTEXT)),
+        KeyBinding::new("enter", Submit, Some(CONTEXT)),
+    ])
+}
 
 pub struct SessionsView {
     pyonji: WeakEntity<Pyonji>,
@@ -62,6 +71,7 @@ impl SessionsView {
         cx.notify();
     }
 
+    #[tracing::instrument(level = "warn", skip(self, window, cx))]
     fn on_submit(
         &mut self,
         tab: usize,
@@ -69,13 +79,15 @@ impl SessionsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let _ = self.pyonji.update(cx, |this, cx| {
-            this.switch_tab(tab, cx);
-            if let Some(tab) = &mut this.tabs[tab] {
-                tab.set_active_session(id);
-            }
-            window.close_dialog(cx);
-        });
+        self.pyonji
+            .update(cx, |this, cx| {
+                this.switch_tab(tab, cx);
+                if let Some(tab) = &mut this.tabs[tab] {
+                    tab.set_active_session(id);
+                }
+                window.close_dialog(cx);
+            })
+            .log();
     }
 
     fn layout(
@@ -181,28 +193,25 @@ impl Render for SessionsView {
         let sessions_len = sessions.len();
 
         v_flex()
+            .key_context(CONTEXT)
             .track_focus(&self.focus_handle)
             .size_full()
-            .on_key_down({
+            .on_action(cx.listener(move |this, _: &Next, _, cx| {
+                Self::on_next(this, sessions_len, cx);
+            }))
+            .on_action(cx.listener(move |this, _: &Prev, _, cx| {
+                Self::on_prev(this, sessions_len, cx);
+            }))
+            .on_action(cx.listener({
                 let sessions = sessions.clone();
-                cx.listener(move |this, event: &KeyDownEvent, window: &mut Window, cx| {
-                    if event.is_held {
-                        return;
+                move |this, _: &Submit, window, cx| {
+                    if let Some((tab, id, _)) =
+                        this.selected.and_then(|selected| sessions.get(selected))
+                    {
+                        Self::on_submit(this, *tab, *id, window, cx);
                     }
-                    match event.keystroke.key.as_str() {
-                        "enter" => {
-                            if let Some(index) = this.selected
-                                && let Some((tab, id, _)) = sessions.get(index)
-                            {
-                                Self::on_submit(this, *tab, *id, window, cx);
-                            }
-                        }
-                        "down" => this.on_next(sessions_len, cx),
-                        "up" => this.on_prev(sessions_len, cx),
-                        _ => {}
-                    }
-                })
-            })
+                }
+            }))
             .child(
                 v_flex()
                     .w_full()

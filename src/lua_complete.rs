@@ -1,15 +1,15 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use async_lsp::lsp_types;
 use async_lsp::{
-    LanguageServer as _, ServerSocket,
     concurrency::ConcurrencyLayer,
     lsp_types::{
-        InitializeParams,
         notification::{LogMessage, Progress, PublishDiagnostics, ShowMessage},
+        InitializeParams,
     },
     panic::CatchUnwindLayer,
     router::Router,
     tracing::TracingLayer,
+    LanguageServer as _, ServerSocket,
 };
 use futures::channel::oneshot::{self, Sender};
 use gpui::{AsyncApp, Task};
@@ -25,6 +25,8 @@ use tower::ServiceBuilder;
 
 use crate::config;
 use crate::logging::ResultLogExt as _;
+#[cfg(windows)]
+use smol::process::windows::CommandExt;
 
 #[derive(Debug)]
 pub struct LspClient {
@@ -102,13 +104,15 @@ impl LspClient {
                 .service(router)
         });
 
-        let mut child = Command::new(cmd)
-            .current_dir(&root_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()?;
+        let mut cmd = Command::new(cmd);
+        cmd.current_dir(&root_dir);
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::inherit());
+        cmd.kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+        let mut child = cmd.spawn()?;
         let stdout = child.stdout.take().unwrap();
         let stdin = child.stdin.take().unwrap();
         let task = Tokio::spawn(cx, async move {
@@ -146,8 +150,7 @@ impl LspClient {
                 }
             })
             .unwrap_or_else(|| root_dir.join("init.lua"));
-        let uri = Url::from_file_path(config_path)
-            .map_err(|_| anyhow!("failed to parse url"))?;
+        let uri = Url::from_file_path(config_path).map_err(|_| anyhow!("failed to parse url"))?;
         server.did_open(DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
                 uri: uri.clone(),
