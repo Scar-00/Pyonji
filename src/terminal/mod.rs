@@ -3,7 +3,7 @@ use crate::pty::Pty;
 use gpui::{KeyDownEvent, Modifiers, MouseButton};
 pub use manager::*;
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorState {
     Bar,
     Block,
@@ -537,6 +537,8 @@ pub struct TerminalSession {
     pub pty: Pty,
     pub vt: vt100::Parser<CB>,
     pub cursor_style: CursorState,
+    pub cursor_blink: bool,
+    pub wheel_remainder: f32,
     title: String,
     custom_title: Option<String>,
     pub mouse_pressed_button: Option<MouseButton>,
@@ -600,23 +602,12 @@ impl TerminalSession {
         self.vt.screen().scrollback() != current
     }
 
-    fn interrupt_pty_data(&mut self, data: &[u8]) {
-        let Ok(str) = std::str::from_utf8(data) else {
-            return;
-        };
-        for m in cansi::parse(str) {
-            match m.text {
-                "\x1b[1 q" | "\x1b[2 q" => {
-                    self.cursor_style = CursorState::Block;
-                }
-                "\x1b[3 q" | "\x1b[4 q" => {
-                    self.cursor_style = CursorState::Underline;
-                }
-                "\x1b[0 q" | "\x1b[5 q" | "\x1b[6 q" => {
-                    self.cursor_style = CursorState::Bar;
-                }
-                _ => {}
-            }
+    pub fn paste(&mut self, text: &str) {
+        self.reset_scrollback();
+        if self.vt.screen().bracketed_paste() {
+            self.pty.add_bytes(format!("\x1b[200~{text}\x1b[201~"));
+        } else {
+            self.pty.add_bytes(text.as_bytes());
         }
     }
 
@@ -628,7 +619,7 @@ impl TerminalSession {
         let key = event.keystroke.key.as_str();
 
         // Let OS-level shortcuts (cmd/super, fn) pass through to the platform.
-        if mods.platform || mods.function {
+        if mods.platform {
             return false;
         }
 
@@ -638,13 +629,23 @@ impl TerminalSession {
         // Other `ctrl` combinations fall through so `csi_modifier` below
         // still encodes the modifier (e.g. `ctrl-up` -> `\x1b[1;5A`).
         if mods.control && !mods.alt {
-            if let Some(byte) = control_key_byte(key) {
+            if let Some(byte) = control_key_byte(&key.to_ascii_lowercase()) {
                 self.pty.add_bytes([byte]);
                 return true;
             }
-            if key == "space" {
-                // No text is produced for this chord; don't swallow it.
-                return false;
+            let byte = match key {
+                "space" | "@" | "2" => Some(0),
+                "[" | "3" => Some(0x1b),
+                "\\" | "4" => Some(0x1c),
+                "]" | "5" => Some(0x1d),
+                "^" | "6" => Some(0x1e),
+                "_" | "7" | "-" => Some(0x1f),
+                "?" | "8" => Some(0x7f),
+                _ => None,
+            };
+            if let Some(byte) = byte {
+                self.pty.add_bytes([byte]);
+                return true;
             }
         }
 
@@ -652,18 +653,30 @@ impl TerminalSession {
         let app_cursor = self.vt.screen().application_cursor();
         match key {
             "escape" => {
+                if mods.alt {
+                    self.pty.add_bytes([0x1b]);
+                }
                 self.pty.add_bytes([0x1b]);
                 true
             }
             "enter" => {
+                if mods.alt {
+                    self.pty.add_bytes([0x1b]);
+                }
                 self.pty.add_bytes(b"\r");
                 true
             }
             "backspace" => {
-                self.pty.add_bytes([0x7f]);
+                if mods.alt {
+                    self.pty.add_bytes([0x1b]);
+                }
+                self.pty.add_bytes([if mods.control { 0x08 } else { 0x7f }]);
                 true
             }
             "tab" => {
+                if mods.alt {
+                    self.pty.add_bytes([0x1b]);
+                }
                 if mods.shift {
                     self.pty.add_bytes(b"\x1b[Z");
                 } else {
@@ -695,11 +708,11 @@ impl TerminalSession {
                 true
             }
             "home" => {
-                self.pty.add_csi_key(csi, b'H');
+                self.pty.add_cursor_key(csi, b'H', app_cursor);
                 true
             }
             "end" => {
-                self.pty.add_csi_key(csi, b'F');
+                self.pty.add_cursor_key(csi, b'F', app_cursor);
                 true
             }
             "insert" => {
@@ -850,7 +863,16 @@ impl TerminalSession {
             return;
         }
 
-        let mut button_code = if lines > 0.0 { 64u8 } else { 65u8 };
+        if !lines.is_finite() {
+            return;
+        }
+        let total = self.wheel_remainder + lines;
+        let steps = total.trunc() as i32;
+        self.wheel_remainder = total - steps as f32;
+        if steps == 0 {
+            return;
+        }
+        let mut button_code = if steps > 0 { 64u8 } else { 65u8 };
         if mods.shift {
             button_code += 4;
         }
@@ -860,7 +882,9 @@ impl TerminalSession {
         if mods.control {
             button_code += 16;
         }
-        self.send_mouse_sequence(button_code, false, col, row);
+        for _ in 0..steps.unsigned_abs().min(1024) {
+            self.send_mouse_sequence(button_code, false, col, row);
+        }
         self.last_mouse_cell = Some((col, row));
     }
 
@@ -909,7 +933,18 @@ impl TerminalSession {
         }
 
         let mut code = match action {
-            MouseAction::Release => 3u8,
+            MouseAction::Release
+                if self.vt.screen().mouse_protocol_encoding()
+                    != vt100::MouseProtocolEncoding::Sgr =>
+            {
+                3u8
+            }
+            MouseAction::Release => match button {
+                Some(MouseButton::Left) => 0,
+                Some(MouseButton::Middle) => 1,
+                Some(MouseButton::Right) => 2,
+                _ => return,
+            },
             MouseAction::Motion => {
                 let base = match button {
                     Some(MouseButton::Left) => 0u8,
@@ -948,7 +983,24 @@ impl TerminalSession {
                 let seq = format!("\x1b[<{code};{col};{row}{terminator}");
                 self.pty.add_bytes(seq.as_bytes());
             }
-            vt100::MouseProtocolEncoding::Default | vt100::MouseProtocolEncoding::Utf8 => {
+            vt100::MouseProtocolEncoding::Utf8 => {
+                if col > 2015 || row > 2015 {
+                    return;
+                }
+                let mut seq = String::from("\x1b[M");
+                for value in [
+                    u32::from(code) + 32,
+                    u32::from(col) + 32,
+                    u32::from(row) + 32,
+                ] {
+                    let Some(ch) = char::from_u32(value) else {
+                        return;
+                    };
+                    seq.push(ch);
+                }
+                self.pty.add_bytes(seq.as_bytes());
+            }
+            vt100::MouseProtocolEncoding::Default => {
                 let Some(cb) = code.checked_add(32) else {
                     return;
                 };

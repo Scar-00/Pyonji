@@ -18,14 +18,13 @@ pub struct SshConnection {
 
 pub struct Pty {
     master: Box<dyn MasterPty>,
-    writer: Box<dyn Write + Send>,
+    writer: std::sync::mpsc::Sender<Vec<u8>>,
     killer: Box<dyn ChildKiller>,
 }
 
 pub enum Event {
     Closed(SessionId),
     Data(SessionId, Vec<u8>),
-    ProgramChanged((SessionId, String)),
     ConfigChanged,
     LuaPrint(String),
 }
@@ -38,72 +37,11 @@ impl Pty {
         id: SessionId,
         path: Option<&Path>,
     ) -> Result<Self> {
-        let system = native_pty_system();
-        let pair = system
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .context("failed to open pty pair")?;
-
-        let program_name = Self::get_shell();
-        let mut cmd = CommandBuilder::new(program_name);
+        let mut cmd = CommandBuilder::new(Self::get_shell());
         if let Some(path) = path {
             cmd.cwd(path);
         }
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-        std::env::vars_os().for_each(|var| {
-            cmd.env(var.0, var.1);
-        });
-
-        let mut child = pair
-            .slave
-            .spawn_command(cmd)
-            .context("failed to spawn cmd.exe")?;
-        drop(pair.slave);
-
-        let mut reader = pair
-            .master
-            .try_clone_reader()
-            .context("failed to clone PTY reader")?;
-        let writer = pair
-            .master
-            .take_writer()
-            .context("failed to take PTY writer")?;
-
-        let killer = child.clone_killer();
-
-        std::thread::spawn({
-            let tx = tx.clone();
-            move || {
-                _ = child.wait();
-                _ = tx.send_blocking(Event::Closed(id));
-            }
-        });
-
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => {
-                        _ = tx.send_blocking(Event::Closed(id));
-                        break;
-                    }
-                    Ok(n) => {
-                        _ = tx.send_blocking(Event::Data(id, buf[..n].to_vec()));
-                    }
-                }
-            }
-        });
-
-        Ok(Self {
-            master: pair.master,
-            writer,
-            killer,
-        })
+        Self::spawn(rows, cols, tx, id, cmd)
     }
 
     pub fn new_remote(
@@ -113,144 +51,91 @@ impl Pty {
         id: SessionId,
         ssh: &SshConnection,
     ) -> Result<Self> {
-        let system = native_pty_system();
-        let pair = system
+        let mut cmd = CommandBuilder::new("ssh");
+        cmd.arg(format!("{}@{}", ssh.user_name, ssh.ip));
+        Self::spawn(rows, cols, tx, id, cmd)
+    }
+
+    fn spawn(
+        rows: u16,
+        cols: u16,
+        tx: Sender<Event>,
+        id: SessionId,
+        mut cmd: CommandBuilder,
+    ) -> Result<Self> {
+        let pair = native_pty_system()
             .openpty(PtySize {
-                rows,
-                cols,
+                rows: rows.max(1),
+                cols: cols.max(1),
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .context("failed to open pty pair")?;
-
-        let program_name = "ssh";
-        let mut cmd = CommandBuilder::new(program_name);
-        cmd.arg(format!("{}@{}", ssh.user_name, ssh.ip));
+            .context("failed to open PTY")?;
+        for (key, value) in std::env::vars_os() {
+            cmd.env(key, value);
+        }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        std::env::vars_os().for_each(|var| {
-            cmd.env(var.0, var.1);
-        });
-
         let mut child = pair
             .slave
             .spawn_command(cmd)
-            .context("failed to spawn cmd.exe")?;
+            .context("failed to spawn terminal process")?;
         drop(pair.slave);
-
+        let killer = child.clone_killer();
         let mut reader = pair
             .master
             .try_clone_reader()
             .context("failed to clone PTY reader")?;
-        let writer = pair
+        let mut writer = pair
             .master
             .take_writer()
             .context("failed to take PTY writer")?;
-
-        let killer = child.clone_killer();
-
-        std::thread::spawn({
-            let tx = tx.clone();
-            move || {
-                _ = child.wait();
-                _ = tx.send_blocking(Event::Closed(id));
+        let (write_tx, write_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            while let Ok(bytes) = write_rx.recv() {
+                if let Err(error) = writer.write_all(&bytes) {
+                    tracing::error!(%error, %id, "PTY write failed");
+                    break;
+                }
             }
         });
-
+        // Only the reader closes a session, after all output has been delivered.
+        // Reap the process separately: descendants may keep the PTY open after it exits.
+        std::thread::spawn(move || {
+            if let Err(error) = child.wait() {
+                tracing::warn!(%error, %id, "PTY process wait failed");
+            }
+        });
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => {
-                        _ = tx.send_blocking(Event::Closed(id));
-                        break;
-                    }
+                    Ok(0) => break,
                     Ok(n) => {
-                        _ = tx.send_blocking(Event::Data(id, buf[..n].to_vec()));
+                        if tx
+                            .send_blocking(Event::Data(id, buf[..n].to_vec()))
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
                 }
             }
+            _ = tx.send_blocking(Event::Closed(id));
         });
-
         Ok(Self {
             master: pair.master,
-            writer,
+            writer: write_tx,
             killer,
         })
-
-        /*const SSH_SOCKET: Token = Token(0);
-        const COMMAND_WAKER: Token = Token(1);
-
-        let stream = TcpStream::connect(("192.168.178.20", 22))?;
-        let readiness = stream.try_clone()?;
-        readiness.set_nonblocking(true);
-        let mut session = Session::new()?;
-        session.set_tcp_stream(stream);
-        session.handshake()?;
-
-        session.userauth_password("ive", "FifI-0808")?;
-        if !session.authenticated() {
-            anyhow::bail!("failed to auth session");
-        }
-        session.set_blocking(false);
-
-        let mut channel = session.channel_session()?;
-
-        channel.request_pty(
-            "xterm-256color",
-            None,
-            Some((u32::from(cols), u32::from(rows), 0, 0)),
-        )?;
-
-        channel.handle_extended_data(ExtendedData::Merge)?;
-        channel.shell()?;
-
-        let mut mio_socket = MioTcpStream::from_std(readiness);
-        let mut poll = Poll::new()?;
-
-        poll.registry().register(
-            &mut mio_socket,
-            SSH_SOCKET,
-            Interest::READABLE,
-        )?;
-
-        let waker = Arc::new(Waker::new(
-            poll.registry(),
-            COMMAND_WAKER,
-        )?);
-
-
-        let mut waiter = channel.clone();
-        let mut reader = channel.clone();
-
-        std::thread::spawn({
-            let tx = tx.clone();
-            move || {
-                _ = dbg!(waiter.wait_eof());
-                _ = dbg!(waiter.wait_close());
-                println!("closed");
-                _ = tx.send_event(Event::Closed(id));
-            }
-        });
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => {
-                        _ = tx.send_event(Event::Closed(id));
-                        break;
-                    }
-                    Ok(n) => {
-                        println!("data = {:?}", str::from_utf8(&buf[..n]));
-                        _ = tx.send_event(Event::Data(id, buf[..n].to_vec()));
-                    }
-                }
-            }
-        });*/
     }
 
     pub fn add_bytes(&mut self, buf: impl AsRef<[u8]>) {
-        _ = self.writer.write(buf.as_ref());
+        if self.writer.send(buf.as_ref().to_vec()).is_err() {
+            tracing::error!("PTY writer disconnected");
+        }
     }
 
     pub fn add_csi_key(&mut self, csi_param: Option<u8>, byte: u8) {
@@ -277,13 +162,13 @@ impl Pty {
         }
     }
 
-    pub fn resize(&mut self, rows: u16, cols: u16) {
-        _ = self.master.resize(PtySize {
-            rows,
-            cols,
+    pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
+        self.master.resize(PtySize {
+            rows: rows.max(1),
+            cols: cols.max(1),
             pixel_width: 0,
             pixel_height: 0,
-        });
+        })
     }
 
     pub fn kill(&mut self) {
@@ -298,9 +183,7 @@ impl Pty {
                 windows => env::var_os("COMSPEC")?,
             };
 
-            Path::new(&shell)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
+            Some(shell.to_string_lossy().into_owned())
         }
         from_env().unwrap_or_else(|| {
             cfg_select! {
@@ -309,5 +192,11 @@ impl Pty {
             }
             .to_string()
         })
+    }
+}
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        _ = self.killer.kill();
     }
 }

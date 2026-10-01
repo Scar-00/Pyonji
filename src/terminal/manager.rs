@@ -40,8 +40,10 @@ impl IntoLua for SessionId {
 }
 
 pub struct CB {
-    id: SessionId,
-    proxy: Sender<Event>,
+    title: Option<String>,
+    cursor_style: CursorState,
+    cursor_blink: bool,
+    replies: Vec<Vec<u8>>,
 }
 
 impl CB {
@@ -71,9 +73,7 @@ impl Callbacks for CB {
         let Some(title) = Self::parse_title(title) else {
             return;
         };
-        _ = self
-            .proxy
-            .send_blocking(Event::ProgramChanged((self.id, title)));
+        self.title = Some(title);
     }
 
     fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, _ty: &[u8], _data: &[u8]) {}
@@ -86,14 +86,45 @@ impl Callbacks for CB {
 
     fn unhandled_escape(&mut self, _: &mut vt100::Screen, _: Option<u8>, _: Option<u8>, _: u8) {}
 
+    fn reset(&mut self, _: &mut vt100::Screen) {
+        self.cursor_style = CursorState::Block;
+        self.cursor_blink = true;
+    }
+
     fn unhandled_csi(
         &mut self,
-        _: &mut vt100::Screen,
-        _: Option<u8>,
-        _: Option<u8>,
-        _: &[&[u16]],
-        _: char,
+        screen: &mut vt100::Screen,
+        i1: Option<u8>,
+        i2: Option<u8>,
+        params: &[&[u16]],
+        c: char,
     ) {
+        if i2.is_some() {
+            return;
+        }
+        let param = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
+        match (i1, c, param) {
+            (Some(b' '), 'q', 0..=6) => {
+                self.cursor_style = match param {
+                    0..=2 => CursorState::Block,
+                    3..=4 => CursorState::Underline,
+                    _ => CursorState::Bar,
+                };
+                self.cursor_blink = matches!(param, 0 | 1 | 3 | 5);
+            }
+            (None, 'n', 5) => self.replies.push(b"\x1b[0n".to_vec()),
+            (None | Some(b'?'), 'n', 6) => {
+                let (row, col) = screen.cursor_position();
+                let (_, cols) = screen.size();
+                let prefix = if i1.is_some() { "?" } else { "" };
+                self.replies.push(
+                    format!("\x1b[{prefix}{};{}R", row + 1, col.min(cols - 1) + 1).into_bytes(),
+                );
+            }
+            (None, 'c', 0) => self.replies.push(b"\x1b[?1;2c".to_vec()),
+            (Some(b'>'), 'c', 0) => self.replies.push(b"\x1b[>0;3;0c".to_vec()),
+            _ => {}
+        }
     }
 
     fn unhandled_osc(&mut self, _: &mut vt100::Screen, _params: &[&[u8]]) {}
@@ -132,11 +163,15 @@ impl SessionManager {
                     cols,
                     2000,
                     CB {
-                        id,
-                        proxy: self.proxy.clone(),
+                        title: None,
+                        cursor_style: CursorState::Block,
+                        cursor_blink: true,
+                        replies: Vec::new(),
                     },
                 ),
-                cursor_style: CursorState::Bar,
+                cursor_style: CursorState::Block,
+                cursor_blink: true,
+                wheel_remainder: 0.0,
                 title: "cmd".into(),
                 custom_title: None,
                 mouse_pressed_button: None,
@@ -165,11 +200,15 @@ impl SessionManager {
                     cols,
                     2000,
                     CB {
-                        id,
-                        proxy: self.proxy.clone(),
+                        title: None,
+                        cursor_style: CursorState::Block,
+                        cursor_blink: true,
+                        replies: Vec::new(),
                     },
                 ),
-                cursor_style: CursorState::Bar,
+                cursor_style: CursorState::Block,
+                cursor_blink: true,
+                wheel_remainder: 0.0,
                 title: "ssh".into(),
                 custom_title: None,
                 mouse_pressed_button: None,
@@ -187,8 +226,24 @@ impl SessionManager {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
-        session.interrupt_pty_data(data);
         session.vt.process(data);
+        let (title, style, blink, replies) = {
+            let cb = session.vt.callbacks_mut();
+            (
+                cb.title.take(),
+                cb.cursor_style,
+                cb.cursor_blink,
+                std::mem::take(&mut cb.replies),
+            )
+        };
+        if let Some(title) = title {
+            session.set_title(title);
+        }
+        session.cursor_style = style;
+        session.cursor_blink = blink;
+        for reply in replies {
+            session.pty.add_bytes(reply);
+        }
     }
 
     pub fn send_text(&mut self, id: SessionId, text: &str) {
@@ -210,8 +265,14 @@ impl SessionManager {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
-        session.pty.resize(rows, cols);
-        session.vt.screen_mut().set_size(rows, cols);
+        let (rows, cols) = (rows.max(1), cols.max(1));
+        if session.vt.screen().size() == (rows, cols) {
+            return;
+        }
+        match session.pty.resize(rows, cols) {
+            Ok(()) => session.vt.screen_mut().set_size(rows, cols),
+            Err(error) => tracing::error!(%error, %id, rows, cols, "PTY resize failed"),
+        }
     }
 
     pub fn is_empty(&self) -> bool {

@@ -24,7 +24,7 @@ A terminal emulator whose grid is drawn on the GPU, configured from Lua.
 - **Cursor shape** follows the terminal's own `DECSCUSR` sequence — bar, block
   or underline — so applications that set it are honoured.
 - **IME preedit** and clipboard paste on <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd>.
-- **SSH sessions** over libssh2, declared in the config.
+- **SSH sessions** through the system `ssh` command, declared in the config.
 - **Overlays** for the command palette, the session list, a directory picker,
   and the release screen.
 - **A command palette and a `:` prompt**, over one command table: everything
@@ -119,7 +119,7 @@ run.
 ```lua
 py:config({
     font_family = "Iosevka",
-    font_size = 24,
+    font_size = 24,        -- logical pixels; scales with the display
     line_height = 1.1,      -- a multiple of font_size
     fullscreen = false,
     default_cwd = nil,
@@ -249,7 +249,7 @@ move the language server's suggestions instead of walking what came before.
   inputs, buttons, scrollbars, and the theme
 - [vt100](https://github.com/doy/vt100-rust) — terminal emulation
 - [portable-pty](https://github.com/wezterm/wezterm) — local PTYs
-- [ssh2](https://github.com/alexcrichton/ssh2-rs) — SSH
+- System `ssh` — SSH sessions
 - [swash](https://github.com/BrianSharpe/swash) — font shaping and rasterising
 - [mlua](https://github.com/mlua-rs/mlua) — Lua, vendored build
 - [self_update](https://github.com/jaemk/self_update) — the updater

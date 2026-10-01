@@ -1,5 +1,5 @@
 use crate::pty::{Event as PtyEvent, SshConnection};
-use crate::terminal::{SessionId, SplitDirection, Tab as TerminalTab};
+use crate::terminal::{SessionId, SplitDirection};
 use crate::ui::OverlayScreen;
 use crate::util::UnsafeRefMut;
 use crate::{EnterLuaRepl, EnterRename, ExecKeybind, Pyonji};
@@ -131,11 +131,11 @@ impl LuaUserData for LuaProxy {
     fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
         methods.add_method_mut("config", |lua, this, table: LuaTable| {
             let font_size: Option<f32> = config_value(lua, &table, "font_size");
-            if font_size.is_some_and(|size| size <= 0.0) {
+            if font_size.is_some_and(|size| !size.is_finite() || size <= 0.0) {
                 tracing::error!("invalid `font_size` (must be positive), ignoring");
             }
             let line_height: Option<f32> = config_value(lua, &table, "line_height");
-            if line_height.is_some_and(|height| height <= 0.0) {
+            if line_height.is_some_and(|height| !height.is_finite() || height <= 0.0) {
                 tracing::error!("invalid `line_height` (must be positive), ignoring");
             }
             let font_family: Option<Option<String>> =
@@ -144,10 +144,10 @@ impl LuaUserData for LuaProxy {
                 config_option_value(lua, &table, "default_cwd");
             let ssh_sessions = util::collect_ssh_sessions(lua, &table);
 
-            if let Some(size) = font_size.filter(|size| *size > 0.0) {
+            if let Some(size) = font_size.filter(|size| size.is_finite() && *size > 0.0) {
                 this.py.font_size = size;
             }
-            if let Some(height) = line_height.filter(|height| *height > 0.0) {
+            if let Some(height) = line_height.filter(|height| height.is_finite() && *height > 0.0) {
                 this.py.line_height = height;
             }
             if let Some(family) = font_family {
@@ -162,17 +162,7 @@ impl LuaUserData for LuaProxy {
             if let Some(editor) = config_option_value::<String>(lua, &table, "editor") {
                 this.py.editor = editor;
             }
-            this.py.terminal.update(this.cx.app.as_mut(), |term, _| {
-                let Some(renderer) = term.renderer.as_mut() else {
-                    return;
-                };
-                renderer
-                    .set_font_metrics(this.py.font_size, this.py.font_size * this.py.line_height);
-                if let Some(font) = this.py.font_family.as_deref() {
-                    renderer.set_font_family(font);
-                }
-                renderer.evict_glyphs();
-            });
+            this.cx.as_ctx().notify();
             Ok(())
         });
         methods.add_method_mut("bind", |lua, this, args: LuaMultiValue| {
@@ -240,14 +230,14 @@ impl LuaUserData for LuaProxy {
                     Option<SessionId>
                 )
             );
-            let _direction = match direction.as_deref().map(str::to_lowercase).as_deref() {
+            let direction = match direction.as_deref().map(str::to_lowercase).as_deref() {
                 Some("horizontal") | Some("h") => SplitDirection::Horizontal,
                 _ => SplitDirection::Vertical,
             };
             callable_action!(lua, this => {
                 let dir = dir.clone();
                 move |this: &mut Self| -> LuaResult<SessionId> {
-                    let id = this.py.create_session(dir.as_ref().map(Path::new), tab, parent, &mut this.cx.as_ctx())
+                    let id = this.py.create_session(dir.as_ref().map(Path::new), tab, parent, direction, &mut this.cx.as_ctx())
                         .context("failed to create session")?;
                     Ok(id)
                 }
@@ -278,48 +268,14 @@ impl LuaUserData for LuaProxy {
         });
         methods.add_function("next_tab", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<usize> {
-                let py = &mut this.py;
-                let live: Vec<usize> = (0..py.tabs.len())
-                    .filter(|&index| py.tabs[index].is_some())
-                    .collect();
-                let next = match live.as_slice() {
-                    [] => py.current_tab.unwrap_or(0),
-                    live => match py
-                        .current_tab
-                        .and_then(|current| live.iter().position(|&index| index == current))
-                    {
-                        Some(pos) => live[(pos + 1) % live.len()],
-                        None => live[0],
-                    },
-                };
-                if !live.is_empty() {
-                    py.current_tab = Some(next);
-                    py.wheel_remainder = 0.0;
-                }
-                Ok(next)
+                this.py.next_tab(&mut this.cx.as_ctx());
+                Ok(this.py.current_tab.unwrap_or(0))
             })
         });
         methods.add_function("prev_tab", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<usize> {
-                let py = &mut this.py;
-                let live: Vec<usize> = (0..py.tabs.len())
-                    .filter(|&index| py.tabs[index].is_some())
-                    .collect();
-                let prev = match live.as_slice() {
-                    [] => py.current_tab.unwrap_or(0),
-                    live => match py
-                        .current_tab
-                        .and_then(|current| live.iter().position(|&index| index == current))
-                    {
-                        Some(pos) => live[(pos + live.len() - 1) % live.len()],
-                        None => live[live.len() - 1],
-                    },
-                };
-                if !live.is_empty() {
-                    py.current_tab = Some(prev);
-                    py.wheel_remainder = 0.0;
-                }
-                Ok(prev)
+                this.py.prev_tab(&mut this.cx.as_ctx());
+                Ok(this.py.current_tab.unwrap_or(0))
             })
         });
         methods.add_function("move_to", |lua, args: LuaMultiValue| {
@@ -334,16 +290,7 @@ impl LuaUserData for LuaProxy {
                 let Some(session) = this.py.active_session() else {
                     return Ok(false);
                 };
-                let py = &mut this.py;
-                remove_session_from_tabs(py, session);
-                if py.tabs[target].is_none() {
-                    py.tabs[target] = Some(TerminalTab::new(session));
-                } else if let Some(tab) = py.tabs[target].as_mut() {
-                    tab.split_active(SplitDirection::Vertical, session);
-                }
-                py.current_tab = Some(target);
-                py.wheel_remainder = 0.0;
-                Ok(true)
+                Ok(this.py.move_session(None, target, session, &mut this.cx.as_ctx()))
             })
         });
         methods.add_function("split", |lua, args: LuaMultiValue| {
@@ -378,12 +325,7 @@ impl LuaUserData for LuaProxy {
         });
         methods.add_function("focus_next_pane", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<Option<SessionId>> {
-                let Some(current) = this.py.current_tab else {
-                    return Ok(None);
-                };
-                let res = this.py.tabs[current].as_mut().and_then(|tab| tab.focus_next());
-                this.cx.as_ctx().notify();
-                Ok(res)
+                Ok(this.py.focus_next_pane(&mut this.cx.as_ctx()))
             })
         });
         methods.add_function("detach", |lua, this: Option<LuaAnyUserData>| {
@@ -391,36 +333,13 @@ impl LuaUserData for LuaProxy {
                 let Some(session) = this.py.active_session() else {
                     return Ok(false);
                 };
-                if !this.py.detached_sessions.contains(&session) {
-                    this.py.detached_sessions.push(session);
-                }
-                remove_session_from_tabs(&mut this.py, session);
-                Ok(true)
+                Ok(this.py.detach_session(session, &mut this.cx.as_ctx()))
             })
         });
         methods.add_function("attach", |lua, args: LuaMultiValue| {
             let (this, (session, tab)) = args!(args, lua, (SessionId, Option<usize>));
             callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
-                if this.py.session_manager.session(session).is_none() {
-                    return Ok(false);
-                }
-                let Some(target) = tab.or(this.py.current_tab) else {
-                    return Ok(false);
-                };
-                if target >= this.py.tabs.len() {
-                    return Ok(false);
-                }
-                let py = &mut this.py;
-                py.detached_sessions.retain(|detached| *detached != session);
-                remove_session_from_tabs(py, session);
-                if py.tabs[target].is_none() {
-                    py.tabs[target] = Some(TerminalTab::new(session));
-                } else if let Some(tab) = py.tabs[target].as_mut() {
-                    tab.split_active(SplitDirection::Vertical, session);
-                }
-                py.current_tab = Some(target);
-                py.wheel_remainder = 0.0;
-                Ok(true)
+                Ok(this.py.attach_session(session, tab, &mut this.cx.as_ctx()))
             })
         });
         methods.add_function("rename", |lua, args: LuaMultiValue| {
@@ -561,38 +480,6 @@ impl LuaUserData for LuaProxy {
     }
 }
 
-fn remove_session_from_tabs(py: &mut Pyonji, session: SessionId) {
-    let current = py.current_tab;
-    let mut emptied_current = false;
-    for (index, tab) in py.tabs.iter_mut().enumerate() {
-        let Some(tab_state) = tab.as_mut() else {
-            continue;
-        };
-        if !tab_state.remove_session(session) {
-            continue;
-        }
-        if tab_state.is_empty() {
-            *tab = None;
-            emptied_current |= Some(index) == current;
-        }
-    }
-    if !emptied_current {
-        return;
-    }
-    let Some(closed) = current else {
-        return;
-    };
-    if let Some(tab) = (0..py.tabs.len())
-        .map(|offset| (closed + py.tabs.len() - 1 - offset) % py.tabs.len())
-        .find(|&tab| py.tabs[tab].is_some())
-    {
-        py.current_tab = Some(tab);
-        py.wheel_remainder = 0.0;
-        return;
-    }
-    py.current_tab = Some(closed.min(py.tabs.len().saturating_sub(1)));
-}
-
 fn config_value<T: FromLua>(lua: &Lua, table: &LuaTable, key: &str) -> Option<T> {
     if !table.contains_key(key).unwrap_or(false) {
         return None;
@@ -679,7 +566,7 @@ pub fn watch(tx: Sender<PtyEvent>) {
                     continue;
                 };
                 if matches!(event.kind, EventKind::Modify(_)) {
-                    tx.force_send(PtyEvent::ConfigChanged)
+                    tx.send_blocking(PtyEvent::ConfigChanged)
                         .expect("event tx closed");
                 }
             }

@@ -4,7 +4,12 @@ use gpui::{Context, Window};
 use nucleo_matcher::{Config as MatchConfig, Matcher, Utf32Str};
 
 use crate::{
-    Pyonji, config::{self, LuaAction}, logging::ResultLogExt as _, pty::SshConnection, terminal::SessionId, ui::{OverlayScreen, StatusBarMode}
+    Pyonji,
+    config::{self, LuaAction},
+    logging::ResultLogExt as _,
+    pty::SshConnection,
+    terminal::SessionId,
+    ui::{OverlayScreen, StatusBarMode},
 };
 
 pub type Runner = Rc<dyn Fn(&[String], &mut Pyonji, &mut Window, &mut Context<Pyonji>)>;
@@ -230,7 +235,8 @@ fn byte_ranges(name: &str, marks: &[u32]) -> Vec<Range<usize>> {
     ranges
 }
 
-/*pub enum Resolution<'a> {
+#[cfg(test)]
+pub enum Resolution<'a> {
     Found {
         command: &'a Command,
         args: Vec<String>,
@@ -242,6 +248,7 @@ fn byte_ranges(name: &str, marks: &[u32]) -> Vec<Range<usize>> {
     Empty,
 }
 
+#[cfg(test)]
 pub fn resolve<'a>(commands: &'a [Command], line: &str) -> Resolution<'a> {
     let line = line.trim();
     if line.is_empty() {
@@ -256,7 +263,7 @@ pub fn resolve<'a>(commands: &'a [Command], line: &str) -> Resolution<'a> {
             closest: closest(commands, name),
         },
     }
-}*/
+}
 
 pub fn naming(commands: &[Command], query: &str) -> bool {
     let name = query_name(query);
@@ -413,12 +420,12 @@ fn builtins() -> Vec<Command> {
             [Arg::new("tab")],
             Origin::Workspace,
             "Move the focused session into another tab",
-            |args, py, _, _| {
+            |args, py, _, cx| {
                 let (Some(tab), Some(session)) = (tab_index(args.first()), py.active_session())
                 else {
                     return;
                 };
-                py.move_session(None, tab, session);
+                py.move_session(None, tab, session, cx);
             },
         ),
         Command::new(
@@ -426,8 +433,15 @@ fn builtins() -> Vec<Command> {
             [],
             Origin::Workspace,
             "Split the tab into panes side by side",
-            |_, _, _, _| {
-                //py.split_active(SplitDirection::Vertical, cx);
+            |_, py, _, cx| {
+                py.create_session(
+                    None,
+                    None,
+                    None,
+                    crate::terminal::SplitDirection::Vertical,
+                    cx,
+                )
+                .log();
             },
         ),
         Command::new(
@@ -435,8 +449,15 @@ fn builtins() -> Vec<Command> {
             [],
             Origin::Workspace,
             "Split the tab into panes stacked",
-            |_, _, _, _| {
-                //py.split_active(SplitDirection::Horizontal, cx);
+            |_, py, _, cx| {
+                py.create_session(
+                    None,
+                    None,
+                    None,
+                    crate::terminal::SplitDirection::Horizontal,
+                    cx,
+                )
+                .log();
             },
         ),
         Command::new(
@@ -445,11 +466,7 @@ fn builtins() -> Vec<Command> {
             Origin::Workspace,
             "Move the focus to the next pane",
             |_, py: &mut Pyonji, _: &mut Window, cx: &mut Context<Pyonji>| {
-                let Some(current) = py.current_tab else {
-                    return;
-                };
-                py.tabs[current].as_mut().and_then(|tab| tab.focus_next());
-                cx.notify();
+                py.focus_next_pane(cx);
             },
         ),
         Command::new(
@@ -457,12 +474,10 @@ fn builtins() -> Vec<Command> {
             [],
             Origin::Workspace,
             "Hide the focused session without closing it",
-            |_, _, _, cx| {
-                /*let Some(session) = py.active_session() else {
-                    return;
-                };*/
-                //py.detach_session(session, cx);
-                cx.notify();
+            |_, py, _, cx| {
+                if let Some(session) = py.active_session() {
+                    py.detach_session(session, cx);
+                }
             },
         ),
         Command::new(
@@ -471,9 +486,10 @@ fn builtins() -> Vec<Command> {
             Origin::Workspace,
             "Rename the focused session",
             |args, py: &mut Pyonji, _: &mut Window, cx: &mut Context<Pyonji>| {
-                let Some(session) = py.active_session().and_then(|id| {
-                    py.session_manager.session_mut(id)
-                }) else {
+                let Some(session) = py
+                    .active_session()
+                    .and_then(|id| py.session_manager.session_mut(id))
+                else {
                     return;
                 };
                 session.rename(args.join(" "));

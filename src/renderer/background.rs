@@ -51,7 +51,7 @@ pub struct BackgroundRenderer {
     vertex_buffer: Buffer,
     index_buffer: Buffer,
     vertices: Vec<Vertex>,
-    indices: Vec<u16>,
+    indices: Vec<u32>,
 }
 
 impl BackgroundRenderer {
@@ -141,7 +141,7 @@ impl BackgroundRenderer {
                 mapped_at_creation: false,
             });
         }
-        let index_size = self.indices.len() * mem::size_of::<u16>();
+        let index_size = self.indices.len() * mem::size_of::<u32>();
         if index_size >= self.index_buffer.size() as usize {
             self.index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("background indices"),
@@ -159,14 +159,14 @@ impl BackgroundRenderer {
 
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
+        pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..self.indices.len() as u32, 0, 0..1);
         self.vertices.clear();
         self.indices.clear();
     }
 
     pub fn add_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [u8; 4]) {
-        let idx = self.vertices.len() as u16;
+        let idx = self.vertices.len() as u32;
         self.vertices.push(Vertex { pos: [x, y], color });
         self.vertices.push(Vertex {
             pos: [x + w, y],

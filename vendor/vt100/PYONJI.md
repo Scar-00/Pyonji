@@ -1,0 +1,1 @@
+Based on vt100 0.16.2 (MIT). Local changes implement DEC G0/G1 line drawing and shift-in/out, autowrap and insert modes, save/restore character sets, and guard zero-size and narrow wide-character grids, including wrapping and scrolling in one-row terminals. The application handles cursor style and query replies through streaming callbacks.

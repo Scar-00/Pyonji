@@ -112,7 +112,13 @@ impl Overlay {
             |this, _, ev: &FileOpenerEvent, window, cx| {
                 _ = this.pyonji.update(cx, |this, cx| match ev {
                     FileOpenerEvent::Opened(path) => {
-                        let id = match this.create_session(Some(path), None, None, cx) {
+                        let id = match this.create_session(
+                            Some(path),
+                            None,
+                            None,
+                            crate::terminal::SplitDirection::Vertical,
+                            cx,
+                        ) {
                             Err(e) => {
                                 window.dispatch_action(Box::new(PushError::new(e)), cx);
                                 window.close_dialog(cx);

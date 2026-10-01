@@ -987,12 +987,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cansi"
-version = "2.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bdcae87153686017415ce77e48c53e6818a0a058f0e21b56640d1e944967ef8"
-
-[[package]]
 name = "cap-primitives"
 version = "4.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6007,7 +6001,6 @@ dependencies = [
  "async-compat",
  "async-lsp",
  "bytemuck",
- "cansi",
  "chrono",
  "clap",
  "const_format",
@@ -8613,8 +8606,6 @@ dependencies = [
 [[package]]
 name = "vt100"
 version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "054ff75fb8fa83e609e685106df4faeffdf3a735d3c74ebce97ec557d5d36fd9"
 dependencies = [
  "itoa",
  "unicode-width 0.2.2",
