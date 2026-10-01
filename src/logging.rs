@@ -155,12 +155,17 @@ fn target_for_caller(file: &'static str) -> &'static str {
     const CRATE_NAME: &str = env!("CARGO_CRATE_NAME");
     // Absolute path inside this package (`/home/.../pyonji/src/foo.rs`) or
     // the relative form rustc sometimes emits (`src/foo.rs`).
-    let rel = match file
-        .strip_prefix(MANIFEST_DIR)
-        .and_then(|p| p.strip_prefix(['/', '\\']))
+    let normalized_file = file.replace('\\', "/");
+    let normalized_manifest = MANIFEST_DIR.replace('\\', "/");
+    let rel = match normalized_file
+        .strip_prefix(&normalized_manifest)
+        .and_then(|p| p.strip_prefix('/'))
     {
         Some(p) => p.strip_prefix("src/"),
-        None => file.strip_prefix("./").unwrap_or(file).strip_prefix("src/"),
+        None => normalized_file
+            .strip_prefix("./")
+            .unwrap_or(&normalized_file)
+            .strip_prefix("src/"),
     }
     .and_then(|p| p.strip_suffix(".rs"));
     let Some(rel) = rel else {
@@ -325,6 +330,17 @@ mod tests {
     }
 
     #[test]
+    fn caller_targets_accept_windows_and_unix_path_separators() {
+        assert_eq!(target_for_caller("src\\logging.rs"), "pyonji::logging");
+        assert_eq!(target_for_caller("src/logging.rs"), "pyonji::logging");
+        assert_eq!(
+            target_for_caller("src\\renderer\\mod.rs"),
+            "pyonji::renderer"
+        );
+        assert_eq!(target_for_caller("src\\main.rs"), "pyonji");
+    }
+
+    #[test]
     fn result_log_emits_error() {
         use std::sync::Arc;
         let events: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -372,7 +388,7 @@ mod tests {
             assert!(
                 ev.file
                     .as_deref()
-                    .is_some_and(|f| f.ends_with("src/logging.rs")),
+                    .is_some_and(|f| f.replace('\\', "/").ends_with("src/logging.rs")),
                 "file: {:?}",
                 ev.file
             );

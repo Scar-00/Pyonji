@@ -230,34 +230,6 @@ fn byte_ranges(name: &str, marks: &[u32]) -> Vec<Range<usize>> {
     ranges
 }
 
-/*pub enum Resolution<'a> {
-    Found {
-        command: &'a Command,
-        args: Vec<String>,
-    },
-    Unknown {
-        name: String,
-        closest: Option<&'a Command>,
-    },
-    Empty,
-}
-
-pub fn resolve<'a>(commands: &'a [Command], line: &str) -> Resolution<'a> {
-    let line = line.trim();
-    if line.is_empty() {
-        return Resolution::Empty;
-    }
-    let name = query_name(line);
-    let args = query_args(line);
-    match commands.iter().find(|command| command.name == name) {
-        Some(command) => Resolution::Found { command, args },
-        None => Resolution::Unknown {
-            name: name.to_string(),
-            closest: closest(commands, name),
-        },
-    }
-}*/
-
 pub fn naming(commands: &[Command], query: &str) -> bool {
     let name = query_name(query);
     if name.is_empty() {
@@ -770,23 +742,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_splits_the_line_into_a_command_and_its_arguments() {
+    fn closest_offers_a_near_miss_as_a_suggestion() {
         let commands = commands();
-        let Resolution::Found { command, args } = resolve(&commands, "switch 2") else {
-            panic!("expected a match");
-        };
-        assert_eq!(command.name, "switch");
-        assert_eq!(args, ["2"]);
-    }
-
-    #[test]
-    fn resolve_reports_a_near_miss_as_a_suggestion() {
-        let commands = commands();
-        let Resolution::Unknown { name, closest } = resolve(&commands, "sesions") else {
-            panic!("expected a miss");
-        };
-        assert_eq!(name, "sesions");
-        assert_eq!(closest.map(|c| c.name.as_str()), Some("sessions"));
+        assert_eq!(closest(&commands, "sesions").map(|c| c.name.as_str()), Some("sessions"));
 
         // A swapped pair is one edit, and is the typo people actually make.
         assert_eq!(
@@ -797,16 +755,6 @@ mod tests {
         assert!(super::closest(&commands, "qqqqqq").is_none());
         // Too short to be a near miss of anything.
         assert!(super::closest(&commands, "ss").is_none());
-    }
-
-    #[test]
-    fn an_unknown_command_is_never_silently_ignored() {
-        let commands = commands();
-        assert!(matches!(
-            resolve(&commands, "qqqqqq"),
-            Resolution::Unknown { closest: None, .. }
-        ));
-        assert!(matches!(resolve(&commands, "   "), Resolution::Empty));
     }
 
     #[test]
