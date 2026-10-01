@@ -1,13 +1,13 @@
 use std::ops::Range;
 
-use crate::{logging::ResultLogExt as _, terminal::SessionId, util, PyTheme as _, Pyonji};
 use crate::{Next, Prev, Submit};
+use crate::{PyTheme as _, Pyonji, logging::ResultLogExt as _, terminal::SessionId, util};
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_base::input::InputEvent;
 use gpui_base::*;
 use gpui_component::{
-    input::{Input, InputState},
     IconName, WindowExt,
+    input::{Input, InputState},
 };
 
 const CONTEXT: &str = "SessionsView";
@@ -26,6 +26,7 @@ pub struct SessionsView {
     focus_handle: FocusHandle,
     selected: Option<usize>,
     search_input: Entity<InputState>,
+    scroll_handle: UniformListScrollHandle,
 }
 
 impl SessionsView {
@@ -36,6 +37,8 @@ impl SessionsView {
                 return;
             }
             this.selected = Some(0);
+            this.scroll_handle
+                .scroll_to_item(0, ScrollStrategy::Nearest);
             cx.notify();
         })
         .detach();
@@ -51,6 +54,7 @@ impl SessionsView {
             focus_handle,
             selected: None,
             search_input,
+            scroll_handle: UniformListScrollHandle::new(),
         }
     }
 
@@ -64,6 +68,8 @@ impl SessionsView {
             None => 0,
             Some(index) => (index + 1) % sessions_len,
         });
+        self.scroll_handle
+            .scroll_to_item(self.selected.unwrap(), ScrollStrategy::Nearest);
         cx.notify();
     }
 
@@ -77,6 +83,8 @@ impl SessionsView {
             None => sessions_len - 1,
             Some(index) => (index + sessions_len - 1) % sessions_len,
         });
+        self.scroll_handle
+            .scroll_to_item(self.selected.unwrap(), ScrollStrategy::Nearest);
         cx.notify();
     }
 
@@ -200,6 +208,9 @@ impl Render for SessionsView {
             })
             .collect::<Vec<_>>();
         let sessions_len = sessions.len();
+        self.selected = self
+            .selected
+            .and_then(|index| (sessions_len > 0).then(|| index.min(sessions_len - 1)));
 
         v_flex()
             .key_context(CONTEXT)
@@ -295,6 +306,7 @@ impl Render for SessionsView {
                                 .collect()
                         }),
                     )
+                    .track_scroll(&self.scroll_handle)
                     .size_full(),
                 ),
             )
