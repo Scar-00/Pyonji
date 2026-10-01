@@ -48,10 +48,10 @@ ssh2 = "0.9.6"
 mio = { version = "1.2.2", features = ["net", "os-poll"] }
 smallvec = "1.16.1"
 path-absolutize = "4.0.1"
-gpui = { git = "https://github.com/Scar-00/gpui-ce-fork", features = ["custom-gpu"], package = "gpui-ce" }
-gpui_platform = { git = "https://github.com/Scar-00/gpui-ce-fork", package = "gpui_ce_platform" }
-gpui_tokio = { git = "https://github.com/Scar-00/gpui-ce-fork", package = "gpui_ce_tokio" }
-gpui_wgpu = { git = "https://github.com/Scar-00/gpui-ce-fork", package = "gpui_ce_wgpu" }
+gpui = { path = "../gpui-ce-fork/crates/gpui", features = ["custom-gpu"], package = "gpui-ce" }
+gpui_platform = { path = "../gpui-ce-fork/crates/gpui_platform", features = ["custom-gpu"], package = "gpui_ce_platform" }
+gpui_tokio = { path = "../gpui-ce-fork/crates/gpui_tokio", package = "gpui_ce_tokio" }
+gpui_wgpu = { path = "../gpui-ce-fork/crates/gpui_wgpu", features = ["custom-gpu"], package = "gpui_ce_wgpu" }
 gpui_ce_components = { git = "https://github.com/Scar-00/gpui-component-fork", features = ["inspector"] }
 gpui_ce_components_base = { git = "https://github.com/Scar-00/gpui-component-fork", features = ["inspector"] }
 gpui_ce_components_assets = { git = "https://github.com/Scar-00/gpui-component-fork" }
@@ -72,28 +72,25 @@ winresource = "0.1.30"
 gpui-ce = { opt-level = 3 }
 gpui_ce_components = { opt-level = 3 }
 
-# The `gpui-ce` checkout in `../oss`, rather than the git source, so the whole
-# graph — including the crates reached through the `../oss/gpui-component` path
-# deps — resolves to one rev without a network fetch, and stays on the API that
-# checkout of gpui-component is written against. Drop this table once the
-# `Cargo.toml` git deps carry a rev and that rev matches.
+# Use the sibling GPUI checkout for the component crates' upstream dependencies
+# too, so custom GPU handles and UI elements share the same GPUI types.
 [patch."https://github.com/gpui-ce/gpui-ce"]
-gpui-ce = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_apple = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_collections = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_derive_refineable = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_linux = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_macos = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_macros = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_media = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_platform = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_refineable = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_render = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_scheduler = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_shared_string = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_sum_tree = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_tokio = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_util = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_web = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_wgpu = { git = "https://github.com/Scar-00/gpui-ce-fork" }
-gpui_ce_windows = { git = "https://github.com/Scar-00/gpui-ce-fork" }
+gpui-ce = { path = "../gpui-ce-fork/crates/gpui" }
+gpui_ce_apple = { path = "../gpui-ce-fork/crates/gpui_apple" }
+gpui_ce_collections = { path = "../gpui-ce-fork/crates/gpui_collections" }
+gpui_ce_derive_refineable = { path = "../gpui-ce-fork/crates/gpui_derive_refineable" }
+gpui_ce_linux = { path = "../gpui-ce-fork/crates/gpui_linux" }
+gpui_ce_macos = { path = "../gpui-ce-fork/crates/gpui_macos" }
+gpui_ce_macros = { path = "../gpui-ce-fork/crates/gpui_macros" }
+gpui_ce_media = { path = "../gpui-ce-fork/crates/gpui_media" }
+gpui_ce_platform = { path = "../gpui-ce-fork/crates/gpui_platform" }
+gpui_ce_refineable = { path = "../gpui-ce-fork/crates/gpui_refineable" }
+gpui_ce_render = { path = "../gpui-ce-fork/crates/gpui_render" }
+gpui_ce_scheduler = { path = "../gpui-ce-fork/crates/gpui_scheduler" }
+gpui_ce_shared_string = { path = "../gpui-ce-fork/crates/gpui_shared_string" }
+gpui_ce_sum_tree = { path = "../gpui-ce-fork/crates/gpui_sum_tree" }
+gpui_ce_tokio = { path = "../gpui-ce-fork/crates/gpui_tokio" }
+gpui_ce_util = { path = "../gpui-ce-fork/crates/gpui_ce_util" }
+gpui_ce_web = { path = "../gpui-ce-fork/crates/gpui_web" }
+gpui_ce_wgpu = { path = "../gpui-ce-fork/crates/gpui_wgpu" }
+gpui_ce_windows = { path = "../gpui-ce-fork/crates/gpui_windows" }

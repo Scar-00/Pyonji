@@ -3,6 +3,7 @@ use std::ops::Range;
 use crate::{logging::ResultLogExt as _, terminal::SessionId, util, PyTheme as _, Pyonji};
 use crate::{Next, Prev, Submit};
 use gpui::{prelude::FluentBuilder as _, *};
+use gpui_base::input::InputEvent;
 use gpui_base::*;
 use gpui_component::{
     input::{Input, InputState},
@@ -30,6 +31,14 @@ pub struct SessionsView {
 impl SessionsView {
     pub fn new(py: &WeakEntity<Pyonji>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions…"));
+        cx.subscribe(&search_input, |this, _, ev, cx| {
+            if !matches!(ev, InputEvent::Change) {
+                return;
+            }
+            this.selected = Some(0);
+            cx.notify();
+        })
+        .detach();
         let focus_handle = cx.focus_handle();
         cx.on_focus_in(&focus_handle, window, |this, window, cx| {
             let focus = this.search_input.focus_handle(cx).clone();
