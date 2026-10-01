@@ -2,11 +2,6 @@
 
 A terminal emulator whose grid is drawn on the GPU, configured from Lua.
 
-> **Status: not yet buildable from a fresh clone.** Four dependencies in
-> `Cargo.toml` are `path` deps pointing outside the repository, at
-> `../oss/gpui-component` and `../oss/gpui-ce`. See
-> [Building](#building).
-
 ## What it does
 
 - **GPU-drawn grid.** One wgpu render pass per frame, with three pipelines:
@@ -47,27 +42,24 @@ multiplexer.
 
 ### Prerequisites
 
-- Rust 1.85 or newer. The crate is edition 2024 and declares no `rust-version`.
-- A checkout of [gpui-component](https://github.com/gpui-ce/gpui-component) as
-  a **sibling directory**:
+- Rust 1.95 or newer, as required by GPUI.
+- Git and the platform's C/C++ build tools for native dependencies.
 
-  ```
-  <somewhere>/
-    Pyonji/            <- this repository
-    oss/
-      gpui-component/  <- required
-      gpui-ce/         <- required; the [patch] table in Cargo.toml points here
-  ```
+Cargo fetches [the GPUI fork](https://github.com/Scar-00/gpui-ce-fork)
+and [the component fork](https://github.com/Scar-00/gpui-component-fork)
+directly from GitHub. No sibling checkouts are required. The GPUI revision
+is pinned in `Cargo.toml`, including the patches used by the component crates.
 
-  `Cargo.toml` points four crates at `../oss/gpui-component/`, and a `[patch]`
-  table redirects every `gpui-ce` package to `../oss/gpui-ce/`. Neither is
-  vendored, so `cargo build` in a fresh clone fails on a missing path
-  dependency until both checkouts are in place.
+On Debian/Ubuntu, install the native development libraries used by GPUI:
+
+```bash
+sudo apt-get install libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-randr0-dev libxcb-xinput-dev libegl1-mesa-dev libgles2-mesa-dev libglib2.0-dev libfontconfig-dev libssl-dev
+```
 
 ### Build
 
 ```bash
-cargo build --release
+cargo build --locked --release
 ```
 
 Run it in place, reading `./init.lua`:
@@ -243,8 +235,8 @@ move the language server's suggestions instead of walking what came before.
 ## Tech stack
 
 - [wgpu](https://wgpu.rs/) — GPU rasterisation
-- [gpui-ce](https://github.com/gpui-ce/gpui-ce) — windowing, input, and the
-  UI toolkit the overlays are built from (a sibling checkout, see above)
+- [gpui-ce](https://github.com/Scar-00/gpui-ce-fork) — windowing, input, and the
+  UI toolkit the overlays are built from
 - [gpui-component](https://github.com/gpui-ce/gpui-component) — dialogs,
   inputs, buttons, scrollbars, and the theme
 - [vt100](https://github.com/doy/vt100-rust) — terminal emulation
