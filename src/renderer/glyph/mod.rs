@@ -173,7 +173,10 @@ pub struct TerminalRenderer {
     vertex_buffer: Buffer,
     index_buffer: Buffer,
     vertices: Vec<Vertex>,
-    indices: Vec<u16>,
+    indices: Vec<u32>,
+    batches: Vec<(u32, u32, [u32; 4])>,
+    clip: Option<([u32; 4], u32)>,
+    atlas_full: bool,
     glyph_atlas_texture: Texture,
     image_atlas_texture: Texture,
 
@@ -257,7 +260,10 @@ impl TerminalRenderer {
             image.placement.height.cast_signed(),
         );
         let alloc = if image.content == Content::Mask {
-            let alloc = self.glyph_atlas.allocate(size)?;
+            let Some(alloc) = self.glyph_atlas.allocate(size) else {
+                self.atlas_full = true;
+                return None;
+            };
 
             queue.write_texture(
                 TexelCopyTextureInfo {
@@ -284,7 +290,10 @@ impl TerminalRenderer {
             );
             alloc
         } else {
-            let alloc = self.image_atlas.allocate(size)?;
+            let Some(alloc) = self.image_atlas.allocate(size) else {
+                self.atlas_full = true;
+                return None;
+            };
 
             queue.write_texture(
                 TexelCopyTextureInfo {
@@ -389,7 +398,7 @@ impl TerminalRenderer {
         format: TextureFormat,
     ) -> Self {
         use fontdb::{Database, Family, Query, Stretch, Weight};
-        let tex_limits = device.limits().max_texture_dimension_2d;
+        let tex_limits = device.limits().max_texture_dimension_2d.min(4096);
 
         let glyph_atlas_allocator = BucketedAtlasAllocator::new(etagere::size2(
             tex_limits.cast_signed(),
@@ -619,6 +628,9 @@ impl TerminalRenderer {
             index_buffer,
             vertices: Vec::new(),
             indices: Vec::new(),
+            batches: Vec::new(),
+            clip: None,
+            atlas_full: false,
             uniform_bind_group,
             glyph_atlas_texture: glyph_texture,
             image_atlas_texture: image_texture,
@@ -639,23 +651,53 @@ impl TerminalRenderer {
         }
     }
 
+    pub fn begin_frame(&mut self, queue: &Queue) {
+        if self.atlas_full {
+            self.evict_glyphs(queue);
+        }
+    }
+
+    pub fn set_clip(&mut self, clip: Option<[u32; 4]>) {
+        let end = self.indices.len() as u32;
+        if let Some((previous, start)) = self.clip.take()
+            && end > start
+        {
+            self.batches.push((start, end, previous));
+        }
+        self.clip = clip.map(|clip| (clip, end));
+    }
+
     pub fn evict_glyphs(&mut self, queue: &Queue) {
+        self.atlas_full = false;
         self.glyph_atlas.clear();
         self.image_atlas.clear();
         self.normal_glyph_map.clear();
         self.bold_glyph_map.clear();
         self.ime_glyph_map.clear();
         self.icon_glyph_map.clear();
-        Self::clear_texture(&self.image_atlas_texture, queue);
-        Self::clear_texture(&self.glyph_atlas_texture, queue);
-        queue.submit([]);
+        // Every allocated glyph is fully overwritten before it is sampled.
+        // Clearing CPU caches and allocators is sufficient; avoid full texture uploads.
+        let _ = queue;
     }
 
     pub fn set_font_size(&mut self, font_size: f32) {
         self.font_size = font_size;
     }
 
-    pub fn set_font_family(&mut self, font_family: &str) {
+    pub fn cell_width(&self) -> f32 {
+        let font = self.normal_font.as_ref();
+        font.glyph_metrics(&[])
+            .scale(self.font_size)
+            .advance_width(font.charmap().map('M'))
+            .max(1.0)
+    }
+
+    pub fn set_font_family(&mut self, font_family: Option<&str>) {
+        let Some(font_family) = font_family else {
+            self.normal_font = Font::from_data(Self::NORMAL_FONT, 0).unwrap();
+            self.bold_font = Font::from_data(Self::BOLD_FONT, 0).unwrap();
+            return;
+        };
         use fontdb::{Family, Query, Stretch, Weight};
         if let Ok(normal_font) = Self::load_font(
             &mut self.font_db,
@@ -705,26 +747,6 @@ impl TerminalRenderer {
         }
     }
 
-    fn clear_texture(texture: &Texture, queue: &Queue) {
-        let size = texture.size();
-        let empty_data = vec![0u8; (size.width as usize * 4) * size.height as usize];
-        queue.write_texture(
-            TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: Origin3d { x: 0, y: 0, z: 0 },
-                aspect: TextureAspect::All,
-            },
-            &empty_data,
-            TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(size.width * 4),
-                rows_per_image: Some(size.height),
-            },
-            size,
-        );
-    }
-
     fn finalize(&mut self, device: &Device, queue: &Queue) {
         self.maybe_grow_buffer(device);
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
@@ -740,7 +762,7 @@ impl TerminalRenderer {
                 mapped_at_creation: false,
             });
         }
-        let index_size = self.indices.len() * mem::size_of::<u16>();
+        let index_size = self.indices.len() * mem::size_of::<u32>();
         if index_size >= self.index_buffer.size() as usize {
             self.index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("glyph indices"),
@@ -752,14 +774,22 @@ impl TerminalRenderer {
     }
 
     pub fn render(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass) {
+        self.set_clip(None);
         self.finalize(device, queue);
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
-        pass.draw_indexed(0..self.indices.len() as u32, 0, 0..1);
+        pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint32);
+        for &(start, end, [x, y, width, height]) in &self.batches {
+            if width == 0 || height == 0 {
+                continue;
+            }
+            pass.set_scissor_rect(x, y, width, height);
+            pass.draw_indexed(start..end, 0, 0..1);
+        }
         self.vertices.clear();
         self.indices.clear();
+        self.batches.clear();
     }
 
     pub fn add_glyph(
@@ -770,6 +800,7 @@ impl TerminalRenderer {
         glyph: char,
         color: Color,
         bold: bool,
+        italic: bool,
     ) {
         let color = color.inner();
 
@@ -801,12 +832,19 @@ impl TerminalRenderer {
             ]
         };
 
-        let tl = to_ndc(x0, y0);
-        let tr = to_ndc(x1, y0);
-        let bl = to_ndc(x0, y1);
-        let br = to_ndc(x1, y1);
+        let shear = |y: f32| {
+            if italic {
+                (pos[1] - ydt - y) * 0.2
+            } else {
+                0.0
+            }
+        };
+        let tl = to_ndc(x0 + shear(y0), y0);
+        let tr = to_ndc(x1 + shear(y0), y0);
+        let bl = to_ndc(x0 + shear(y1), y1);
+        let br = to_ndc(x1 + shear(y1), y1);
 
-        let idx = self.vertices.len() as u16;
+        let idx = self.vertices.len() as u32;
         self.vertices.push(Vertex {
             pos: tl,
             uv: [glyph.uv_min[0], glyph.uv_min[1]],
@@ -843,6 +881,7 @@ impl TerminalRenderer {
         glyph: u16,
         variant: FontVariant,
         color: Color,
+        italic: bool,
     ) {
         let color = color.inner();
 
@@ -869,12 +908,19 @@ impl TerminalRenderer {
             ]
         };
 
-        let tl = to_ndc(x0, y0);
-        let tr = to_ndc(x1, y0);
-        let bl = to_ndc(x0, y1);
-        let br = to_ndc(x1, y1);
+        let shear = |y: f32| {
+            if italic {
+                (pos[1] - ydt - y) * 0.2
+            } else {
+                0.0
+            }
+        };
+        let tl = to_ndc(x0 + shear(y0), y0);
+        let tr = to_ndc(x1 + shear(y0), y0);
+        let bl = to_ndc(x0 + shear(y1), y1);
+        let br = to_ndc(x1 + shear(y1), y1);
 
-        let idx = self.vertices.len() as u16;
+        let idx = self.vertices.len() as u32;
         self.vertices.push(Vertex {
             pos: tl,
             uv: [glyph.uv_min[0], glyph.uv_min[1]],
@@ -911,6 +957,7 @@ impl TerminalRenderer {
         cluster: &str,
         color: Color,
         bold: bool,
+        italic: bool,
     ) {
         let variant = self.text_font_variant_for_cluster(cluster, bold);
         let font = match variant {
@@ -932,18 +979,21 @@ impl TerminalRenderer {
         let mut glyphs = SmallVec::<[_; 16]>::new_const();
         shaper.shape_with(|cluster| {
             for glyph in cluster.glyphs {
-                glyphs.push((glyph.id, glyph.x, glyph.y));
+                glyphs.push((glyph.id, glyph.x, glyph.y, glyph.advance));
             }
         });
-        for (id, x, y) in glyphs {
+        let mut pen = 0.0;
+        for (id, x, y, advance) in glyphs {
             self.add_glyph_id(
                 queue,
-                [pos[0] + x, pos[1] + y],
+                [pos[0] + pen + x, pos[1] - y],
                 screen_size,
                 id,
                 variant,
                 color,
+                italic,
             );
+            pen += advance;
         }
     }
 }

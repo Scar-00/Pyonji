@@ -12,6 +12,7 @@
 )]
 
 mod assets;
+mod commands;
 mod config;
 mod logging;
 mod lua_complete;
@@ -20,7 +21,6 @@ mod renderer;
 mod terminal;
 mod ui;
 mod util;
-mod commands;
 
 use assets::{GlobalAssets, PyonjiAsset, PyonjiAssetsSource};
 use pty::Event;
@@ -197,7 +197,7 @@ impl Pyonji {
             preload.set(*name, function.clone()).unwrap();
             function.call::<()>(()).unwrap();
         }
-        let (tx, rx) = async_channel::unbounded();
+        let (tx, rx) = async_channel::bounded(256);
         {
             let tx = tx.clone();
             if let Ok(print) = lua.create_function(move |lua, args: mlua::MultiValue| {
@@ -221,6 +221,9 @@ impl Pyonji {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
 
+        let blur_subscription = cx.on_focus_out(&focus_handle, window, |this, _, _, cx| {
+            this.cancel_terminal_input(cx)
+        });
         let py = cx.weak_entity();
         Self::spawn_inital_session(window, cx);
         Self {
@@ -240,7 +243,7 @@ impl Pyonji {
             overlay: cx.new(|cx| Overlay::new(py.clone(), window, cx)),
 
             _event_loop_task: Self::spawn_event_loop(rx, window, cx),
-            _subscriptions: smallvec![],
+            _subscriptions: smallvec![blur_subscription],
 
             font_family: None,
             font_size: 38.0,
@@ -304,12 +307,6 @@ impl Pyonji {
                         Event::Data(id, data) => {
                             this.session_manager.update_session(id, &data);
                             cx.notify();
-                        }
-                        Event::ProgramChanged((id, title)) => {
-                            if let Some(session) = this.session_manager.session_mut(id) {
-                                session.set_title(title);
-                                cx.notify();
-                            }
                         }
                         Event::ConfigChanged => {
                             if let Err(e) = config::load(this, window, cx) {
@@ -459,7 +456,10 @@ impl Pyonji {
             && let Some(item) = cx.read_from_clipboard()
             && let Some(text) = item.text()
         {
-            self.session_manager.send_text(session, &text);
+            if let Some(session) = self.session_manager.session_mut(session) {
+                session.paste(&text);
+            }
+            cx.notify();
         }
     }
 
@@ -551,7 +551,16 @@ impl Pyonji {
                     .on_action(cx.listener(Self::on_switch_tab))
                     .on_key_down(cx.listener(Self::handle_key_down))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_mouse_up))
+                    .on_mouse_down(MouseButton::Middle, cx.listener(Self::handle_mouse_down))
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::handle_mouse_down))
+                    .on_mouse_up_all({
+                        let py = cx.entity();
+                        move |event, phase, _, window, cx| {
+                            if phase == DispatchPhase::Capture {
+                                py.update(cx, |this, cx| this.handle_mouse_up(event, window, cx));
+                            }
+                        }
+                    })
                     .on_mouse_move(cx.listener(Self::handle_mouse_move))
                     .on_scroll_wheel(cx.listener(Self::handle_scroll))
                     .on_action(cx.listener(Self::on_open_sessions))
@@ -594,6 +603,9 @@ impl Pyonji {
         cx: &mut Context<Self>,
     ) {
         if !self.focus_handle.is_focused(window) {
+            return;
+        }
+        if self.terminal.read(cx).accepts_platform_key(event) {
             return;
         }
         if event.is_held {
@@ -663,6 +675,9 @@ impl Pyonji {
             self.terminal
                 .read(cx)
                 .resize_dragged_divider(&drag, x, y, self);
+            if let Some(tab) = self.current_tab {
+                self.resize_tab(tab, cx);
+            }
             terminal.update(cx, |this, cx| {
                 this.divider_drag = Some(drag);
                 cx.notify();
@@ -675,7 +690,13 @@ impl Pyonji {
         let Some((session_id, col, row)) = terminal.read(cx).pane_at(col, row, self) else {
             return;
         };
+        if self.active_session() != Some(session_id) {
+            self.cancel_terminal_input(cx);
+        }
         self.set_active_session(session_id);
+        terminal.update(cx, |this, _| {
+            this.mouse_capture = Some((session_id, event.button));
+        });
         if let Some(session) = self.session_manager.session_mut(session_id) {
             if !session.uses_local_scrollback() {
                 session.reset_scrollback();
@@ -686,21 +707,49 @@ impl Pyonji {
     }
 
     fn handle_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self
-            .terminal
-            .update(cx, |this, _| this.divider_drag.take().is_some())
+        if event.button == MouseButton::Left
+            && self
+                .terminal
+                .update(cx, |this, _| this.divider_drag.take().is_some())
         {
             return;
         }
-        let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
+        let capture = self.terminal.read(cx).mouse_capture;
+        let Some((id, button)) = capture else {
             return;
         };
-        let Some((session_id, col, row)) = self.terminal.read(cx).pane_at(col, row, self) else {
+        if button != event.button {
             return;
-        };
-        if let Some(session) = self.session_manager.session_mut(session_id) {
+        }
+        self.terminal.update(cx, |this, _| {
+            this.mouse_capture = None;
+        });
+        if let Some((col, row)) = self.captured_mouse_cell(id, event.position, cx)
+            && let Some(session) = self.session_manager.session_mut(id)
+        {
             session.handle_mouse_up(event.button, &event.modifiers, col, row);
         }
+    }
+
+    fn captured_mouse_cell(
+        &self,
+        id: SessionId,
+        position: Point<Pixels>,
+        cx: &Context<Self>,
+    ) -> Option<(u16, u16)> {
+        let terminal = self.terminal.read(cx);
+        let (_, pane) = self
+            .tab_layouts(terminal.rows, terminal.cols)
+            .into_iter()
+            .find(|(sid, _)| *sid == id)?;
+        let (cell_width, line_height) =
+            terminal.cell_metrics(self.font_size, self.font_size * self.line_height)?;
+        let (x, y) = terminal.pt_to_term(position);
+        let col = ((x / cell_width).floor() as i32 - i32::from(pane.x) + 1)
+            .clamp(1, i32::from(pane.cols.max(1))) as u16;
+        let row = ((y / line_height).floor() as i32 - i32::from(pane.y) + 1)
+            .clamp(1, i32::from(pane.rows.max(1))) as u16;
+        Some((col, row))
     }
 
     fn handle_mouse_move(
@@ -709,23 +758,33 @@ impl Pyonji {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event.pressed_button.is_none() {
-            return;
-        }
         if let Some(drag) = self.terminal.read(cx).divider_drag.clone() {
+            if event.pressed_button != Some(MouseButton::Left) {
+                self.terminal.update(cx, |this, _| this.divider_drag = None);
+                return;
+            }
             let (x, y) = self.terminal.read(cx).pt_to_term(event.position);
             self.terminal
                 .read(cx)
                 .resize_dragged_divider(&drag, x, y, self);
+            if let Some(tab) = self.current_tab {
+                self.resize_tab(tab, cx);
+            }
+            cx.notify();
             return;
         }
-        let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
-            return;
+        let target = if let Some((id, _)) = self.terminal.read(cx).mouse_capture {
+            self.captured_mouse_cell(id, event.position, cx)
+                .map(|(col, row)| (id, col, row))
+        } else {
+            self.terminal
+                .read(cx)
+                .mouse_to_cell(event.position, self)
+                .and_then(|(col, row)| self.terminal.read(cx).pane_at(col, row, self))
         };
-        let Some((session_id, col, row)) = self.terminal.read(cx).pane_at(col, row, self) else {
-            return;
-        };
-        if let Some(session) = self.session_manager.session_mut(session_id) {
+        if let Some((id, col, row)) = target
+            && let Some(session) = self.session_manager.session_mut(id)
+        {
             session.handle_mouse_move(&event.modifiers, col, row);
         }
     }
@@ -753,10 +812,7 @@ impl Pyonji {
         let line_height = self.font_size * self.line_height;
         let lines = match event.delta {
             ScrollDelta::Lines(lines) => lines.y,
-            ScrollDelta::Pixels(pixels) => {
-                let scale = self.terminal.read(cx).scale.max(f32::EPSILON);
-                f32::from(pixels.y) / (line_height / scale)
-            }
+            ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / line_height,
         };
         let uses_local_scrollback = self
             .session_manager
@@ -838,6 +894,7 @@ impl Pyonji {
         dir: Option<&Path>,
         tab: Option<usize>,
         parent: Option<SessionId>,
+        direction: SplitDirection,
         cx: &mut Context<Self>,
     ) -> Result<SessionId> {
         let slot = match tab.or(self.current_tab) {
@@ -858,8 +915,8 @@ impl Pyonji {
                 .as_mut()
                 .map(
                     |tab| match parent.filter(|id| tab.sessions().contains(id)) {
-                        Some(at) => tab.split_on(at, SplitDirection::Vertical, id),
-                        None => tab.split_active(SplitDirection::Vertical, id),
+                        Some(at) => tab.split_on(at, direction, id),
+                        None => tab.split_active(direction, id),
                     },
                 )
                 .unwrap_or(false);
@@ -916,33 +973,14 @@ impl Pyonji {
         self.detached_sessions
             .retain(|detached| *detached != session);
 
-        let mut removed_current_tab = false;
-        for (index, tab) in self.tabs.iter_mut().enumerate() {
-            let Some(tab_state) = tab.as_mut() else {
-                continue;
-            };
-            if !tab_state.remove_session(session) {
-                continue;
-            }
-            if tab_state.is_empty() {
-                *tab = None;
-                removed_current_tab |= Some(index) == self.current_tab;
-            }
-        }
-
-        let Some(current_tab) = self.current_tab else {
-            return true;
-        };
-
-        if removed_current_tab {
-            self.switch_to_previous_live_tab_or_stay(current_tab, cx);
-        } else {
-            self.resize_tab(current_tab, cx);
-        }
+        self.remove_session_from_tabs(session, cx);
         true
     }
 
     pub fn switch_tab(&mut self, tab: usize, cx: &mut Context<Self>) -> bool {
+        if self.current_tab != Some(tab) {
+            self.cancel_terminal_input(cx);
+        }
         let terminal = self.terminal.read(cx);
         if tab >= self.tabs.len() {
             return false;
@@ -970,36 +1008,126 @@ impl Pyonji {
         true
     }
 
+    pub fn focus_next_pane(&mut self, cx: &mut Context<Self>) -> Option<SessionId> {
+        self.cancel_terminal_input(cx);
+        let id = self
+            .current_tab
+            .and_then(|i| self.tabs[i].as_mut())
+            .and_then(|tab| tab.focus_next());
+        self.wheel_remainder = 0.0;
+        cx.notify();
+        id
+    }
+
     pub fn next_tab(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(curr) = self.current_tab else {
-            return false;
-        };
-        self.switch_tab(curr + 1, cx)
+        self.cycle_tab(false, cx)
     }
-
     pub fn prev_tab(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(curr) = self.current_tab else {
-            return false;
-        };
-        self.switch_tab(curr.saturating_sub(1), cx)
+        self.cycle_tab(true, cx)
     }
 
-    pub fn move_session(&mut self, from: Option<usize>, to: usize, session: SessionId) -> bool {
+    fn cycle_tab(&mut self, backwards: bool, cx: &mut Context<Self>) -> bool {
+        let live: Vec<_> = (0..self.tabs.len())
+            .filter(|&i| self.tabs[i].is_some())
+            .collect();
+        if live.is_empty() {
+            return false;
+        }
+        let pos = self
+            .current_tab
+            .and_then(|i| live.iter().position(|&tab| tab == i))
+            .unwrap_or(0);
+        let next = if backwards {
+            (pos + live.len() - 1) % live.len()
+        } else {
+            (pos + 1) % live.len()
+        };
+        self.switch_tab(live[next], cx)
+    }
+
+    pub fn move_session(
+        &mut self,
+        from: Option<usize>,
+        to: usize,
+        session: SessionId,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(from) = from.or(self.current_tab) else {
             return false;
         };
-        if from >= self.tabs.len() || to >= self.tabs.len() {
+        if from >= self.tabs.len()
+            || to >= self.tabs.len()
+            || !self.tabs[from]
+                .as_ref()
+                .is_some_and(|tab| tab.sessions().contains(&session))
+        {
             return false;
         }
-        let contains = self.tabs[from].as_ref().is_some_and(|tab| tab.sessions().contains(&session));
-        if contains {
-            let Some(to) = self.tabs[to].as_mut() else {
-                self.tabs[to] = Some(TerminalTab::new(session));
-                return true;
-            };
-            return to.split_active(SplitDirection::Horizontal, session);
+        if from == to {
+            return true;
         }
+        self.attach_session(session, Some(to), cx)
+    }
+
+    pub fn attach_session(
+        &mut self,
+        session: SessionId,
+        target: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(target) = target.or(self.current_tab).filter(|&i| i < self.tabs.len()) else {
+            return false;
+        };
+        if self.session_manager.session(session).is_none() {
+            return false;
+        }
+        if !self.tabs[target]
+            .as_ref()
+            .is_some_and(|tab| tab.sessions().contains(&session))
+        {
+            self.remove_session_from_tabs(session, cx);
+            if let Some(tab) = self.tabs[target].as_mut().filter(|tab| !tab.is_empty()) {
+                tab.split_active(SplitDirection::Vertical, session);
+            } else {
+                self.tabs[target] = Some(TerminalTab::new(session));
+            }
+        }
+        self.detached_sessions.retain(|&id| id != session);
+        self.switch_tab(target, cx)
+    }
+
+    pub fn detach_session(&mut self, session: SessionId, cx: &mut Context<Self>) -> bool {
+        if self.session_manager.session(session).is_none() {
+            return false;
+        }
+        if !self.detached_sessions.contains(&session) {
+            self.detached_sessions.push(session);
+        }
+        self.remove_session_from_tabs(session, cx);
+        cx.notify();
         true
+    }
+
+    fn remove_session_from_tabs(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        self.cancel_terminal_input(cx);
+        let current = self.current_tab;
+        for tab in &mut self.tabs {
+            if let Some(state) = tab {
+                state.remove_session(session);
+                if state.is_empty() {
+                    *tab = None;
+                }
+            }
+        }
+        for i in 0..self.tabs.len() {
+            self.resize_tab(i, cx);
+        }
+        if let Some(current) = current
+            && self.tabs[current].is_none()
+        {
+            self.switch_to_previous_live_tab_or_stay(current, cx);
+        }
+        self.wheel_remainder = 0.0;
     }
 
     fn switch_to_previous_live_tab_or_stay(&mut self, closed_tab: usize, cx: &mut Context<Self>) {
@@ -1102,6 +1230,16 @@ impl Pyonji {
         self.tabs[self.current_tab?]
             .as_ref()
             .and_then(TerminalTab::active_session)
+    }
+
+    fn cancel_terminal_input(&mut self, cx: &mut Context<Self>) {
+        let capture = self.terminal.update(cx, |term, cx| term.cancel_input(cx));
+        if let Some((id, button)) = capture
+            && let Some(session) = self.session_manager.session_mut(id)
+        {
+            let (col, row) = session.last_mouse_cell.unwrap_or((1, 1));
+            session.handle_mouse_up(button, &Modifiers::default(), col, row);
+        }
     }
 
     pub fn set_active_session(&mut self, id: SessionId) {

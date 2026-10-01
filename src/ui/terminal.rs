@@ -20,6 +20,14 @@ pub struct Terminal {
     pub cols: u16,
 
     ime_preedit: Option<String>,
+    ime_session: Option<SessionId>,
+    ime_selection: std::ops::Range<usize>,
+    pub mouse_capture: Option<(SessionId, MouseButton)>,
+    cell_width: f32,
+    applied_metrics: Option<(Option<String>, f32, f32)>,
+    blink_visible: bool,
+    focused: bool,
+    _blink_task: Task<()>,
     pub resize_mode_held: bool,
     pub divider_drag: Option<DividerDrag>,
 }
@@ -27,7 +35,29 @@ pub struct Terminal {
 impl Terminal {
     pub const CONTEXT: &str = "terminal";
 
-    pub fn new(pyonji: WeakEntity<Pyonji>, _cx: &mut Context<Self>) -> Self {
+    pub fn new(pyonji: WeakEntity<Pyonji>, cx: &mut Context<Self>) -> Self {
+        let blink_task = cx.spawn(async |this, cx| {
+            loop {
+                smol::Timer::after(std::time::Duration::from_millis(500)).await;
+                if this
+                    .update(cx, |this, cx| {
+                        this.blink_visible = !this.blink_visible;
+                        let blinking = this.pyonji.upgrade().is_some_and(|py| {
+                            let py = py.read(cx);
+                            py.active_session()
+                                .and_then(|id| py.session_manager.session(id))
+                                .is_some_and(|session| session.cursor_blink)
+                        });
+                        if this.focused && blinking {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         Self {
             pyonji,
 
@@ -41,9 +71,43 @@ impl Terminal {
             cols: 80,
 
             ime_preedit: None,
+            ime_session: None,
+            ime_selection: 0..0,
+            mouse_capture: None,
+            cell_width: 19.0,
+            applied_metrics: None,
+            blink_visible: true,
+            focused: false,
+            _blink_task: blink_task,
             resize_mode_held: false,
             divider_drag: None,
         }
+    }
+
+    pub fn accepts_platform_key(&self, event: &KeyDownEvent) -> bool {
+        if self.ime_preedit.is_some() {
+            return true;
+        }
+        let mods = event.keystroke.modifiers;
+        !mods.control
+            && !mods.alt
+            && !mods.platform
+            && !mods.function
+            && event
+                .keystroke
+                .key_char
+                .as_ref()
+                .is_some_and(|text| !text.chars().any(char::is_control))
+    }
+
+    pub fn cancel_input(&mut self, cx: &mut Context<Self>) -> Option<(SessionId, MouseButton)> {
+        self.ime_preedit = None;
+        self.ime_session = None;
+        self.ime_selection = 0..0;
+        self.divider_drag = None;
+        self.resize_mode_held = false;
+        cx.notify();
+        self.mouse_capture.take()
     }
 
     pub fn pt_to_term(&self, position: Point<Pixels>) -> (f32, f32) {
@@ -54,10 +118,8 @@ impl Terminal {
         )
     }
 
-    pub fn cell_metrics(&self, font_size: f32, line_height: f32) -> Option<(f32, f32)> {
-        let scale = self.scale.max(f32::EPSILON);
-        let cell_width = (font_size / 2.0) / scale;
-        let line_height = line_height / scale;
+    pub fn cell_metrics(&self, _font_size: f32, line_height: f32) -> Option<(f32, f32)> {
+        let cell_width = self.cell_width;
         (cell_width > 0.0 && line_height > 0.0).then_some((cell_width, line_height))
     }
 
@@ -147,6 +209,7 @@ impl Terminal {
         self.context = None;
         self.target = None;
         self.renderer = None;
+        self.applied_metrics = None;
     }
 
     fn ensure_context(&mut self, window: &mut Window) -> Option<WgpuContextHandle> {
@@ -201,36 +264,45 @@ impl Terminal {
             return;
         };
 
+        let py = pyonji.read(cx);
+        self.focused = py.focus_handle.is_focused(window);
+        let font_size = py.font_size * scale_factor;
+        let line_height = font_size * py.line_height;
+        let metrics = (py.font_family.clone(), font_size, line_height);
         if self.renderer.is_none() {
-            let pyonji = pyonji.read(cx);
-            let queue = context.queue().clone();
-            let device = context.device().clone();
             self.renderer = Renderer::new(
-                queue,
-                device,
+                context.queue().clone(),
+                context.device().clone(),
                 target.format(),
-                pyonji.font_family.as_deref(),
-                pyonji.font_size,
-                pyonji.font_size * pyonji.line_height,
+                py.font_family.as_deref(),
+                font_size,
+                line_height,
             )
             .ok();
+            self.applied_metrics = Some(metrics.clone());
+        } else if self.applied_metrics.as_ref() != Some(&metrics) {
+            let renderer = self.renderer.as_mut().unwrap();
+            renderer.set_font_metrics(font_size, line_height);
+            renderer.set_font_family(py.font_family.as_deref());
+            renderer.evict_glyphs();
+            self.applied_metrics = Some(metrics);
         }
-
-        let font_size = pyonji.read(cx).font_size;
-        let cols = ((target_size.width.0 as f32 / (font_size / 2.0)) as u16).max(1);
-        let rows = ((target_size.height.0 as f32 / (font_size * pyonji.read(cx).line_height))
-            as u16)
-            .max(1);
-        if cols != self.cols || rows != self.rows {
-            self.cols = cols;
-            self.rows = rows;
-            pyonji.update(cx, |this, _| {
-                for (id, geometry) in this.tab_layouts(rows, cols) {
-                    this.session_manager
-                        .resize_session(id, geometry.rows, geometry.cols);
-                }
-            });
-        }
+        let Some(renderer) = self.renderer.as_ref() else {
+            return;
+        };
+        self.cell_width = renderer.cell_width() / scale_factor;
+        let cols = ((target_size.width.0 as f32 / renderer.cell_width()) as u16).max(1);
+        let rows = ((target_size.height.0 as f32 / line_height) as u16).max(1);
+        self.cols = cols;
+        self.rows = rows;
+        // Topology, active tab and split ratios can change without a window resize.
+        // SessionManager skips unchanged sizes and retries failed resizes on the next frame.
+        pyonji.update(cx, |this, _| {
+            for (id, geometry) in this.tab_layouts(rows, cols) {
+                this.session_manager
+                    .resize_session(id, geometry.rows.max(1), geometry.cols.max(1));
+            }
+        });
     }
 
     fn paint(&mut self, cx: &mut Context<Self>) {
@@ -258,6 +330,7 @@ impl Terminal {
                 cursor_style: &session.cursor_style,
                 geometry,
                 is_active: Some(session_id) == active,
+                cursor_visible: !session.cursor_blink || self.blink_visible,
             });
         }
         let Some(renderer) = self.renderer.as_mut() else {
@@ -277,12 +350,17 @@ impl Terminal {
     fn ime_preedit(&self, pyonji: &Pyonji) -> Option<ImePreedit> {
         let text = self.ime_preedit.clone()?;
         let active_session = pyonji.active_session()?;
+        if self.ime_session != Some(active_session) {
+            return None;
+        }
         let session = pyonji.session_manager.session(active_session)?;
         let (_, geometry) = pyonji
             .tab_layouts(self.rows, self.cols)
             .into_iter()
             .find(|(session_id, _)| *session_id == active_session)?;
         let (row, col) = session.vt.screen().cursor_position();
+        let row = row.min(geometry.rows.saturating_sub(1));
+        let col = col.min(geometry.cols.saturating_sub(1));
 
         Some(ImePreedit {
             text,
@@ -298,7 +376,13 @@ impl Render for Terminal {
         container_query(cx.processor(|this, size: Size<Pixels>, window, cx| {
             this.sync_surface(size, window, cx);
             this.paint(cx);
+            let entity = cx.entity();
+            let focus = this
+                .pyonji
+                .upgrade()
+                .map(|py| py.read(cx).focus_handle.clone());
             div()
+                .relative()
                 .size_full()
                 .on_prepaint(cx.processor(Self::on_prepaint))
                 .children(this.target.as_ref().map(|target| {
@@ -307,9 +391,204 @@ impl Render for Terminal {
                         .object_fit(gpui::ObjectFit::Fill)
                         .size_full()
                 }))
-            //.debug_red()
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, cx| {
+                            if let Some(focus) = focus {
+                                window.handle_input(
+                                    &focus,
+                                    ElementInputHandler::new(bounds, entity),
+                                    cx,
+                                );
+                            }
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                )
         }))
         .size_full()
+    }
+}
+
+// Clamp platform UTF-16 ranges to scalar boundaries before slicing UTF-8.
+fn utf16_slice(
+    text: &str,
+    range: std::ops::Range<usize>,
+) -> (usize, usize, std::ops::Range<usize>) {
+    let mut units = 0;
+    let mut start = None;
+    let mut end = None;
+    for (byte, ch) in text.char_indices() {
+        if start.is_none() && units + ch.len_utf16() > range.start {
+            start = Some((byte, units));
+        }
+        if end.is_none() && units >= range.end.max(range.start) {
+            end = Some((byte, units));
+        }
+        units += ch.len_utf16();
+    }
+    let (start_byte, start_units) = start.unwrap_or((text.len(), units));
+    let (end_byte, end_units) = end.unwrap_or((text.len(), units));
+    (
+        start_byte,
+        end_byte.max(start_byte),
+        start_units..end_units.max(start_units),
+    )
+}
+
+impl EntityInputHandler for Terminal {
+    fn text_for_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        adjusted: &mut Option<std::ops::Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
+        let text = self.ime_preedit.as_deref().unwrap_or("");
+        let (start, end, range) = utf16_slice(text, range);
+        *adjusted = Some(range);
+        Some(text[start..end].to_owned())
+    }
+    fn selected_text_range(
+        &mut self,
+        _: bool,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: self.ime_selection.clone(),
+            reversed: false,
+        })
+    }
+    fn marked_text_range(
+        &self,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<std::ops::Range<usize>> {
+        self.ime_preedit
+            .as_ref()
+            .map(|text| 0..text.encode_utf16().count())
+    }
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.ime_preedit = None;
+        self.ime_session = None;
+        self.ime_selection = 0..0;
+        cx.notify();
+    }
+    fn replace_text_in_range(
+        &mut self,
+        _: Option<std::ops::Range<usize>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(py) = self.pyonji.upgrade() {
+            py.update(cx, |py, cx| {
+                if let Some(id) = py.active_session() {
+                    if self.ime_session.is_none() || self.ime_session == Some(id) {
+                        if let Some(session) = py.session_manager.session_mut(id) {
+                            session.reset_scrollback();
+                        }
+                        py.session_manager.send_text(id, text);
+                        cx.notify();
+                    }
+                }
+            });
+        }
+        self.unmark_text(window, cx);
+    }
+    fn paste(&mut self, item: ClipboardItem, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = item.text()
+            && let Some(py) = self.pyonji.upgrade()
+        {
+            py.update(cx, |py, cx| {
+                if let Some(id) = py.active_session()
+                    && let Some(session) = py.session_manager.session_mut(id)
+                {
+                    session.paste(&text);
+                    cx.notify();
+                }
+            });
+        }
+    }
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range: Option<std::ops::Range<usize>>,
+        text: &str,
+        selected: Option<std::ops::Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let session = self
+            .pyonji
+            .upgrade()
+            .and_then(|py| py.read(cx).active_session());
+        if self.ime_session != session {
+            self.ime_preedit = None;
+        }
+        self.ime_session = session;
+        let old = self.ime_preedit.as_deref().unwrap_or("");
+        let old_len = old.encode_utf16().count();
+        let range = range.unwrap_or(0..old_len);
+        let (start, end, _) = utf16_slice(old, range);
+        let mut next = String::from(&old[..start]);
+        next.push_str(text);
+        next.push_str(&old[end..]);
+        let offset = old[..start].encode_utf16().count();
+        let inserted_len = text.encode_utf16().count();
+        self.ime_selection = selected
+            .map(|range| {
+                offset + range.start.min(inserted_len)
+                    ..offset
+                        + range
+                            .end
+                            .min(inserted_len)
+                            .max(range.start.min(inserted_len))
+            })
+            .unwrap_or(offset + inserted_len..offset + inserted_len);
+        self.ime_preedit = Some(next);
+        self.blink_visible = true;
+        cx.notify();
+    }
+    fn bounds_for_range(
+        &mut self,
+        _: std::ops::Range<usize>,
+        _: Bounds<Pixels>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let py = self.pyonji.upgrade()?.read(cx);
+        let id = py.active_session()?;
+        let (_, pane) = py
+            .tab_layouts(self.rows, self.cols)
+            .into_iter()
+            .find(|(sid, _)| *sid == id)?;
+        let (row, col) = py
+            .session_manager
+            .session(id)?
+            .vt
+            .screen()
+            .cursor_position();
+        let line_height = py.font_size * py.line_height;
+        Some(Bounds::new(
+            point(
+                self.bounds.origin.x
+                    + px(self.cell_width * f32::from(pane.x + col.min(pane.cols.saturating_sub(1)))),
+                self.bounds.origin.y
+                    + px(line_height * f32::from(pane.y + row.min(pane.rows.saturating_sub(1)))),
+            ),
+            size(px(self.cell_width), px(line_height)),
+        ))
+    }
+    fn character_index_for_point(
+        &mut self,
+        _: Point<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
     }
 }
 

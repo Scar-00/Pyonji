@@ -10,7 +10,6 @@ install = []
 anyhow = "1.0"
 async-channel = "2.5.0"
 bytemuck = { version = "1.25.2", features = ["derive"] }
-cansi = "2.2.1"
 etagere = "0.3.0"
 swash = "0.2.10"
 portable-pty = "0.9.0"
@@ -97,3 +96,7 @@ gpui_ce_util = { git = "https://github.com/Scar-00/gpui-ce-fork" }
 gpui_ce_web = { git = "https://github.com/Scar-00/gpui-ce-fork" }
 gpui_ce_wgpu = { git = "https://github.com/Scar-00/gpui-ce-fork" }
 gpui_ce_windows = { git = "https://github.com/Scar-00/gpui-ce-fork" }
+
+# Minimal vt100 compatibility fixes required by our xterm-256color PTYs.
+[patch.crates-io]
+vt100 = { path = "vendor/vt100" }
