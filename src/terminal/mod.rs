@@ -317,6 +317,41 @@ pub struct Tab {
     active_session: Option<SessionId>,
 }
 
+/// Transfer a session only after the destination has accepted it.
+pub fn move_session_between_tabs(
+    tabs: &mut [Option<Tab>],
+    from: usize,
+    to: usize,
+    session: SessionId,
+) -> bool {
+    if from >= tabs.len()
+        || to >= tabs.len()
+        || !tabs[from]
+            .as_ref()
+            .is_some_and(|tab| tab.sessions().contains(&session))
+    {
+        return false;
+    }
+    if from == to {
+        return true;
+    }
+    if let Some(destination) = tabs[to].as_mut() {
+        if destination.sessions().contains(&session)
+            || !destination.split_active(SplitDirection::Vertical, session)
+        {
+            return false;
+        }
+    } else {
+        tabs[to] = Some(Tab::new(session));
+    }
+    let source = tabs[from].as_mut().expect("validated source tab");
+    source.remove_session(session);
+    if source.is_empty() {
+        tabs[from] = None;
+    }
+    true
+}
+
 impl Tab {
     pub fn new(session: SessionId) -> Self {
         Self {
@@ -968,6 +1003,73 @@ impl TerminalSession {
 mod tests {
     use super::*;
     use gpui::Modifiers;
+
+    fn session(id: u64) -> SessionId {
+        id.to_string().parse().unwrap()
+    }
+
+    #[test]
+    fn moving_a_session_removes_its_source_and_preserves_other_panes() {
+        let first = session(1);
+        let second = session(2);
+        let third = session(3);
+        let mut source = Tab::new(first);
+        source.split_active(SplitDirection::Vertical, second);
+        let mut tabs = [Some(source), Some(Tab::new(third))];
+
+        assert!(move_session_between_tabs(&mut tabs, 0, 1, second));
+        assert_eq!(tabs[0].as_ref().unwrap().sessions(), [first]);
+        assert_eq!(tabs[1].as_ref().unwrap().sessions(), [third, second]);
+        assert_eq!(tabs[1].as_ref().unwrap().active_session(), Some(second));
+
+        assert!(move_session_between_tabs(&mut tabs, 0, 1, first));
+        assert!(tabs[0].is_none());
+        assert_eq!(tabs[1].as_ref().unwrap().sessions(), [third, second, first]);
+    }
+
+    #[test]
+    fn moving_into_an_empty_tab_and_the_same_tab_never_duplicates_a_session() {
+        let id = session(1);
+        let mut tabs = [Some(Tab::new(id)), None];
+        assert!(move_session_between_tabs(&mut tabs, 0, 0, id));
+        assert_eq!(tabs[0].as_ref().unwrap().sessions(), [id]);
+        assert!(move_session_between_tabs(&mut tabs, 0, 1, id));
+        assert!(tabs[0].is_none());
+        assert_eq!(tabs[1].as_ref().unwrap().sessions(), [id]);
+    }
+
+    #[test]
+    fn an_invalid_move_keeps_the_source_session() {
+        let id = session(1);
+        let mut tabs = [
+            Some(Tab::new(id)),
+            Some(Tab {
+                root: None,
+                active_session: None,
+            }),
+        ];
+        assert!(!move_session_between_tabs(&mut tabs, 0, 2, id));
+        assert!(!move_session_between_tabs(&mut tabs, 0, 1, session(2)));
+        assert!(!move_session_between_tabs(&mut tabs, 0, 1, id));
+        assert_eq!(tabs[0].as_ref().unwrap().sessions(), [id]);
+    }
+
+    #[test]
+    fn divider_drag_changes_the_geometry_used_for_session_resizing() {
+        let mut tab = Tab::new(session(1));
+        tab.split_active(SplitDirection::Vertical, session(2));
+        let area = PaneGeometry {
+            x: 0,
+            y: 0,
+            cols: 100,
+            rows: 30,
+        };
+        assert!(tab.resize_split_by_position(area, &[], SplitDirection::Vertical, 70.0));
+        let panes = tab.layout(area);
+        assert_eq!(panes[0].1.cols, 70);
+        assert_eq!(panes[1].1.cols, 30);
+        assert_eq!(panes[1].1.x, 70);
+    }
 
     #[test]
     fn ctrl_letters_map_to_c0_bytes() {

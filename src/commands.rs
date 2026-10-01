@@ -4,7 +4,12 @@ use gpui::{Context, Window};
 use nucleo_matcher::{Config as MatchConfig, Matcher, Utf32Str};
 
 use crate::{
-    Pyonji, config::{self, LuaAction}, logging::ResultLogExt as _, pty::SshConnection, terminal::SessionId, ui::{OverlayScreen, StatusBarMode}
+    Pyonji,
+    config::{self, LuaAction},
+    logging::ResultLogExt as _,
+    pty::SshConnection,
+    terminal::SessionId,
+    ui::{OverlayScreen, StatusBarMode},
 };
 
 pub type Runner = Rc<dyn Fn(&[String], &mut Pyonji, &mut Window, &mut Context<Pyonji>)>;
@@ -385,12 +390,12 @@ fn builtins() -> Vec<Command> {
             [Arg::new("tab")],
             Origin::Workspace,
             "Move the focused session into another tab",
-            |args, py, _, _| {
+            |args, py, _, cx| {
                 let (Some(tab), Some(session)) = (tab_index(args.first()), py.active_session())
                 else {
                     return;
                 };
-                py.move_session(None, tab, session);
+                py.move_session(None, tab, session, cx);
             },
         ),
         Command::new(
@@ -398,8 +403,9 @@ fn builtins() -> Vec<Command> {
             [],
             Origin::Workspace,
             "Split the tab into panes side by side",
-            |_, _, _, _| {
-                //py.split_active(SplitDirection::Vertical, cx);
+            |_, py, _, cx| {
+                py.split_active(crate::terminal::SplitDirection::Vertical, cx)
+                    .log();
             },
         ),
         Command::new(
@@ -407,8 +413,9 @@ fn builtins() -> Vec<Command> {
             [],
             Origin::Workspace,
             "Split the tab into panes stacked",
-            |_, _, _, _| {
-                //py.split_active(SplitDirection::Horizontal, cx);
+            |_, py, _, cx| {
+                py.split_active(crate::terminal::SplitDirection::Horizontal, cx)
+                    .log();
             },
         ),
         Command::new(
@@ -429,12 +436,11 @@ fn builtins() -> Vec<Command> {
             [],
             Origin::Workspace,
             "Hide the focused session without closing it",
-            |_, _, _, cx| {
-                /*let Some(session) = py.active_session() else {
+            |_, py, _, cx| {
+                let Some(session) = py.active_session() else {
                     return;
-                };*/
-                //py.detach_session(session, cx);
-                cx.notify();
+                };
+                py.detach_session(session, cx);
             },
         ),
         Command::new(
@@ -443,9 +449,10 @@ fn builtins() -> Vec<Command> {
             Origin::Workspace,
             "Rename the focused session",
             |args, py: &mut Pyonji, _: &mut Window, cx: &mut Context<Pyonji>| {
-                let Some(session) = py.active_session().and_then(|id| {
-                    py.session_manager.session_mut(id)
-                }) else {
+                let Some(session) = py
+                    .active_session()
+                    .and_then(|id| py.session_manager.session_mut(id))
+                else {
                     return;
                 };
                 session.rename(args.join(" "));
@@ -744,7 +751,10 @@ mod tests {
     #[test]
     fn closest_offers_a_near_miss_as_a_suggestion() {
         let commands = commands();
-        assert_eq!(closest(&commands, "sesions").map(|c| c.name.as_str()), Some("sessions"));
+        assert_eq!(
+            closest(&commands, "sesions").map(|c| c.name.as_str()),
+            Some("sessions")
+        );
 
         // A swapped pair is one edit, and is the typo people actually make.
         assert_eq!(

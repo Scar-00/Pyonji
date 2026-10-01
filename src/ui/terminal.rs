@@ -102,16 +102,22 @@ impl Terminal {
         Some((col, row))
     }
 
-    pub fn resize_dragged_divider(&self, drag: &DividerDrag, x: f32, y: f32, pyonji: &mut Pyonji) {
+    pub fn resize_dragged_divider(
+        &self,
+        drag: &DividerDrag,
+        x: f32,
+        y: f32,
+        pyonji: &mut Pyonji,
+    ) -> bool {
         let Some((col, row)) = self.cursor_to_grid_position(x, y, pyonji) else {
-            return;
+            return false;
         };
         let position = match drag.direction {
             SplitDirection::Vertical => col,
             SplitDirection::Horizontal => row,
         };
         let Some(tab) = pyonji.current_tab else {
-            return;
+            return false;
         };
         let area = PaneGeometry {
             x: 0,
@@ -120,9 +126,9 @@ impl Terminal {
             rows: self.rows,
         };
         let Some(tab) = pyonji.tabs[tab].as_mut() else {
-            return;
+            return false;
         };
-        tab.resize_split_by_position(area, &drag.path, drag.direction, position);
+        tab.resize_split_by_position(area, &drag.path, drag.direction, position)
     }
 
     pub fn pane_at(&self, col: u16, row: u16, py: &Pyonji) -> Option<(SessionId, u16, u16)> {

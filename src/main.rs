@@ -12,6 +12,7 @@
 )]
 
 mod assets;
+mod commands;
 mod config;
 mod logging;
 mod lua_complete;
@@ -20,7 +21,6 @@ mod renderer;
 mod terminal;
 mod ui;
 mod util;
-mod commands;
 
 use assets::{GlobalAssets, PyonjiAsset, PyonjiAssetsSource};
 use pty::Event;
@@ -660,9 +660,7 @@ impl Pyonji {
                 path: divider.path,
                 direction: divider.direction,
             };
-            self.terminal
-                .read(cx)
-                .resize_dragged_divider(&drag, x, y, self);
+            self.resize_dragged_divider(&drag, x, y, cx);
             terminal.update(cx, |this, cx| {
                 this.divider_drag = Some(drag);
                 cx.notify();
@@ -714,9 +712,7 @@ impl Pyonji {
         }
         if let Some(drag) = self.terminal.read(cx).divider_drag.clone() {
             let (x, y) = self.terminal.read(cx).pt_to_term(event.position);
-            self.terminal
-                .read(cx)
-                .resize_dragged_divider(&drag, x, y, self);
+            self.resize_dragged_divider(&drag, x, y, cx);
             return;
         }
         let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
@@ -741,6 +737,26 @@ impl Pyonji {
         };
         self.wheel_remainder = total - whole as f32;
         whole
+    }
+
+    fn resize_dragged_divider(
+        &mut self,
+        drag: &DividerDrag,
+        x: f32,
+        y: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .terminal
+            .read(cx)
+            .resize_dragged_divider(drag, x, y, self)
+        {
+            if let Some(tab) = self.current_tab {
+                self.resize_tab(tab, cx);
+            }
+            self.wheel_remainder = 0.0;
+            cx.notify();
+        }
     }
 
     fn handle_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -908,6 +924,57 @@ impl Pyonji {
         Ok(id)
     }
 
+    pub fn split_active(
+        &mut self,
+        direction: SplitDirection,
+        cx: &mut Context<Self>,
+    ) -> Result<SessionId> {
+        let current = self.current_tab.ok_or_else(|| anyhow!("no active tab"))?;
+        if self.active_session().is_none() {
+            return Err(anyhow!("no active session to split"));
+        }
+        let id = self
+            .session_manager
+            .create_session(20, 80, self.default_cwd.as_deref())?;
+        let placed = self.tabs[current]
+            .as_mut()
+            .is_some_and(|tab| tab.split_active(direction, id));
+        if !placed {
+            self.session_manager.remove_session(id);
+            return Err(anyhow!("failed to split the active pane"));
+        }
+        self.resize_tab(current, cx);
+        cx.notify();
+        Ok(id)
+    }
+
+    pub fn detach_session(&mut self, session: SessionId, cx: &mut Context<Self>) -> bool {
+        if self.session_manager.session(session).is_none() {
+            return false;
+        }
+        if !self.detached_sessions.contains(&session) {
+            self.detached_sessions.push(session);
+        }
+        let mut emptied_current = false;
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            let Some(state) = tab.as_mut() else { continue };
+            if state.remove_session(session) && state.is_empty() {
+                *tab = None;
+                emptied_current |= Some(index) == self.current_tab;
+            }
+        }
+        if let Some(current) = self.current_tab {
+            if emptied_current {
+                self.switch_to_previous_live_tab_or_stay(current, cx);
+            } else {
+                self.resize_tab(current, cx);
+            }
+        }
+        self.wheel_remainder = 0.0;
+        cx.notify();
+        true
+    }
+
     pub fn close_session(&mut self, session: SessionId, cx: &mut Context<Self>) -> bool {
         if self.session_manager.session(session).is_none() {
             return false;
@@ -984,21 +1051,24 @@ impl Pyonji {
         self.switch_tab(curr.saturating_sub(1), cx)
     }
 
-    pub fn move_session(&mut self, from: Option<usize>, to: usize, session: SessionId) -> bool {
+    pub fn move_session(
+        &mut self,
+        from: Option<usize>,
+        to: usize,
+        session: SessionId,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(from) = from.or(self.current_tab) else {
             return false;
         };
-        if from >= self.tabs.len() || to >= self.tabs.len() {
+        if !move_session_between_tabs(&mut self.tabs, from, to, session) {
             return false;
         }
-        let contains = self.tabs[from].as_ref().is_some_and(|tab| tab.sessions().contains(&session));
-        if contains {
-            let Some(to) = self.tabs[to].as_mut() else {
-                self.tabs[to] = Some(TerminalTab::new(session));
-                return true;
-            };
-            return to.split_active(SplitDirection::Horizontal, session);
-        }
+        self.current_tab = Some(to);
+        self.wheel_remainder = 0.0;
+        self.resize_tab(from, cx);
+        self.resize_tab(to, cx);
+        cx.notify();
         true
     }
 

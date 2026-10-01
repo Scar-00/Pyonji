@@ -328,22 +328,10 @@ impl LuaUserData for LuaProxy {
                 let Some(target) = tab else {
                     return Ok(false);
                 };
-                if target >= this.py.tabs.len() {
-                    return Ok(false);
-                }
                 let Some(session) = this.py.active_session() else {
                     return Ok(false);
                 };
-                let py = &mut this.py;
-                remove_session_from_tabs(py, session);
-                if py.tabs[target].is_none() {
-                    py.tabs[target] = Some(TerminalTab::new(session));
-                } else if let Some(tab) = py.tabs[target].as_mut() {
-                    tab.split_active(SplitDirection::Vertical, session);
-                }
-                py.current_tab = Some(target);
-                py.wheel_remainder = 0.0;
-                Ok(true)
+                Ok(this.py.move_session(None, target, session, &mut this.cx.as_ctx()))
             })
         });
         methods.add_function("split", |lua, args: LuaMultiValue| {
@@ -353,27 +341,7 @@ impl LuaUserData for LuaProxy {
                 _ => SplitDirection::Vertical,
             };
             callable_action!(lua, this => move |this: &mut Self| -> LuaResult<Option<SessionId>> {
-                let Some(current) = this.py.current_tab else {
-                    return Ok(None);
-                };
-                if this.py.active_session().is_none() {
-                    return Ok(None);
-                }
-                let cwd = this.py.default_cwd.clone();
-                let id = match this.py.session_manager.create_session(20, 80, cwd.as_deref()) {
-                    Ok(id) => id,
-                    Err(_) => return Ok(None),
-                };
-                let placed = this.py.tabs[current]
-                    .as_mut()
-                    .map(|tab| tab.split_active(direction, id))
-                    .unwrap_or(false);
-                if !placed {
-                    this.py.session_manager.remove_session(id);
-                    return Ok(None);
-                }
-                this.py.resize_tab(current, &mut this.cx.as_ctx());
-                Ok(Some(id))
+                Ok(this.py.split_active(direction, &mut this.cx.as_ctx()).ok())
             })
         });
         methods.add_function("focus_next_pane", |lua, this: Option<LuaAnyUserData>| {
@@ -391,11 +359,7 @@ impl LuaUserData for LuaProxy {
                 let Some(session) = this.py.active_session() else {
                     return Ok(false);
                 };
-                if !this.py.detached_sessions.contains(&session) {
-                    this.py.detached_sessions.push(session);
-                }
-                remove_session_from_tabs(&mut this.py, session);
-                Ok(true)
+                Ok(this.py.detach_session(session, &mut this.cx.as_ctx()))
             })
         });
         methods.add_function("attach", |lua, args: LuaMultiValue| {
