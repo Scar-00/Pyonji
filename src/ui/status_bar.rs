@@ -8,7 +8,10 @@ use gpui::*;
 use gpui_base::input::InputEvent;
 use gpui_base::input::InputState;
 use gpui_base::*;
+use std::collections::HashSet;
 use std::ops::Range;
+
+use super::completion_menu::CompletionMenu;
 
 use crate::Next;
 use crate::Prev;
@@ -60,6 +63,8 @@ struct LuaCompletion {
     input: Option<(String, usize)>,
     selected: Option<usize>,
     items: Option<Vec<CompletionItem>>,
+    resolved: HashSet<usize>,
+    accepted_input: Option<(String, usize)>,
 }
 
 impl LuaCompletion {
@@ -68,6 +73,8 @@ impl LuaCompletion {
         self.input = None;
         self.selected = None;
         self.items = None;
+        self.resolved.clear();
+        self.accepted_input = None;
     }
 
     fn begin_request(&mut self, value: &str, cursor: usize) -> u64 {
@@ -80,8 +87,21 @@ impl LuaCompletion {
         if generation != self.generation || self.input.is_none() {
             return false;
         }
-        self.items = items.filter(|items| !items.is_empty());
-        self.selected = None;
+        self.items = items.filter(|items| !items.is_empty()).map(|mut items| {
+            items.sort_by(|a, b| {
+                a.sort_text
+                    .as_deref()
+                    .unwrap_or(&a.label)
+                    .cmp(b.sort_text.as_deref().unwrap_or(&b.label))
+            });
+            items
+        });
+        self.selected = self.items.as_ref().map(|items| {
+            items
+                .iter()
+                .position(|item| item.preselect == Some(true))
+                .unwrap_or(0)
+        });
         true
     }
 
@@ -91,11 +111,32 @@ impl LuaCompletion {
             .is_some_and(|(text, position)| text == value && *position == cursor)
     }
 
+    fn take_accepted_input(&mut self, value: &str, cursor: usize) -> bool {
+        self.accepted_input
+            .take()
+            .is_some_and(|(text, position)| text == value && position == cursor)
+    }
+
     fn selected_item(&self, value: &str, cursor: usize) -> Option<CompletionItem> {
+        self.item(value, cursor, self.selected?)
+    }
+
+    fn item(&self, value: &str, cursor: usize, index: usize) -> Option<CompletionItem> {
         if !self.matches_input(value, cursor) {
             return None;
         }
-        self.items.as_ref()?.get(self.selected?).cloned()
+        self.items.as_ref()?.get(index).cloned()
+    }
+
+    fn finish_resolve(&mut self, generation: u64, index: usize, item: CompletionItem) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        let Some(current) = self.items.as_mut().and_then(|items| items.get_mut(index)) else {
+            return false;
+        };
+        *current = item;
+        true
     }
 }
 
@@ -171,9 +212,49 @@ impl StatusBar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(self.mode, Mode::Lua) && self.completion.items.is_some() {
+            self.clear_completion(cx);
+            return;
+        }
         self.set_mode(Mode::Sessions, cx);
         let focus_handle = util::read!(self.pyonji, cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
+    }
+
+    fn resolve_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(lsp) = self.lua_lsp.as_ref().filter(|lsp| lsp.resolve_completions) else {
+            return;
+        };
+        let Some(index) = self.completion.selected else {
+            return;
+        };
+        let Some(item) = self
+            .completion
+            .items
+            .as_ref()
+            .and_then(|items| items.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        if !self.completion.resolved.insert(index) {
+            return;
+        }
+        let mut server = lsp.server.clone();
+        let generation = self.completion.generation;
+        cx.spawn(async move |this, cx| {
+            match LspClient::resolve_item(&mut server, item).compat().await {
+                Ok(item) => {
+                    _ = this.update(cx, |this, cx| {
+                        if this.completion.finish_resolve(generation, index, item) {
+                            cx.notify();
+                        }
+                    });
+                }
+                Err(error) => tracing::debug!("failed to resolve Lua suggestion: {error}"),
+            }
+        })
+        .detach();
     }
 }
 
@@ -227,6 +308,7 @@ impl Render for StatusBar {
                         this.completion.selected = Some(next);
                         this.scroll_handle
                             .scroll_to_item(next, ScrollStrategy::Nearest);
+                        this.resolve_selected(cx);
                         cx.notify();
                     }))
                     .on_prev(cx.listener(|this, _, _, cx| {
@@ -248,6 +330,7 @@ impl Render for StatusBar {
                         this.scroll_handle
                             .scroll_to_item(prev, ScrollStrategy::Nearest);
                         this.completion.selected = Some(prev);
+                        this.resolve_selected(cx);
                         cx.notify();
                     }));
                     this.child(view)
@@ -408,6 +491,52 @@ impl LuaView {
         self.on_prev = Some(Box::new(f));
         self
     }
+
+    fn accept_completion(
+        pyonji: &WeakEntity<Pyonji>,
+        input: &mut InputState,
+        clicked: Option<(u64, usize)>,
+        window: &mut Window,
+        cx: &mut Context<InputState>,
+    ) {
+        let value = input.value().to_string();
+        let cursor = input.cursor().min(value.len());
+        let Some(py) = pyonji.upgrade() else {
+            return;
+        };
+        let status_bar = cx.read_entity(&py, |py, _| py.status_bar.clone());
+        let item = status_bar.update(cx, |bar, cx| {
+            if !matches!(bar.mode, Mode::Lua) {
+                return None;
+            }
+            let item = match clicked {
+                Some((generation, index)) if generation == bar.completion.generation => {
+                    bar.completion.item(&value, cursor, index)
+                }
+                Some(_) => None,
+                None => bar.completion.selected_item(&value, cursor),
+            };
+            if item.is_some() {
+                bar.clear_completion(cx);
+            }
+            item
+        });
+        let Some(item) = item else {
+            return;
+        };
+        let range = completion_range(&item, &value, cursor);
+        let replacement = completion_replacement(&item);
+        let new_cursor = range.start + replacement.len();
+        let mut accepted_value = value;
+        accepted_value.replace_range(range.clone(), &replacement);
+        status_bar.update(cx, |bar, _| {
+            // Programmatic replacements also emit Change. Sync the document
+            // without immediately reopening the suggestion we just inserted.
+            bar.completion.accepted_input = Some((accepted_value, new_cursor));
+        });
+        input.set_selected_range(range, cx);
+        input.replace(replacement, window, cx);
+    }
 }
 
 impl RenderOnce for LuaView {
@@ -433,6 +562,7 @@ impl RenderOnce for LuaView {
                         let index = this.cursor();
                         let input = cx.weak_entity();
                         status_bar.update(cx, |this, cx| {
+                            let accepted = this.completion.take_accepted_input(val.as_str(), index);
                             this.clear_completion(cx);
                             if !matches!(this.mode, Mode::Lua) {
                                 return;
@@ -444,19 +574,17 @@ impl RenderOnce for LuaView {
                                 tracing::error!("failed to update Lua prompt document: {error}");
                                 return;
                             }
-                            if index == 0 {
+                            if accepted || !should_request_completion(val.as_str(), index) {
                                 return;
                             }
                             let server = lsp.server.clone();
                             let uri = lsp.uri.clone();
-                            let resolve = lsp.resolve_completions;
                             let position = completion_position(val.as_str(), index);
                             let generation = this.completion.begin_request(val.as_str(), index);
                             cx.spawn(async move |this, cx| -> Result<()> {
-                                let items =
-                                    LspClient::get_completions_for(server, uri, position, resolve)
-                                        .compat()
-                                        .await?;
+                                let items = LspClient::get_completions_for(server, uri, position)
+                                    .compat()
+                                    .await?;
                                 this.update(cx, |this, cx| {
                                     let current = input.upgrade().is_some_and(|input| {
                                         let input = input.read(cx);
@@ -465,6 +593,11 @@ impl RenderOnce for LuaView {
                                     });
                                     if current && this.completion.finish_request(generation, items)
                                     {
+                                        this.scroll_handle.scroll_to_item(
+                                            this.completion.selected.unwrap_or(0),
+                                            ScrollStrategy::Top,
+                                        );
+                                        this.resolve_selected(cx);
                                         cx.notify();
                                     }
                                 })
@@ -489,6 +622,20 @@ impl RenderOnce for LuaView {
 
         let selected = self.selected;
         let py_accept = self.pyonji.clone();
+        let input = input_state.read(cx);
+        let value = input.value();
+        let cursor = input.cursor().min(value.len());
+        let fragment = value[word_start(value.as_str(), cursor)..cursor].to_string();
+        let status_bar = util::read!(self.pyonji, cx).status_bar.clone();
+        let completion = &status_bar.read(cx).completion;
+        let generation = completion.generation;
+        // Cursor movement does not emit Change. Never display suggestions for
+        // a different cursor location, even when the text is unchanged.
+        let items = self
+            .items
+            .filter(|_| completion.matches_input(value.as_str(), cursor));
+        let input_click = input_state.clone();
+        let py_click = self.pyonji.clone();
 
         v_flex()
             .key_context(StatusBar::CONTEXT)
@@ -497,29 +644,29 @@ impl RenderOnce for LuaView {
             .on_action(window.listener_for(
                 &input_state,
                 move |input, _: &LuaAcceptCompletion, window, cx| {
-                    let value = input.value().to_string();
-                    let cursor = input.cursor().min(value.len());
-                    let Some(py) = py_accept.upgrade() else {
-                        return;
-                    };
-                    let status_bar = cx.read_entity(&py, |py, _| py.status_bar.clone());
-                    let item = status_bar.update(cx, |bar, cx| {
-                        let item = bar.completion.selected_item(&value, cursor);
-                        bar.clear_completion(cx);
-                        item
-                    });
-                    let Some(item) = item else { return };
-                    let range = completion_range(&item, &value, cursor);
-                    let new_text = completion_replacement(&item);
-                    input.set_selected_range(range, cx);
-                    input.replace(new_text, window, cx);
+                    Self::accept_completion(&py_accept, input, None, window, cx);
                 },
             ))
             .w_full()
-            .children(
-                self.items
-                    .map(|items| CompletionMenu::new(items, selected, self.scroll_handle)),
-            )
+            .children(items.map(|items| {
+                CompletionMenu::new(
+                    items,
+                    selected,
+                    fragment,
+                    self.scroll_handle,
+                    move |index, window, cx| {
+                        input_click.update(cx, |input, cx| {
+                            Self::accept_completion(
+                                &py_click,
+                                input,
+                                Some((generation, index)),
+                                window,
+                                cx,
+                            );
+                        });
+                    },
+                )
+            }))
             .child(
                 h_flex()
                     .w_full()
@@ -544,120 +691,6 @@ impl HistoryManager {
 
     fn push(&mut self, code: String) {
         self.history.push(code);
-    }
-}
-
-#[derive(IntoElement)]
-struct CompletionMenu {
-    items: Vec<CompletionItem>,
-    selected: Option<usize>,
-    scroll_handle: UniformListScrollHandle,
-}
-
-impl CompletionMenu {
-    fn new(
-        items: Vec<CompletionItem>,
-        selected: Option<usize>,
-        scroll_handle: UniformListScrollHandle,
-    ) -> Self {
-        Self {
-            items,
-            selected,
-            scroll_handle,
-        }
-    }
-
-    fn render_item(item: &CompletionItem, selected: bool, cx: &mut App) -> Div {
-        let theme = cx.theme();
-        let kind = item.kind.map(|k| format!("{k:?}")).unwrap_or_default();
-        h_flex().w_full().child(
-            h_flex()
-                .w_full()
-                .py_0p5()
-                .px_1()
-                .rounded_md()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .map(|this| {
-                    if selected {
-                        this.bg(theme.selected)
-                    } else {
-                        this
-                    }
-                })
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .whitespace_nowrap()
-                        .child(item.label.clone()),
-                )
-                .child(
-                    h_flex()
-                        .flex_shrink_0()
-                        .w_20()
-                        .justify_start()
-                        .text_color(theme.text_muted)
-                        .font_extrabold()
-                        .child(kind),
-                ),
-        )
-    }
-}
-
-impl RenderOnce for CompletionMenu {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.theme();
-        let Self {
-            items,
-            selected,
-            scroll_handle,
-        } = self;
-        deferred(
-            anchored()
-                .anchor(Anchor::BottomLeft)
-                .offset(point(px(0.0), px(-8.0)))
-                .child(
-                    v_flex()
-                        .flex_none()
-                        .border_1()
-                        .border_color(gpui::white().opacity(0.5))
-                        .rounded_xl()
-                        .mb_1()
-                        .h_48()
-                        .min_w_128()
-                        .max_w(px(480.0))
-                        .overflow_hidden()
-                        .bg(theme.surface_elevated.opacity(0.2))
-                        .backdrop_blur(px(24.0))
-                        .p_2()
-                        .child(
-                            uniform_list(
-                                "completion-items-list",
-                                items.len(),
-                                move |range, _, cx| {
-                                    let start = range.start;
-
-                                    items[range]
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(i, item)| {
-                                            let i = i + start;
-                                            Self::render_item(item, Some(i) == selected, cx)
-                                        })
-                                        .collect()
-                                },
-                            )
-                            .track_scroll(&scroll_handle)
-                            .with_sizing_behavior(ListSizingBehavior::Infer)
-                            .with_horizontal_sizing_behavior(
-                                ListHorizontalSizingBehavior::Unconstrained,
-                            )
-                            .h_full(),
-                        ),
-                ),
-        )
-        .priority_auto()
     }
 }
 
@@ -708,6 +741,21 @@ fn word_start(value: &str, cursor: usize) -> usize {
         }
     }
     s
+}
+
+/// Automatic completion needs a name fragment or a member-access operator.
+/// An invoked request at an empty fragment (for example after `)`) otherwise
+/// asks LuaLS for every global and keyword available at that position.
+fn should_request_completion(value: &str, cursor: usize) -> bool {
+    let cursor = value.floor_char_boundary(cursor.min(value.len()));
+    let prefix = &value[..cursor];
+    if prefix.ends_with(['.', ':']) {
+        return true;
+    }
+    value[word_start(value, cursor)..cursor]
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_')
 }
 
 /// Convert an LSP `character` (UTF-16 code units) into a byte offset into
@@ -874,7 +922,10 @@ fn completion_range(item: &CompletionItem, value: &str, cursor: usize) -> Range<
 
 #[cfg(test)]
 mod tests {
-    use super::{LuaCompletion, completion_position, completion_range, completion_replacement};
+    use super::{
+        LuaCompletion, completion_position, completion_range, completion_replacement,
+        should_request_completion,
+    };
     use async_lsp::lsp_types::{
         CompletionItem, CompletionTextEdit, InsertTextFormat, Position, Range as LspRange, TextEdit,
     };
@@ -884,6 +935,112 @@ mod tests {
             label: label.into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn automatic_completion_requires_an_identifier_or_member_access() {
+        for value in [
+            "pr",
+            "local value = pri",
+            "string.",
+            "py:",
+            "make().",
+            "make():",
+            "_value2",
+            "한글",
+        ] {
+            assert!(should_request_completion(value, value.len()), "{value:?}");
+        }
+        for value in [
+            "",
+            "print()",
+            "print(tostring(value))",
+            "items[1]",
+            "{ key = value }",
+            "print() ",
+            "print(",
+            "print(value,",
+            "123",
+            "value + ",
+        ] {
+            assert!(!should_request_completion(value, value.len()), "{value:?}");
+        }
+        // Use the actual caret, including a caret within a function call.
+        assert!(should_request_completion("print(va)", 8));
+        assert!(!should_request_completion("print() + value", 7));
+        assert!(should_request_completion("한글", 4));
+    }
+
+    #[test]
+    fn closing_a_call_invalidates_pending_completions() {
+        let mut completion = LuaCompletion::default();
+        let pending = completion.begin_request("print(va", 8);
+        // Change clears previous requests before deciding whether to start one.
+        completion.clear();
+        assert!(!should_request_completion("print(va)", 9));
+        assert!(!completion.finish_request(pending, Some(vec![item("value")])));
+        assert!(!completion.finish_resolve(pending, 0, item("value")));
+        assert!(completion.items.is_none());
+    }
+
+    #[test]
+    fn suggestions_select_the_servers_preferred_item_immediately() {
+        let mut completion = LuaCompletion::default();
+        let generation = completion.begin_request("p", 1);
+        let mut print = item("print");
+        print.sort_text = Some("01".into());
+        let mut pairs = item("pairs");
+        pairs.sort_text = Some("02".into());
+        assert!(completion.finish_request(generation, Some(vec![pairs.clone(), print.clone()])));
+        assert_eq!(completion.selected_item("p", 1).unwrap().label, "print");
+        pairs.preselect = Some(true);
+        let generation = completion.begin_request("p", 1);
+        assert!(completion.finish_request(generation, Some(vec![print, pairs])));
+        assert_eq!(completion.selected_item("p", 1).unwrap().label, "pairs");
+        assert_eq!(completion.item("p", 1, 0).unwrap().label, "print");
+        assert!(completion.item("p", 1, 2).is_none());
+    }
+
+    #[test]
+    fn empty_responses_leave_nothing_to_accept() {
+        let mut completion = LuaCompletion::default();
+        for items in [None, Some(Vec::new())] {
+            let generation = completion.begin_request("p", 1);
+            assert!(completion.finish_request(generation, items));
+            assert!(completion.items.is_none());
+            assert!(completion.selected_item("p", 1).is_none());
+        }
+    }
+
+    #[test]
+    fn insertion_does_not_reopen_suggestions_but_the_next_edit_does() {
+        let mut completion = LuaCompletion::default();
+        completion.accepted_input = Some(("string.byte".into(), 11));
+        assert!(completion.take_accepted_input("string.byte", 11));
+        assert!(!completion.take_accepted_input("string.byte(", 12));
+        completion.accepted_input = Some(("print".into(), 5));
+        assert!(!completion.take_accepted_input("print(", 6));
+        assert!(!completion.take_accepted_input("print", 5));
+    }
+
+    #[test]
+    fn resolved_details_cannot_restore_dismissed_or_replaced_suggestions() {
+        let mut completion = LuaCompletion::default();
+        let old = completion.begin_request("p", 1);
+        completion.finish_request(old, Some(vec![item("print")]));
+        completion.clear();
+        assert!(!completion.finish_resolve(old, 0, item("print")));
+        let current = completion.begin_request("pa", 2);
+        completion.finish_request(current, Some(vec![item("pairs")]));
+        assert!(!completion.finish_resolve(old, 0, item("print")));
+        assert!(!completion.finish_resolve(current, 1, item("print")));
+        let mut resolved = item("pairs");
+        resolved.detail = Some("function pairs(t: table)".into());
+        assert!(completion.finish_resolve(current, 0, resolved));
+        assert_eq!(
+            completion.selected_item("pa", 2).unwrap().detail.as_deref(),
+            Some("function pairs(t: table)")
+        );
     }
 
     #[test]

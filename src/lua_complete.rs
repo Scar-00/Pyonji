@@ -131,6 +131,25 @@ impl LspClient {
                     name: "root".into(),
                 }]),
                 capabilities: ClientCapabilities {
+                    text_document: Some(TextDocumentClientCapabilities {
+                        completion: Some(CompletionClientCapabilities {
+                            completion_item: Some(CompletionItemCapability {
+                                documentation_format: Some(vec![
+                                    MarkupKind::Markdown,
+                                    MarkupKind::PlainText,
+                                ]),
+                                deprecated_support: Some(true),
+                                preselect_support: Some(true),
+                                label_details_support: Some(true),
+                                resolve_support: Some(CompletionItemCapabilityResolveSupport {
+                                    properties: vec!["detail".into(), "documentation".into()],
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
                     window: Some(WindowClientCapabilities {
                         work_done_progress: Some(true),
                         ..WindowClientCapabilities::default()
@@ -210,7 +229,6 @@ impl LspClient {
         mut server: ServerSocket,
         uri: Url,
         position: Position,
-        resolve_completions: bool,
     ) -> Result<Option<Vec<CompletionItem>>> {
         let r = server
             .completion(CompletionParams {
@@ -230,23 +248,15 @@ impl LspClient {
                 }),
             })
             .await?;
-        let mut items = r.map(|res| match res {
+        let items = r.map(|res| match res {
             CompletionResponse::Array(items) => items,
             CompletionResponse::List(list) => list.items,
         });
 
-        if resolve_completions && let Some(items) = &mut items {
-            for item in items {
-                if let Ok(resolved) = Self::resolve_item(&mut server, item.clone()).await {
-                    *item = resolved;
-                }
-            }
-        }
-
         Ok(items)
     }
 
-    async fn resolve_item(
+    pub async fn resolve_item(
         server: &mut ServerSocket,
         item: CompletionItem,
     ) -> Result<CompletionItem> {
