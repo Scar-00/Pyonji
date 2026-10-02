@@ -1,6 +1,8 @@
 //! Compact Lua suggestions with a separate reading area for the selected item.
 
+use super::signature_help::SignaturePopover;
 use crate::PyTheme as _;
+use async_lsp::lsp_types::SignatureHelp;
 use async_lsp::lsp_types::{CompletionItem, CompletionItemKind as Kind, Documentation, MarkupKind};
 use gpui::{prelude::*, *};
 use gpui_base::{ScrollbarAxis, h_flex, v_flex};
@@ -19,6 +21,7 @@ pub(super) struct CompletionMenu {
     fragment: String,
     scroll_handle: UniformListScrollHandle,
     on_accept: Accept,
+    signature_help: Option<SignatureHelp>,
 }
 
 impl CompletionMenu {
@@ -35,7 +38,13 @@ impl CompletionMenu {
             fragment,
             scroll_handle,
             on_accept: Rc::new(on_accept),
+            signature_help: None,
         }
+    }
+
+    pub(super) fn signature_help(mut self, help: Option<SignatureHelp>) -> Self {
+        self.signature_help = help;
+        self
     }
 
     fn render_item(
@@ -241,7 +250,7 @@ impl CompletionMenu {
 
 impl RenderOnce for CompletionMenu {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        if self.items.is_empty() {
+        if self.items.is_empty() && self.signature_help.is_none() {
             return div().into_any_element();
         }
         let theme = cx.theme();
@@ -258,7 +267,12 @@ impl RenderOnce for CompletionMenu {
             available_width.min(px(520.0))
         };
         let compact = width < px(360.0);
-        let available = (f32::from(window.viewport_size().height) - 100.0)
+        let signature_budget = if self.signature_help.is_some() {
+            (f32::from(window.viewport_size().height) * 0.3).min(160.0) + 8.0
+        } else {
+            0.0
+        };
+        let available = (f32::from(window.viewport_size().height) - 100.0 - signature_budget)
             .max(ROW_HEIGHT + HEADER_HEIGHT + FOOTER_HEIGHT);
         let selected_item = self.selected.and_then(|index| self.items.get(index));
         let show_details = room_for_details && selected_item.is_some_and(has_details);
@@ -282,12 +296,15 @@ impl RenderOnce for CompletionMenu {
                 .min(available)),
             cx,
         );
+        let has_items = !self.items.is_empty();
+        let signature_help = self.signature_help;
         let Self {
             items,
             selected,
             fragment,
             scroll_handle,
             on_accept,
+            ..
         } = self;
         deferred(
             anchored()
@@ -295,91 +312,104 @@ impl RenderOnce for CompletionMenu {
                 .offset(point(px(0.0), px(-8.0)))
                 .snap_to_window_with_margin(px(8.0))
                 .child(
-                    h_flex()
-                        .items_end()
+                    v_flex()
                         .gap_2()
                         .flex_none()
                         .font_family(mono)
                         .text_size(px(13.0))
                         .text_color(theme.text)
-                        .child(
-                            v_flex()
-                                .id("lua-completion-menu")
-                                .occlude()
-                                .w(width)
-                                .flex_none()
-                                .overflow_hidden()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(theme.border)
-                                .bg(theme.surface.opacity(0.15))
-                                .backdrop_blur(px(24.0))
-                                .text_color(theme.text)
-                                .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                                    window.prevent_default();
-                                    cx.stop_propagation();
-                                })
-                                .child(
-                                    h_flex()
-                                        .h(px(HEADER_HEIGHT))
-                                        .flex_shrink_0()
-                                        .px_3()
-                                        .items_center()
-                                        .justify_between()
-                                        .text_size(px(11.0))
-                                        .text_color(theme.text_muted)
-                                        .child("Lua suggestions")
-                                        .child(format!("{position} / {count}")),
-                                )
-                                .child(
-                                    div()
-                                        .relative()
-                                        .w_full()
-                                        .h(px(list_height))
-                                        .flex_shrink_0()
-                                        .child(
-                                            uniform_list(
-                                                "completion-items-list",
-                                                count,
-                                                move |range, _, cx| {
-                                                    range
-                                                        .map(|index| {
-                                                            Self::render_item(
-                                                                &items[index],
-                                                                index,
-                                                                selected == Some(index),
-                                                                &fragment,
-                                                                on_accept.clone(),
-                                                                cx,
-                                                            )
-                                                        })
-                                                        .collect()
-                                                },
+                        .when_some(signature_help, |popovers, help| {
+                            popovers
+                                .child(SignaturePopover::new(help, available_width.min(px(600.0))))
+                        })
+                        .when(has_items, |popovers| {
+                            popovers.child(
+                                h_flex()
+                                    .items_end()
+                                    .gap_2()
+                                    .child(
+                                        v_flex()
+                                            .id("lua-completion-menu")
+                                            .occlude()
+                                            .w(width)
+                                            .flex_none()
+                                            .overflow_hidden()
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .bg(theme.surface.opacity(0.15))
+                                            .backdrop_blur(px(24.0))
+                                            .text_color(theme.text)
+                                            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                                                window.prevent_default();
+                                                cx.stop_propagation();
+                                            })
+                                            .child(
+                                                h_flex()
+                                                    .h(px(HEADER_HEIGHT))
+                                                    .flex_shrink_0()
+                                                    .px_3()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_size(px(11.0))
+                                                    .text_color(theme.text_muted)
+                                                    .child("Lua suggestions")
+                                                    .child(format!("{position} / {count}")),
                                             )
-                                            .w_full()
-                                            .h(px(list_height))
-                                            .flex_shrink_0()
-                                            .track_scroll(&scroll_handle),
-                                        )
-                                        .scrollbar(&scroll_handle, ScrollbarAxis::Vertical),
-                                )
-                                .child(
-                                    h_flex()
-                                        .h(px(FOOTER_HEIGHT))
-                                        .flex_shrink_0()
-                                        .px_3()
-                                        .items_center()
-                                        .gap_4()
-                                        .border_t_1()
-                                        .border_color(theme.border)
-                                        .when(!compact, |footer| {
-                                            footer.child(hint("↑ ↓", "select", cx))
-                                        })
-                                        .child(hint("Tab", "insert", cx))
-                                        .child(hint("Esc", "dismiss", cx)),
-                                ),
-                        )
-                        .when(show_details, |popovers| popovers.child(details)),
+                                            .child(
+                                                div()
+                                                    .relative()
+                                                    .w_full()
+                                                    .h(px(list_height))
+                                                    .flex_shrink_0()
+                                                    .child(
+                                                        uniform_list(
+                                                            "completion-items-list",
+                                                            count,
+                                                            move |range, _, cx| {
+                                                                range
+                                                                    .map(|index| {
+                                                                        Self::render_item(
+                                                                            &items[index],
+                                                                            index,
+                                                                            selected == Some(index),
+                                                                            &fragment,
+                                                                            on_accept.clone(),
+                                                                            cx,
+                                                                        )
+                                                                    })
+                                                                    .collect()
+                                                            },
+                                                        )
+                                                        .w_full()
+                                                        .h(px(list_height))
+                                                        .flex_shrink_0()
+                                                        .track_scroll(&scroll_handle),
+                                                    )
+                                                    .scrollbar(
+                                                        &scroll_handle,
+                                                        ScrollbarAxis::Vertical,
+                                                    ),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .h(px(FOOTER_HEIGHT))
+                                                    .flex_shrink_0()
+                                                    .px_3()
+                                                    .items_center()
+                                                    .gap_4()
+                                                    .border_t_1()
+                                                    .border_color(theme.border)
+                                                    .when(!compact, |footer| {
+                                                        footer.child(hint("↑ ↓", "select", cx))
+                                                    })
+                                                    .child(hint("Tab", "insert", cx))
+                                                    .child(hint("Esc", "dismiss", cx)),
+                                            ),
+                                    )
+                                    .when(show_details, |popovers| popovers.child(details)),
+                            )
+                        }),
                 ),
         )
         .priority_auto()

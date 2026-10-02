@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::ops::Range;
 
 use super::completion_menu::CompletionMenu;
+use super::signature_help::LuaSignature;
 
 use crate::Next;
 use crate::Prev;
@@ -151,6 +152,7 @@ pub struct StatusBar {
     //lsp
     lua_lsp: Option<LspClient>,
     completion: LuaCompletion,
+    signature: LuaSignature,
     scroll_handle: UniformListScrollHandle,
 }
 
@@ -167,12 +169,14 @@ impl StatusBar {
             lua_history: HistoryManager::new(),
             lua_lsp: None,
             completion: LuaCompletion::default(),
+            signature: LuaSignature::default(),
             scroll_handle: UniformListScrollHandle::new(),
         }
     }
 
     pub fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
         self.completion.clear();
+        self.signature.clear();
         self.mode = mode;
         cx.notify();
     }
@@ -212,8 +216,11 @@ impl StatusBar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(self.mode, Mode::Lua) && self.completion.items.is_some() {
+        if matches!(self.mode, Mode::Lua)
+            && (self.completion.items.is_some() || self.signature.help.is_some())
+        {
             self.clear_completion(cx);
+            self.signature.dismiss();
             return;
         }
         self.set_mode(Mode::Sessions, cx);
@@ -252,6 +259,50 @@ impl StatusBar {
                     });
                 }
                 Err(error) => tracing::debug!("failed to resolve Lua suggestion: {error}"),
+            }
+        })
+        .detach();
+    }
+
+    fn update_signature(
+        &mut self,
+        value: &str,
+        cursor: usize,
+        input: WeakEntity<InputState>,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.mode, Mode::Lua) || self.signature.matches_input(value, cursor) {
+            return;
+        }
+        let Some(lsp) = self.lua_lsp.as_ref().filter(|lsp| lsp.signature_help) else {
+            return;
+        };
+        let server = lsp.server.clone();
+        let uri = lsp.uri.clone();
+        let generation = self.signature.begin_request(value, cursor);
+        cx.notify();
+        let Some(generation) = generation else {
+            return;
+        };
+        let position = completion_position(value, cursor);
+        cx.spawn(async move |this, cx| {
+            match LspClient::get_signature_help(server, uri, position)
+                .compat()
+                .await
+            {
+                Ok(help) => {
+                    _ = this.update(cx, |this, cx| {
+                        let current = input.upgrade().is_some_and(|input| {
+                            let input = input.read(cx);
+                            this.signature
+                                .matches_input(input.value().as_str(), input.cursor())
+                        });
+                        if current && this.signature.finish_request(generation, help) {
+                            cx.notify();
+                        }
+                    });
+                }
+                Err(error) => tracing::debug!("failed to get Lua function arguments: {error}"),
             }
         })
         .detach();
@@ -574,11 +625,12 @@ impl RenderOnce for LuaView {
                                 tracing::error!("failed to update Lua prompt document: {error}");
                                 return;
                             }
+                            let server = lsp.server.clone();
+                            let uri = lsp.uri.clone();
+                            this.update_signature(val.as_str(), index, input.clone(), cx);
                             if accepted || !should_request_completion(val.as_str(), index) {
                                 return;
                             }
-                            let server = lsp.server.clone();
-                            let uri = lsp.uri.clone();
                             let position = completion_position(val.as_str(), index);
                             let generation = this.completion.begin_request(val.as_str(), index);
                             cx.spawn(async move |this, cx| -> Result<()> {
@@ -616,6 +668,27 @@ impl RenderOnce for LuaView {
                 }
             })
             .detach();
+            // InputEvent::Change covers edits; observing the input also covers
+            // arrow keys and mouse caret movement. Snapshot checks ignore blink
+            // and layout notifications, and keep Escape dismissal persistent.
+            cx.observe_in(&cx.entity(), window, {
+                let py = py.clone();
+                move |this, _, _, cx| {
+                    let value = this.value();
+                    let cursor = this.cursor();
+                    let input = cx.weak_entity();
+                    let status_bar = util::read!(py, cx).status_bar.clone();
+                    status_bar.update(cx, |bar, cx| {
+                        if bar.completion.input.is_some()
+                            && !bar.completion.matches_input(value.as_str(), cursor)
+                        {
+                            bar.clear_completion(cx);
+                        }
+                        bar.update_signature(value.as_str(), cursor, input, cx);
+                    });
+                }
+            })
+            .detach();
             state.focus(window, cx);
             state
         });
@@ -627,8 +700,14 @@ impl RenderOnce for LuaView {
         let cursor = input.cursor().min(value.len());
         let fragment = value[word_start(value.as_str(), cursor)..cursor].to_string();
         let status_bar = util::read!(self.pyonji, cx).status_bar.clone();
-        let completion = &status_bar.read(cx).completion;
+        let bar = status_bar.read(cx);
+        let completion = &bar.completion;
         let generation = completion.generation;
+        let signature = bar
+            .signature
+            .help
+            .clone()
+            .filter(|_| bar.signature.matches_input(value.as_str(), cursor));
         // Cursor movement does not emit Change. Never display suggestions for
         // a different cursor location, even when the text is unchanged.
         let items = self
@@ -648,25 +727,28 @@ impl RenderOnce for LuaView {
                 },
             ))
             .w_full()
-            .children(items.map(|items| {
-                CompletionMenu::new(
-                    items,
-                    selected,
-                    fragment,
-                    self.scroll_handle,
-                    move |index, window, cx| {
-                        input_click.update(cx, |input, cx| {
-                            Self::accept_completion(
-                                &py_click,
-                                input,
-                                Some((generation, index)),
-                                window,
-                                cx,
-                            );
-                        });
-                    },
-                )
-            }))
+            .when(items.is_some() || signature.is_some(), |view| {
+                view.child({
+                    CompletionMenu::new(
+                        items.unwrap_or_default(),
+                        selected,
+                        fragment,
+                        self.scroll_handle,
+                        move |index, window, cx| {
+                            input_click.update(cx, |input, cx| {
+                                Self::accept_completion(
+                                    &py_click,
+                                    input,
+                                    Some((generation, index)),
+                                    window,
+                                    cx,
+                                );
+                            });
+                        },
+                    )
+                    .signature_help(signature)
+                })
+            })
             .child(
                 h_flex()
                     .w_full()

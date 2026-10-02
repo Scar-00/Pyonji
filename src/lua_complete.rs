@@ -34,6 +34,7 @@ pub struct LspClient {
     pub server: ServerSocket,
     pub uri: Url,
     pub resolve_completions: bool,
+    pub signature_help: bool,
     version: usize,
     _task: Task<Result<(), JoinError>>,
 }
@@ -148,6 +149,19 @@ impl LspClient {
                             }),
                             ..Default::default()
                         }),
+                        signature_help: Some(SignatureHelpClientCapabilities {
+                            signature_information: Some(SignatureInformationSettings {
+                                documentation_format: Some(vec![
+                                    MarkupKind::Markdown,
+                                    MarkupKind::PlainText,
+                                ]),
+                                parameter_information: Some(ParameterInformationSettings {
+                                    label_offset_support: Some(true),
+                                }),
+                                active_parameter_support: Some(true),
+                            }),
+                            ..Default::default()
+                        }),
                         ..Default::default()
                     }),
                     window: Some(WindowClientCapabilities {
@@ -165,6 +179,7 @@ impl LspClient {
             .completion_provider
             .and_then(|provider| provider.resolve_provider)
             .unwrap_or(false);
+        let signature_help = initialized.capabilities.signature_help_provider.is_some();
 
         let config_path = config::util::config_path()
             .map(|path| {
@@ -201,6 +216,7 @@ impl LspClient {
             server,
             uri,
             resolve_completions,
+            signature_help,
             version: 0,
             _task: task,
         })
@@ -261,5 +277,22 @@ impl LspClient {
         item: CompletionItem,
     ) -> Result<CompletionItem> {
         Ok(server.completion_item_resolve(item).await?)
+    }
+
+    pub async fn get_signature_help(
+        mut server: ServerSocket,
+        uri: Url,
+        position: Position,
+    ) -> Result<Option<SignatureHelp>> {
+        Ok(server
+            .signature_help(SignatureHelpParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position,
+                },
+                work_done_progress_params: Default::default(),
+                context: None,
+            })
+            .await?)
     }
 }

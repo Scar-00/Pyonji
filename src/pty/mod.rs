@@ -7,7 +7,7 @@ use std::{
 use crate::terminal::SessionId;
 use anyhow::{Context, Result};
 use async_channel::Sender;
-use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
 #[derive(Debug, Clone)]
 pub struct SshConnection {

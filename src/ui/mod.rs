@@ -1,4 +1,5 @@
 mod completion_menu;
+mod signature_help;
 pub mod overlay;
 pub mod status_bar;
 pub mod terminal;
