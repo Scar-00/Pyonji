@@ -56,6 +56,7 @@ fn session_target(path: &Path, editor: Option<&str>) -> anyhow::Result<SessionTa
 pub enum OverlayScreen {
     Palette,
     Sessions,
+    Detached,
     Releases,
     Opener,
 }
@@ -65,6 +66,7 @@ pub struct Overlay {
 
     palette: Entity<PaletteView>,
     sessions: Entity<SessionsView>,
+    detached: Entity<SessionsView>,
     releases: Entity<ReleasesView>,
     opener: Entity<FileOpener>,
     //js: Entity<ShellRoot>,
@@ -81,7 +83,8 @@ impl Overlay {
             pyonji: pyonji.clone(),
 
             palette: cx.new(|cx| PaletteView::new(&pyonji, window, cx)),
-            sessions: cx.new(|cx| SessionsView::new(&pyonji, window, cx)),
+            sessions: cx.new(|cx| SessionsView::new(&pyonji, false, window, cx)),
+            detached: cx.new(|cx| SessionsView::new(&pyonji, true, window, cx)),
             releases: cx.new(|cx| ReleasesView::new(&pyonji, window, cx)),
             opener: Self::setup_opener(window, cx),
             //js: init_shell(window, cx).unwrap(),
@@ -93,6 +96,11 @@ impl Overlay {
     pub fn open(&mut self, screen: OverlayScreen, window: &mut Window, cx: &mut Context<Self>) {
         if window.has_active_dialog(cx) {
             window.close_dialog(cx);
+        }
+        match screen {
+            OverlayScreen::Sessions => self.sessions.update(cx, |this, cx| this.reset(window, cx)),
+            OverlayScreen::Detached => self.detached.update(cx, |this, cx| this.reset(window, cx)),
+            _ => {}
         }
         let (width, height) = Self::dialog_size(screen, window);
         let builder = cx.processor(move |this, dialog: Dialog, _window, cx| {
@@ -110,6 +118,7 @@ impl Overlay {
             dialog.child(div().size_full().p_1().child(match screen {
                 OverlayScreen::Palette => this.palette.clone().into_any_element(),
                 OverlayScreen::Sessions => this.sessions.clone().into_any_element(),
+                OverlayScreen::Detached => this.detached.clone().into_any_element(),
                 OverlayScreen::Releases => this.releases.clone().into_any_element(),
                 OverlayScreen::Opener => this.opener.clone().into_any_element(),
             }))
@@ -118,6 +127,7 @@ impl Overlay {
         let handle = match screen {
             OverlayScreen::Palette => self.palette.focus_handle(cx),
             OverlayScreen::Sessions => self.sessions.focus_handle(cx),
+            OverlayScreen::Detached => self.detached.focus_handle(cx),
             OverlayScreen::Releases => self.releases.focus_handle(cx),
             OverlayScreen::Opener => self.opener.focus_handle(cx),
         };
@@ -129,6 +139,7 @@ impl Overlay {
     fn dialog_size(screen: OverlayScreen, window: &Window) -> (Option<Pixels>, Option<Pixels>) {
         let (width, height) = match screen {
             OverlayScreen::Palette => (px(620.), px(520.)),
+            OverlayScreen::Sessions | OverlayScreen::Detached => (px(660.), px(520.)),
             OverlayScreen::Releases => (px(920.), px(500.)),
             _ => return (None, None),
         };

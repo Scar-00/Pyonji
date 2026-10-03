@@ -63,6 +63,7 @@ actions!([
     OpenPalette,
     OpenReleases,
     OpenSessions,
+    OpenDetached,
     Submit,
     Next,
     Prev,
@@ -442,6 +443,12 @@ impl Pyonji {
         });
     }
 
+    fn on_open_detached(&mut self, _: &OpenDetached, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlay.update(cx, |this, cx| {
+            this.open(OverlayScreen::Detached, window, cx);
+        });
+    }
+
     fn on_open_palette(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
         self.overlay.update(cx, |this, cx| {
             this.open(OverlayScreen::Palette, window, cx);
@@ -555,6 +562,7 @@ impl Pyonji {
                     .on_mouse_move(cx.listener(Self::handle_mouse_move))
                     .on_scroll_wheel(cx.listener(Self::handle_scroll))
                     .on_action(cx.listener(Self::on_open_sessions))
+                    .on_action(cx.listener(Self::on_open_detached))
                     .on_action(cx.listener(Self::on_open_releases))
                     .on_action(cx.listener(Self::on_open_palette))
                     .on_action(cx.listener(Self::on_paste))
@@ -948,6 +956,43 @@ impl Pyonji {
         Ok(id)
     }
 
+    pub fn attach_session(
+        &mut self,
+        session: SessionId,
+        target: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.session_manager.session(session).is_none() {
+            return false;
+        }
+        let Some(target) = target.or(self.current_tab) else {
+            return false;
+        };
+        let source_tabs = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, tab)| {
+                (index != target
+                    && tab
+                        .as_ref()
+                        .is_some_and(|tab| tab.sessions().contains(&session)))
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if !attach_session_to_tabs(&mut self.tabs, &mut self.detached_sessions, session, target) {
+            return false;
+        }
+        self.current_tab = Some(target);
+        self.wheel_remainder = 0.0;
+        for source in source_tabs {
+            self.resize_tab(source, cx);
+        }
+        self.resize_tab(target, cx);
+        cx.notify();
+        true
+    }
+
     pub fn detach_session(&mut self, session: SessionId, cx: &mut Context<Self>) -> bool {
         if self.session_manager.session(session).is_none() {
             return false;
@@ -1184,6 +1229,154 @@ impl Pyonji {
         if tab.set_active_session(id) {
             self.wheel_remainder = 0.0;
         }
+    }
+}
+
+/// Keep the existing owner until the destination has accepted the session.
+fn attach_session_to_tabs(
+    tabs: &mut [Option<TerminalTab>],
+    detached_sessions: &mut Vec<SessionId>,
+    session: SessionId,
+    target: usize,
+) -> bool {
+    let Some(destination) = tabs.get_mut(target) else {
+        return false;
+    };
+    if let Some(tab) = destination {
+        let placed = if tab.sessions().contains(&session) {
+            tab.set_active_session(session)
+        } else {
+            tab.split_active(SplitDirection::Vertical, session)
+        };
+        if !placed {
+            return false;
+        }
+    } else {
+        *destination = Some(TerminalTab::new(session));
+    }
+    for (index, tab) in tabs.iter_mut().enumerate() {
+        if index == target {
+            continue;
+        }
+        let Some(state) = tab.as_mut() else {
+            continue;
+        };
+        if state.remove_session(session) && state.is_empty() {
+            *tab = None;
+        }
+    }
+    detached_sessions.retain(|detached| *detached != session);
+    true
+}
+
+#[cfg(test)]
+mod session_attachment_tests {
+    use super::{SessionId, SplitDirection, TerminalTab, attach_session_to_tabs};
+
+    fn session(id: u64) -> SessionId {
+        id.to_string().parse().unwrap()
+    }
+
+    #[test]
+    fn attaching_a_detached_session_to_an_empty_tab_reuses_its_id() {
+        let id = session(4);
+        let mut tabs = [None, None];
+        let mut detached = vec![id];
+
+        assert!(attach_session_to_tabs(&mut tabs, &mut detached, id, 1));
+        assert!(tabs[0].is_none());
+        assert_eq!(tabs[1].as_ref().unwrap().sessions(), [id]);
+        assert_eq!(tabs[1].as_ref().unwrap().active_session(), Some(id));
+        assert!(detached.is_empty());
+    }
+
+    #[test]
+    fn attaching_to_an_occupied_tab_preserves_panes_and_focuses_the_session() {
+        let first = session(1);
+        let second = session(2);
+        let detached_id = session(3);
+        let mut destination = TerminalTab::new(first);
+        destination.split_active(SplitDirection::Horizontal, second);
+        let mut tabs = [Some(destination)];
+        let mut detached = vec![detached_id];
+
+        assert!(attach_session_to_tabs(
+            &mut tabs,
+            &mut detached,
+            detached_id,
+            0
+        ));
+        assert_eq!(
+            tabs[0].as_ref().unwrap().sessions(),
+            [first, second, detached_id]
+        );
+        assert_eq!(
+            tabs[0].as_ref().unwrap().active_session(),
+            Some(detached_id)
+        );
+        assert!(detached.is_empty());
+    }
+
+    #[test]
+    fn attaching_an_existing_session_moves_it_once_and_preserves_other_panes() {
+        let id = session(1);
+        let remaining = session(2);
+        let destination_id = session(3);
+        let mut source = TerminalTab::new(id);
+        source.split_active(SplitDirection::Vertical, remaining);
+        let mut tabs = [Some(source), Some(TerminalTab::new(destination_id))];
+        let mut detached = vec![];
+
+        assert!(attach_session_to_tabs(&mut tabs, &mut detached, id, 1));
+        assert_eq!(tabs[0].as_ref().unwrap().sessions(), [remaining]);
+        assert_eq!(tabs[1].as_ref().unwrap().sessions(), [destination_id, id]);
+        assert!(attach_session_to_tabs(&mut tabs, &mut detached, id, 1));
+        assert_eq!(tabs[1].as_ref().unwrap().sessions(), [destination_id, id]);
+        assert_eq!(tabs[1].as_ref().unwrap().active_session(), Some(id));
+        assert!(attach_session_to_tabs(
+            &mut tabs,
+            &mut detached,
+            remaining,
+            1
+        ));
+        assert!(tabs[0].is_none());
+        assert_eq!(
+            tabs[1].as_ref().unwrap().sessions(),
+            [destination_id, id, remaining]
+        );
+    }
+
+    #[test]
+    fn an_invalid_target_or_failed_placement_preserves_session_ownership() {
+        let attached = session(1);
+        let detached_id = session(2);
+        let mut unusable_destination = TerminalTab::new(session(3));
+        unusable_destination.remove_session(session(3));
+        let mut tabs = [Some(TerminalTab::new(attached)), Some(unusable_destination)];
+        let mut detached = vec![detached_id];
+
+        assert!(!attach_session_to_tabs(
+            &mut tabs,
+            &mut detached,
+            detached_id,
+            2
+        ));
+        assert!(!attach_session_to_tabs(
+            &mut tabs,
+            &mut detached,
+            detached_id,
+            1
+        ));
+        assert!(!attach_session_to_tabs(
+            &mut tabs,
+            &mut detached,
+            attached,
+            1
+        ));
+        assert_eq!(tabs[0].as_ref().unwrap().sessions(), [attached]);
+        assert_eq!(tabs[0].as_ref().unwrap().active_session(), Some(attached));
+        assert!(tabs[1].as_ref().unwrap().is_empty());
+        assert_eq!(detached, [detached_id]);
     }
 }
 

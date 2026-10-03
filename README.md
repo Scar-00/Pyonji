@@ -190,7 +190,7 @@ py:bind('<ctrl-b> g', py.open_command())
 ```
 
 The built-in commands are `switch`, `next-tab`, `prev-tab`, `close`,
-`move-to`, `split-h`, `split-v`, `focus-next-pane`, `detach`, `rename`, `ssh`,
+`move-to`, `split-h`, `split-v`, `focus-next-pane`, `detach`, `detached`, `rename`, `ssh`,
 `open-in`, `sessions`, `releases`, `commands`, `lua` and `reload-config`. Tabs
 are written 1-based, the way the status bar counts them; sessions by the bare
 number the status bar shows.
@@ -213,10 +213,26 @@ end);
 | `py:open_palette()` | command palette |
 | `py:open_command()` | the `:` line in the status bar |
 | `py:open_sessions()` | session list |
+| `py:open_detached()` | detached sessions and attachment destination |
 | `py:open_opener()` | directory picker |
 | `py:open_releases()` | release screen and updater |
 | `py:open_rename()` | rename the focused session |
 | `py:open_lua()` | `>` prompt in the status bar |
+
+The detached session view is available through `detached` in the command
+palette or `:` prompt, or a configured binding:
+
+```lua
+py:bind('<ctrl-b> d', py.open_detached())
+```
+
+Search by name or session number and choose with <kbd>↑</kbd>/<kbd>↓</kbd>.
+Press <kbd>Enter</kbd> to attach to the current tab, or
+<kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>9</kbd> to attach directly to that tab.
+An occupied tab gains a split; an empty tab uses the existing session
+without starting another process. <kbd>Esc</kbd> clears a search first,
+then closes the view. The general session list also puts detached sessions
+first, while **Switch** focuses sessions already in tabs.
 
 ## Not implemented
 

@@ -492,9 +492,18 @@ fn builtins() -> Vec<Command> {
             "sessions",
             [],
             Origin::Workspace,
-            "Switch to another running session",
+            "Attach a detached session or switch to a running session",
             |_, py: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>| {
                 open(OverlayScreen::Sessions, py, window, cx);
+            },
+        ),
+        Command::new(
+            "detached",
+            [],
+            Origin::Workspace,
+            "Attach a detached session to a tab",
+            |_, py: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>| {
+                open(OverlayScreen::Detached, py, window, cx);
             },
         ),
         Command::new(

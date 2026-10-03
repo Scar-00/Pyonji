@@ -128,3 +128,5 @@ end)
 
 py:bind('<ctrl-b> v', py.split('v'));
 py:bind('<ctrl-b> h', py.split('h'));
+
+py:bind('<ctrl-b> d', py.detach());
