@@ -33,7 +33,8 @@ A terminal emulator whose grid is drawn on the GPU, configured from Lua.
 - **Lua configuration**, reloaded from disk when it changes and written on
   first run if missing.
 - **Bundled fonts** — nothing to install. Iosevka Term across nine weights,
-  Iosevka, Noto Sans Mono CJK, and two Nerd Font files for icons and emoji.
+  Iosevka, Noto Sans Mono CJK, Nerd Fonts for icons, and Noto Emoji for
+  monochrome emoji in the terminal foreground colour.
 
 There is no image protocol (sixel, iTerm inline images) and no session
 multiplexer.
@@ -250,4 +251,6 @@ move the language server's suggestions instead of walking what came before.
 
 ## License
 
-No license file has been added to this repository yet.
+No license file has been added to this repository yet. The bundled Noto Emoji
+font is licensed under the SIL Open Font License 1.1; its license and source
+are in `resources/fonts/NotoEmoji-OFL.txt` and `resources/fonts/NotoEmoji-README.md`.

@@ -8,7 +8,9 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, FontWeight, KeyBinding, Rgba, ScrollStrategy, SharedString, UniformListScrollHandle, WeakEntity, Window, actions, div, prelude::*, px, rgba, uniform_list
+    App, Context, Entity, FocusHandle, Focusable, FontWeight, KeyBinding, Rgba, ScrollStrategy,
+    SharedString, UniformListScrollHandle, WeakEntity, Window, actions, div, prelude::*, px, rgba,
+    uniform_list,
 };
 use gpui_base::{actions::Cancel, h_flex, v_flex};
 use gpui_component::{
@@ -18,7 +20,8 @@ use gpui_component::{
 
 use crate::{
     Next, Prev, PyTheme as _, Pyonji, Submit,
-    commands::{self, Origin}, util,
+    commands::{self, Origin},
+    util,
 };
 
 actions!(palette, [Complete]);
@@ -144,15 +147,17 @@ impl PaletteView {
     /// the run cannot each read the list differently.
     fn selected(&self, matches: &[commands::Match]) -> Option<usize> {
         let name = self.selected.as_deref()?;
-        matches
-            .iter()
-            .position(|entry| entry.command.name == name)
+        matches.iter().position(|entry| entry.command.name == name)
     }
 
     /// Put the highlight on the best match — where an empty list starts, and
     /// where every new query starts again.
     fn select_first(&mut self, cx: &mut Context<Self>) {
-        if let Some(name) = self.matches(cx).first().map(|entry| entry.command.name.clone()) {
+        if let Some(name) = self
+            .matches(cx)
+            .first()
+            .map(|entry| entry.command.name.clone())
+        {
             self.select(&name, cx);
         }
     }
@@ -188,7 +193,8 @@ impl PaletteView {
             .iter()
             .position(|row| matches!(row, Row::Command(ix) if *ix == at))
             .unwrap_or(at);
-        self.scroll_handle.scroll_to_item(row, ScrollStrategy::Nearest);
+        self.scroll_handle
+            .scroll_to_item(row, ScrollStrategy::Nearest);
     }
 
     fn on_next(&mut self, _: &Next, _: &mut Window, cx: &mut Context<Self>) {
@@ -295,7 +301,11 @@ impl PaletteView {
         self.completion.at = Some(next);
         // The arguments already typed stay: tab completes the name, and nothing
         // else on the line.
-        self.write_line(format!("{offered} {rest}").trim_end().to_string(), window, cx);
+        self.write_line(
+            format!("{offered} {rest}").trim_end().to_string(),
+            window,
+            cx,
+        );
     }
 
     fn on_submit(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
@@ -452,7 +462,11 @@ impl PaletteView {
                     // Off the same list the highlight is resolved against, so
                     // the row that was clicked and the row that runs are one
                     // row.
-                    if this.matches(cx).iter().any(|entry| entry.command.name == name) {
+                    if this
+                        .matches(cx)
+                        .iter()
+                        .any(|entry| entry.command.name == name)
+                    {
                         this.select(&name, cx);
                     }
                     this.on_submit(&Submit, window, cx);
@@ -537,19 +551,25 @@ impl PaletteView {
             .py_1()
             //.overflow_y_scroll()
             .child(
-                uniform_list("palette-list-list", rows.len(), cx.processor(move |this, range: Range<usize>, _, cx| {
-                    rows[range]
-                        .iter()
-                        .map(|row| match row {
-                            Row::Section(origin) => this.render_section(*origin, cx).into_any_element(),
-                            Row::Command(ix) => this
-                                .render_row(&matches[*ix], selected == Some(*ix), cx)
-                                .into_any_element(),
-                        })
-                        .collect()
-                }))
+                uniform_list(
+                    "palette-list-list",
+                    rows.len(),
+                    cx.processor(move |this, range: Range<usize>, _, cx| {
+                        rows[range]
+                            .iter()
+                            .map(|row| match row {
+                                Row::Section(origin) => {
+                                    this.render_section(*origin, cx).into_any_element()
+                                }
+                                Row::Command(ix) => this
+                                    .render_row(&matches[*ix], selected == Some(*ix), cx)
+                                    .into_any_element(),
+                            })
+                            .collect()
+                    }),
+                )
                 .size_full()
-                .track_scroll(&self.scroll_handle)
+                .track_scroll(&self.scroll_handle),
             )
             .into_any_element()
     }
