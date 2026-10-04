@@ -1,13 +1,13 @@
 use crate::pty::{Event as PtyEvent, SshConnection};
-use crate::terminal::{SessionId, SplitDirection, Tab as TerminalTab};
+use crate::terminal::{SessionId, SplitDirection};
 use crate::ui::OverlayScreen;
 use crate::util::UnsafeRefMut;
 use crate::{EnterLuaRepl, EnterRename, ExecKeybind, Pyonji};
-use anyhow::{anyhow, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use async_channel::Sender;
 use gpui::{App, Context, Entity, EntityId, KeyBinding, WeakEntity, Window};
 use gpui_component::ThemeMode;
-use mlua::{prelude::*, FromLua};
+use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
 use path_absolutize::*;
 use std::fmt::Debug;
@@ -365,26 +365,7 @@ impl LuaUserData for LuaProxy {
         methods.add_function("attach", |lua, args: LuaMultiValue| {
             let (this, (session, tab)) = args!(args, lua, (SessionId, Option<usize>));
             callable_action!(lua, this => move |this: &mut Self| -> LuaResult<bool> {
-                if this.py.session_manager.session(session).is_none() {
-                    return Ok(false);
-                }
-                let Some(target) = tab.or(this.py.current_tab) else {
-                    return Ok(false);
-                };
-                if target >= this.py.tabs.len() {
-                    return Ok(false);
-                }
-                let py = &mut this.py;
-                py.detached_sessions.retain(|detached| *detached != session);
-                remove_session_from_tabs(py, session);
-                if py.tabs[target].is_none() {
-                    py.tabs[target] = Some(TerminalTab::new(session));
-                } else if let Some(tab) = py.tabs[target].as_mut() {
-                    tab.split_active(SplitDirection::Vertical, session);
-                }
-                py.current_tab = Some(target);
-                py.wheel_remainder = 0.0;
-                Ok(true)
+                Ok(this.py.attach_session(session, tab, &mut this.cx.as_ctx()))
             })
         });
         methods.add_function("rename", |lua, args: LuaMultiValue| {
@@ -426,6 +407,15 @@ impl LuaUserData for LuaProxy {
                 let window = this.window.as_mut();
                 this.py.overlay.update(this.cx.app.as_mut(), |this, cx| {
                     this.open(OverlayScreen::Sessions, window, cx);
+                });
+                Ok(())
+            })
+        });
+        methods.add_function("open_detached", |lua, this: Option<LuaAnyUserData>| {
+            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                let window = this.window.as_mut();
+                this.py.overlay.update(this.cx.app.as_mut(), |this, cx| {
+                    this.open(OverlayScreen::Detached, window, cx);
                 });
                 Ok(())
             })
@@ -523,38 +513,6 @@ impl LuaUserData for LuaProxy {
             Ok(outer)
         });
     }
-}
-
-fn remove_session_from_tabs(py: &mut Pyonji, session: SessionId) {
-    let current = py.current_tab;
-    let mut emptied_current = false;
-    for (index, tab) in py.tabs.iter_mut().enumerate() {
-        let Some(tab_state) = tab.as_mut() else {
-            continue;
-        };
-        if !tab_state.remove_session(session) {
-            continue;
-        }
-        if tab_state.is_empty() {
-            *tab = None;
-            emptied_current |= Some(index) == current;
-        }
-    }
-    if !emptied_current {
-        return;
-    }
-    let Some(closed) = current else {
-        return;
-    };
-    if let Some(tab) = (0..py.tabs.len())
-        .map(|offset| (closed + py.tabs.len() - 1 - offset) % py.tabs.len())
-        .find(|&tab| py.tabs[tab].is_some())
-    {
-        py.current_tab = Some(tab);
-        py.wheel_remainder = 0.0;
-        return;
-    }
-    py.current_tab = Some(closed.min(py.tabs.len().saturating_sub(1)));
 }
 
 fn config_value<T: FromLua>(lua: &Lua, table: &LuaTable, key: &str) -> Option<T> {

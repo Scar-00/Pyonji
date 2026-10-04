@@ -40,6 +40,7 @@
 ---@field config fun(self: Pyonji, config: Config)
 ---@field open_palette fun(self: Pyonji?) command palette: filter, pick, run
 ---@field open_sessions fun(self: Pyonji?)
+---@field open_detached fun(self: Pyonji?) list hidden sessions to attach again
 ---@field open_releases fun(self: Pyonji?)
 ---@field open_opener fun(self: Pyonji?)
 ---@field open_command fun(self: Pyonji?) opens the `:` command line
