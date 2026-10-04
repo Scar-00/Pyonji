@@ -7,7 +7,6 @@
     clippy::struct_field_names,
     clippy::too_many_lines,
     clippy::cast_sign_loss,
-    clippy::struct_excessive_bools,
     clippy::type_complexity
 )]
 
