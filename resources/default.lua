@@ -77,7 +77,7 @@ py:config({
     },
 });
 
--- Commands is also available from the status bar. Remap this shortcut here.
+-- Open Commands with this shortcut. Remap it here.
 py:bind('<ctrl-shift>p', py.open_palette());
 
 --[[

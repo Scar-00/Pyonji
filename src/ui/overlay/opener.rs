@@ -323,9 +323,12 @@ impl FileOpener {
                     .enumerate()
                     .flat_map(|(i, (label, path))| {
                         let is_root = label == "/";
-                        let crumb = gpui_base::Button::new(("crumb", i))
-                            .accessibility_label(format!("Go to {}", path.display()))
-                            .focus_visible(|style| style.border_1().border_color(t.focus_ring))
+                        let crumb = div()
+                            .id(("crumb", i))
+                            .role(gpui::accesskit::Role::Button)
+                            .tab_index(0)
+                            .focus_visible(|style| style.text_color(t.accent))
+                            .aria_label(format!("Go to {}", path.display()))
                             .px_1()
                             .rounded_sm()
                             .cursor_pointer()
@@ -352,29 +355,32 @@ impl FileOpener {
             .py_1()
             .rounded_md()
             .border_1()
-            .bg(t.surface)
+            .bg(gpui::rgba(0))
             .border_color(if focused { t.focus_ring } else { t.border })
             .text_color(t.text)
             .text_sm()
-            .child(Input::new(&self.path_input).role(gpui_base::RoleOverride::Presentational))
+            .child(
+                Input::new(&self.path_input)
+                    .appearance(false)
+                    .bordered(false)
+                    .role(gpui_base::RoleOverride::Presentational),
+            )
     }
 
     fn render_entry(&self, ix: usize, e: &Entry, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.theme();
         let selected = self.selected == Some(ix);
 
-        gpui_base::Button::new(("entry", ix))
-            .accessibility_label(format!(
+        div()
+            .id(("entry", ix))
+            .aria_label(format!(
                 "{} {}",
                 if e.is_dir { "Directory" } else { "File" },
                 e.name
             ))
             .role(gpui::accesskit::Role::ListBoxOption)
             .aria_selected(selected)
-            .focusable(false)
-            .tab_stop(false)
             .when(selected, |row| row.aria_active_descendant())
-            .focus_visible(|style| style.border_color(t.focus_ring))
             .w_full()
             .flex()
             .flex_row()
@@ -522,14 +528,17 @@ impl FileOpener {
                     .flex_wrap()
                     .gap_3()
                     .child(
-                        gpui_base::Button::new("toggle-hidden")
-                            .accessibility_label("Show hidden files")
+                        div()
+                            .id("toggle-hidden")
+                            .role(gpui::accesskit::Role::CheckBox)
+                            .tab_index(0)
+                            .focus_visible(|style| style.text_color(t.accent).underline())
+                            .aria_label("Show hidden files")
                             .aria_toggled(if self.show_hidden {
                                 gpui::accesskit::Toggled::True
                             } else {
                                 gpui::accesskit::Toggled::False
                             })
-                            .focus_visible(|style| style.border_1().border_color(t.focus_ring))
                             .cursor_pointer()
                             .hover(|s| s.text_color(t.text))
                             .text_color(if self.show_hidden {
@@ -571,7 +580,7 @@ impl Render for FileOpener {
             .size_full()
             .flex()
             .flex_col()
-            .bg(t.surface_elevated)
+            .bg(gpui::rgba(0))
             .border_1()
             .border_color(t.border)
             .rounded_lg()

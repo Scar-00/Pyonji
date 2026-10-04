@@ -12,7 +12,7 @@ use gpui::{
     SharedString, UniformListScrollHandle, WeakEntity, Window, actions, div, prelude::*, px, rgba,
     uniform_list,
 };
-use gpui_base::{Button, actions::Cancel, h_flex, v_flex};
+use gpui_base::{actions::Cancel, h_flex, v_flex};
 use gpui_component::{
     WindowExt,
     input::{Input, InputEvent, InputState},
@@ -439,14 +439,12 @@ impl PaletteView {
         };
         let name: SharedString = command.name.clone().into();
 
-        Button::new(name.clone())
-            .accessibility_label(format!("Run {}: {}", command.name, command.summary))
+        h_flex()
+            .id(name.clone())
+            .aria_label(format!("Run {}: {}", command.name, command.summary))
             .role(gpui::accesskit::Role::ListBoxOption)
             .aria_selected(selected)
-            .focusable(false)
-            .tab_stop(false)
             .when(selected, |row| row.aria_active_descendant())
-            .focus_visible(|style| style.border_color(theme.focus_ring))
             .w_full()
             .h(px(ROW))
             .flex_shrink_0()

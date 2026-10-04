@@ -39,7 +39,6 @@ use gpui::{prelude::*, *};
 use gpui_base::*;
 use gpui_component::{
     Icon, Root, ThemeMode, WindowExt,
-    menu::PopupMenu,
     notification::{Notification, NotificationType},
 };
 use gpui_component_assets as gassets;
@@ -147,7 +146,6 @@ struct Pyonji {
     detached_sessions: Vec<SessionId>,
     wheel_remainder: f32,
     selection_drag: Option<SessionId>,
-    context_menu: Option<(Point<Pixels>, Entity<PopupMenu>)>,
 
     //views
     terminal: Entity<Terminal>,
@@ -257,7 +255,6 @@ impl Pyonji {
             detached_sessions: vec![],
             wheel_remainder: 0.0,
             selection_drag: None,
-            context_menu: None,
 
             terminal: cx.new(|cx| Terminal::new(py.clone(), cx)),
             status_bar: Self::setup_status_bar(window, cx),
@@ -497,33 +494,6 @@ impl Pyonji {
         }
     }
 
-    fn show_terminal_menu(
-        &mut self,
-        position: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let can_copy = self
-            .active_session()
-            .and_then(|id| self.session_manager.session(id))
-            .is_some_and(|session| session.selection.is_some());
-        let focus = self.focus_handle.clone();
-        let menu = PopupMenu::build(window, cx, |menu, _, _| {
-            menu.action_context(focus)
-                .menu_with_enable("Copy", Box::new(ClipboardCopy), can_copy)
-                .menu("Paste", Box::new(ClipboardPaste))
-        });
-        cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {
-            this.context_menu = None;
-            window.focus(&this.focus_handle, cx);
-            cx.notify();
-        })
-        .detach();
-        window.focus(&menu.focus_handle(cx), cx);
-        self.context_menu = Some((position, menu));
-        cx.notify();
-    }
-
     fn extend_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(id) = self.selection_drag else {
             return;
@@ -679,16 +649,6 @@ impl Pyonji {
                     .children(Root::render_dialog_layer(window, cx)),
             )
             .child(self.status_bar.clone())
-            .children(self.context_menu.as_ref().map(|(position, menu)| {
-                deferred(
-                    anchored()
-                        .position(*position)
-                        .anchor(Anchor::TopLeft)
-                        .snap_to_window_with_margin(px(8.0))
-                        .child(menu.clone()),
-                )
-                .priority_auto()
-            }))
     }
 }
 
@@ -812,10 +772,6 @@ impl Pyonji {
                 .is_some_and(|session| {
                     session.vt.screen().mouse_protocol_mode() == vt100::MouseProtocolMode::None
                 });
-        if local && event.button == MouseButton::Right {
-            self.show_terminal_menu(event.position, window, cx);
-            return;
-        }
         if local && event.button == MouseButton::Left {
             if let Some(session) = self.session_manager.session_mut(session_id) {
                 session.selection = Some(Selection::new(session.vt.screen(), row - 1, col - 1));

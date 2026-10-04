@@ -5,8 +5,8 @@ use crate::PyTheme as _;
 use async_lsp::lsp_types::SignatureHelp;
 use async_lsp::lsp_types::{CompletionItem, CompletionItemKind as Kind, Documentation, MarkupKind};
 use gpui::{prelude::*, *};
-use gpui_base::{Button, ScrollbarAxis, h_flex, v_flex};
-use gpui_component::{scroll::ScrollableElement, text::TextView, tooltip::Tooltip};
+use gpui_base::{ScrollbarAxis, h_flex, v_flex};
+use gpui_component::{scroll::ScrollableElement, text::TextView};
 use std::rc::Rc;
 
 const ROW_HEIGHT: f32 = 32.0;
@@ -71,17 +71,12 @@ impl CompletionMenu {
             || item.tags.as_ref().is_some_and(|tags| {
                 tags.contains(&async_lsp::lsp_types::CompletionItemTag::DEPRECATED)
             });
-        Button::new(("lua-completion", index))
-            .accessibility_label(format!("Insert {} ({kind})", item.label))
+        h_flex()
+            .id(("lua-completion", index))
+            .aria_label(format!("Insert {} ({kind})", item.label))
             .role(accesskit::Role::ListBoxOption)
             .aria_selected(selected)
             .when(selected, |row| row.aria_active_descendant())
-            .focusable(false)
-            .tab_stop(false)
-            .tooltip({
-                let label = item.label.clone();
-                move |window, cx| Tooltip::new(label.clone()).build(window, cx)
-            })
             .w_full()
             .h(px(ROW_HEIGHT))
             .items_center()
@@ -177,7 +172,7 @@ impl CompletionMenu {
             .rounded_md()
             .border_1()
             .border_color(theme.border)
-            .bg(theme.surface_elevated)
+            .bg(theme.surface.opacity(0.15))
             .backdrop_blur(px(24.0))
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
                 window.prevent_default();
@@ -349,7 +344,7 @@ impl RenderOnce for CompletionMenu {
                                         .rounded_md()
                                         .border_1()
                                         .border_color(theme.border)
-                                        .bg(theme.surface_elevated)
+                                        .bg(theme.surface.opacity(0.15))
                                         .backdrop_blur(px(24.0))
                                         .text_color(theme.text)
                                         .on_mouse_down(MouseButton::Left, |_, window, cx| {

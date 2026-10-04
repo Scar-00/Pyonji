@@ -422,20 +422,6 @@ impl SessionsView {
                         .text_color(theme.text_muted)
                         .child(detail),
                 )
-                .when(total > 0, |this| {
-                    this.child(
-                        Button::new("clear-session-search")
-                            .accessibility_label("Clear session search")
-                            .px_2()
-                            .py_1()
-                            .text_color(theme.accent)
-                            .focus_visible(|style| style.border_1().border_color(theme.focus_ring))
-                            .child("Clear search")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.clear_search(window, cx)),
-                            ),
-                    )
-                })
                 .into_any_element();
         }
         v_flex()
@@ -569,7 +555,7 @@ impl Render for SessionsView {
             .font_family(font)
             .overflow_hidden()
             .rounded_lg()
-            .bg(cx.theme().surface)
+            .bg(rgba(0))
             .border_1()
             .border_color(cx.theme().border)
             .on_action(cx.listener(|this, _: &Next, _, cx| this.navigate(false, cx)))

@@ -26,8 +26,7 @@ A terminal emulator whose grid is drawn on the GPU, configured from Lua.
   Pyonji can do, one entry per configured SSH host, and one per callback the
   config registers.
 - **A status bar** that doubles as a prompt: tab chips, a session rename field,
-  a `:` command line with history and completion, and a `>` Lua line with LSP
-  completion.
+  and a `>` Lua line with LSP completion.
 - **Self-update** from GitHub releases, showing which build matches the
   machine it is running on.
 - **Lua configuration**, reloaded from disk when it changes and written on
@@ -129,10 +128,10 @@ object. Treat it as a draft: it lists several methods that are not implemented
 
 ### Keybindings
 
-Commands is available from the status bar and with **Ctrl+Shift+P**. Use
+Open Commands with **Ctrl+Shift+P**. Use
 **Ctrl+Shift+C** to copy selected terminal text and **Ctrl+Shift+V** to paste.
 Drag to select output; hold **Shift** to select locally in mouse-enabled apps.
-Right-click a pane for Copy and Paste; hold Shift when the application uses the mouse. Selection is scoped to that pane and
+Selection is scoped to that pane and
 clears when its output changes or it is resized. Scrollback can be selected,
 and scrolling during a drag extends the selection into history.
 
@@ -156,11 +155,9 @@ py:bind({ "ctrl", "shift" }, "F", py.open_sessions())   -- '<ctrl-shift> F'
 
 A binding whose modifiers are followed by another word is a *sequence*, not a
 chord: `'<ctrl-b> f'` waits for <kbd>Ctrl</kbd>+<kbd>B</kbd> and then for
-<kbd>F</kbd>, like a prefix key. `<ctrl-shift>F` is the chord. The status bar
-writes sequences the same way when it shows you a key.
+<kbd>F</kbd>, like a prefix key. `<ctrl-shift>F` is the chord.
 
-`py.open_palette()` binds as the Commands action, so its configured shortcut
-is shown on the status bar. Other callbacks run through Lua.
+`py.open_palette()` binds as the Commands action. Other callbacks run through Lua.
 
 Inside an overlay, <kbd>↑</kbd><kbd>↓</kbd> move, <kbd>Enter</kbd> confirms
 and <kbd>Esc</kbd> closes — with two deliberate exceptions: on the release
@@ -178,8 +175,7 @@ pressing it again offers the next-best match. The list is fuzzy-matched on the
 name, the summary and the placeholders, and grouped by where each command came
 from.
 
-The Commands button shows the shortcut from your configuration. For a prefix
-sequence, bind it with:
+For a prefix sequence, bind Commands with:
 
 ```lua
 py:bind('<ctrl-b> p', py.open_palette())

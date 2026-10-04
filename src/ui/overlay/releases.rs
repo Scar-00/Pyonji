@@ -715,14 +715,12 @@ impl ReleasesView {
         let running = entry.version == RUNNING;
         let ix = entry.ix;
 
-        gpui_base::Button::new(("version", entry.ix))
-            .accessibility_label(format!("View release v{}", entry.version))
+        h_flex()
+            .id(("version", entry.ix))
+            .aria_label(format!("View release v{}", entry.version))
             .role(gpui::accesskit::Role::ListBoxOption)
             .aria_selected(selected)
-            .focusable(false)
-            .tab_stop(false)
             .when(selected, |row| row.aria_active_descendant())
-            .focus_visible(|style| style.border_color(theme.focus_ring))
             .w_full()
             .h(px(ROW))
             .flex_shrink_0()
@@ -860,9 +858,12 @@ impl ReleasesView {
                 )
                 .when(filtered, |this| {
                     this.child(
-                        gpui_base::Button::new("clear-filter")
-                            .accessibility_label("Clear release filter")
+                        div()
+                            .id("clear-filter")
+                            .role(gpui::accesskit::Role::Button)
+                            .tab_index(0)
                             .focus_visible(|style| style.border_color(theme.focus_ring))
+                            .aria_label("Clear release filter")
                             .px_2()
                             .py_1()
                             .border_1()
@@ -1057,9 +1058,12 @@ impl ReleasesView {
             })
             .when_some(entry.changelog.clone(), |this, url| {
                 this.child(
-                    gpui_base::Button::new(("changelog", entry.ix))
-                        .accessibility_label("Read the changelog on GitHub")
+                    h_flex()
+                        .id(("changelog", entry.ix))
+                        .role(gpui::accesskit::Role::Link)
+                        .tab_index(0)
                         .focus_visible(|style| style.border_color(theme.focus_ring))
+                        .aria_label("Read the changelog on GitHub")
                         .flex_wrap()
                         .w_full()
                         .items_center()

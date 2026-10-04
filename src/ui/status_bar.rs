@@ -315,13 +315,16 @@ impl Focusable for StatusBar {
 }
 
 impl Render for StatusBar {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         h_flex()
             .id("status-bar")
             .key_context(Self::CONTEXT)
             .on_action(cx.listener(Self::on_dismiss))
             .w_full()
+            .min_h(px(32.0))
+            .flex_shrink_0()
+            .line_height(relative(1.5))
             .px_1()
             .py_0p5()
             .bg(theme.surface)
@@ -329,41 +332,7 @@ impl Render for StatusBar {
             .items_center()
             .backdrop_blur(px(16.0))
             .map(|this| match &self.mode {
-                Mode::Sessions => {
-                    let py = util::read!(self.pyonji, cx);
-                    let shortcut = window
-                        .bindings_for_action_in(&crate::OpenPalette, &py.focus_handle)
-                        .last()
-                        .map(|binding| {
-                            binding
-                                .keystrokes()
-                                .iter()
-                                .map(|key| key.inner().unparse())
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        });
-                    this.child(SessionView::new(&self.pyonji)).child(
-                        Button::new("commands")
-                            .accessibility_label("Open Commands")
-                            .px_2()
-                            .py_1()
-                            .flex_shrink_0()
-                            .text_color(theme.accent)
-                            .focus_visible(|style| {
-                                style
-                                    .bg(theme.selected)
-                                    .border_1()
-                                    .border_color(theme.focus_ring)
-                            })
-                            .child(shortcut.map_or_else(
-                                || "Commands".to_string(),
-                                |key| format!("Commands  {key}"),
-                            ))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(crate::OpenPalette), cx)
-                            }),
-                    )
-                }
+                Mode::Sessions => this.child(SessionView::new(&self.pyonji)),
                 Mode::Rename { inital, session } => {
                     this.child(RenameView::new(&self.pyonji, inital.clone(), *session))
                 }
@@ -463,11 +432,13 @@ impl RenderOnce for SessionView {
                 let selected = py.current_tab == Some(i);
                 let pyonji = pyonji.clone();
                 Some(
-                    Button::new(("sessions-label", i))
+                    h_flex()
+                        .id(("sessions-label", i))
                         .role(accesskit::Role::Tab)
+                        .tab_index(0)
+                        .focus_visible(|style| style.text_color(theme.accent))
                         .aria_selected(selected)
-                        .accessibility_label(label.clone())
-                        .focus_visible(|style| style.border_1().border_color(theme.focus_ring))
+                        .aria_label(label.clone())
                         .items_center()
                         .justify_center()
                         .px_1()
