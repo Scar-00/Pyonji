@@ -2766,7 +2766,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_components"
 version = "0.2.0"
-source = "git+https://github.com/Scar-00/gpui-component-fork#a675a2bccb04c54ab123111339373e11ac025e09"
+source = "git+https://github.com/Scar-00/gpui-component-fork#a0b1f6108a3de068ced53c734d9cb51c878dca66"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2812,7 +2812,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_components_assets"
 version = "0.2.0"
-source = "git+https://github.com/Scar-00/gpui-component-fork#a675a2bccb04c54ab123111339373e11ac025e09"
+source = "git+https://github.com/Scar-00/gpui-component-fork#a0b1f6108a3de068ced53c734d9cb51c878dca66"
 dependencies = [
  "anyhow",
  "gpui-ce",
@@ -2826,7 +2826,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_components_base"
 version = "0.2.0"
-source = "git+https://github.com/Scar-00/gpui-component-fork#a675a2bccb04c54ab123111339373e11ac025e09"
+source = "git+https://github.com/Scar-00/gpui-component-fork#a0b1f6108a3de068ced53c734d9cb51c878dca66"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2858,7 +2858,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_components_fps"
 version = "0.2.0"
-source = "git+https://github.com/Scar-00/gpui-component-fork#a675a2bccb04c54ab123111339373e11ac025e09"
+source = "git+https://github.com/Scar-00/gpui-component-fork#a0b1f6108a3de068ced53c734d9cb51c878dca66"
 dependencies = [
  "gpui-ce",
  "libc",
@@ -2872,7 +2872,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_components_macros"
 version = "0.2.0"
-source = "git+https://github.com/Scar-00/gpui-component-fork#a675a2bccb04c54ab123111339373e11ac025e09"
+source = "git+https://github.com/Scar-00/gpui-component-fork#a0b1f6108a3de068ced53c734d9cb51c878dca66"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2882,7 +2882,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_components_shell"
 version = "0.2.0"
-source = "git+https://github.com/Scar-00/gpui-component-fork#a675a2bccb04c54ab123111339373e11ac025e09"
+source = "git+https://github.com/Scar-00/gpui-component-fork#a0b1f6108a3de068ced53c734d9cb51c878dca66"
 dependencies = [
  "anyhow",
  "async-channel",

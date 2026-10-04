@@ -22,12 +22,11 @@ A terminal emulator whose grid is drawn on the GPU, configured from Lua.
 - **SSH sessions** over libssh2, declared in the config.
 - **Overlays** for the command palette, the session list, a directory picker,
   and the release screen.
-- **A command palette and a `:` prompt**, over one command table: everything
+- **A command palette**, over one command table: everything
   Pyonji can do, one entry per configured SSH host, and one per callback the
   config registers.
 - **A status bar** that doubles as a prompt: tab chips, a session rename field,
-  a `:` command line with history and completion, and a `>` Lua line with LSP
-  completion.
+  and a `>` Lua line with LSP completion.
 - **Self-update** from GitHub releases, showing which build matches the
   machine it is running on.
 - **Lua configuration**, reloaded from disk when it changes and written on
@@ -129,9 +128,14 @@ object. Treat it as a draft: it lists several methods that are not implemented
 
 ### Keybindings
 
-Almost nothing is bound by default — the only global binding Pyonji installs
-itself is <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> for paste. Keys are
-bound from Lua, which is also what makes them remappable:
+Open Commands with **Ctrl+Shift+P**. Use
+**Ctrl+Shift+C** to copy selected terminal text and **Ctrl+Shift+V** to paste.
+Drag to select output; hold **Shift** to select locally in mouse-enabled apps.
+Selection is scoped to that pane and
+clears when its output changes or it is resized. Scrollback can be selected,
+and scrolling during a drag extends the selection into history.
+
+Keys are bound from Lua and can be remapped:
 
 ```lua
 py:bind('<ctrl-b> f', py.open_sessions())
@@ -151,22 +155,19 @@ py:bind({ "ctrl", "shift" }, "F", py.open_sessions())   -- '<ctrl-shift> F'
 
 A binding whose modifiers are followed by another word is a *sequence*, not a
 chord: `'<ctrl-b> f'` waits for <kbd>Ctrl</kbd>+<kbd>B</kbd> and then for
-<kbd>F</kbd>, like a prefix key. `<ctrl-shift>F` is the chord. The status bar
-writes sequences the same way when it shows you a key.
+<kbd>F</kbd>, like a prefix key. `<ctrl-shift>F` is the chord.
 
-`py.open_palette()`, `py.open_command()` and the other `open_*` methods bind as
-the action they stand for rather than as a Lua wrapper, so a key bound to one
-of them is the same key the action answers to everywhere else.
+`py.open_palette()` binds as the Commands action. Other callbacks run through Lua.
 
 Inside an overlay, <kbd>↑</kbd><kbd>↓</kbd> move, <kbd>Enter</kbd> confirms
 and <kbd>Esc</kbd> closes — with two deliberate exceptions: on the release
 screen <kbd>Esc</kbd> clears the version filter first, and on the palette it
-peels the line back one word at a time. Both close on the press that finds
+clears arguments first, then the command filter. Both close on the press that finds
 nothing left to peel.
 
 ### Commands
 
-There is one command table, and two ways to reach it.
+Commands uses one command table.
 
 The **palette** (`py:open_palette()`) is a command line with the matching
 commands listed under it. <kbd>Tab</kbd> completes the word being typed, and
@@ -174,19 +175,10 @@ pressing it again offers the next-best match. The list is fuzzy-matched on the
 name, the summary and the placeholders, and grouped by where each command came
 from.
 
-The **`:` prompt** in the status bar takes the same grammar without the list:
-`switch 2`, `rename my logs`, `ssh server`. <kbd>↑</kbd> and <kbd>↓</kbd> walk
-what you have already run, and <kbd>Tab</kbd> completes. A name that matches
-nothing is reported in the bar rather than ignored, with the nearest command
-offered as a suggestion.
-
-Both are on the right of the status bar as `commands` and `command`, and each
-shows the key your config has bound to it. Nothing is bound by default, so
-bind them if you want them on the home row:
+For a prefix sequence, bind Commands with:
 
 ```lua
 py:bind('<ctrl-b> p', py.open_palette())
-py:bind('<ctrl-b> g', py.open_command())
 ```
 
 The built-in commands are `switch`, `next-tab`, `prev-tab`, `close`,
@@ -211,7 +203,6 @@ end);
 | Call | Opens |
 |---|---|
 | `py:open_palette()` | command palette |
-| `py:open_command()` | the `:` line in the status bar |
 | `py:open_sessions()` | session list |
 | `py:open_detached()` | detached sessions and attachment destination |
 | `py:open_opener()` | directory picker |
@@ -220,7 +211,7 @@ end);
 | `py:open_lua()` | `>` prompt in the status bar |
 
 The detached session view is available through `detached` in the command
-palette or `:` prompt, or a configured binding:
+palette, or a configured binding:
 
 ```lua
 py:bind('<ctrl-b> d', py.open_detached())

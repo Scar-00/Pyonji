@@ -276,6 +276,7 @@ impl SessionsView {
                     )
                     .child(
                         Input::new(&self.search_input)
+                            .role(gpui_base::RoleOverride::Presentational)
                             .flex_1()
                             .bordered(false)
                             .appearance(false),
@@ -297,8 +298,11 @@ impl SessionsView {
                 },
                 entry.title
             ))
-            .tab_stop(false)
+            .role(gpui::accesskit::Role::ListBoxOption)
+            .aria_selected(selected)
             .focusable(false)
+            .tab_stop(false)
+            .when(selected, |row| row.aria_active_descendant())
             .w_full()
             .h(px(ROW_HEIGHT))
             .border_l_2()
@@ -421,6 +425,9 @@ impl SessionsView {
                 .into_any_element();
         }
         v_flex()
+            .id("session-results-list")
+            .role(gpui::accesskit::Role::ListBox)
+            .aria_label("Matching sessions")
             .flex_1()
             .min_h_0()
             .py_2()
@@ -548,17 +555,27 @@ impl Render for SessionsView {
             .font_family(font)
             .overflow_hidden()
             .rounded_lg()
-            .bg(cx.theme().surface)
-            .border_1()
-            .border_color(cx.theme().border)
+            .bg(rgba(0))
             .on_action(cx.listener(|this, _: &Next, _, cx| this.navigate(false, cx)))
             .on_action(cx.listener(|this, _: &Prev, _, cx| this.navigate(true, cx)))
             .on_action(cx.listener(Self::on_submit))
             .on_action(cx.listener(Self::on_cancel))
             .on_action(cx.listener(Self::on_attach_to_tab))
-            .child(self.render_header(entries.len(), total, window, cx))
-            .child(self.render_list(entries.clone(), total, cx))
-            .child(self.render_footer(&entries, cx))
+            .child(
+                crate::ui::combo_box::editable_combo_box(
+                    "session-search-results",
+                    "Sessions",
+                    "Find by name or session number…",
+                    &self.search_input,
+                    true,
+                    cx,
+                )
+                .size_full()
+                .min_h_0()
+                .child(self.render_header(entries.len(), total, window, cx))
+                .child(self.render_list(entries.clone(), total, cx))
+                .child(self.render_footer(&entries, cx)),
+            )
     }
 }
 

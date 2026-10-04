@@ -102,12 +102,14 @@ impl Overlay {
             OverlayScreen::Detached => self.detached.update(cx, |this, cx| this.reset(window, cx)),
             _ => {}
         }
-        let (width, height) = Self::dialog_size(screen, window);
-        let builder = cx.processor(move |this, dialog: Dialog, _window, cx| {
+        let builder = cx.processor(move |this, dialog: Dialog, window, cx| {
+            let (width, height) = Self::dialog_size(screen, window);
             let dialog = dialog
                 .p_0()
                 .backdrop_blur(px(24.0))
                 .bg(cx.theme().surface.opacity(0.15))
+                .border_color(cx.theme().border)
+                .shadow(crate::ui::surface_shadow())
                 .close_button(false);
             let dialog = match (width, height) {
                 (Some(width), Some(height)) => dialog.w(width).h(height),
@@ -141,13 +143,13 @@ impl Overlay {
             OverlayScreen::Palette => (px(620.), px(520.)),
             OverlayScreen::Sessions | OverlayScreen::Detached => (px(660.), px(520.)),
             OverlayScreen::Releases => (px(920.), px(500.)),
-            _ => return (None, None),
+            OverlayScreen::Opener => (px(760.), px(560.)),
         };
         let size = window.viewport_size();
         let inset = px(64.);
         (
-            Some(width.min((size.width - inset).max(px(320.)))),
-            Some(height.min((size.height - inset).max(px(280.)))),
+            Some(width.min((size.width - inset.min(size.width * 0.1)).max(px(0.)))),
+            Some(height.min((size.height - inset.min(size.height * 0.1)).max(px(0.)))),
         )
     }
 

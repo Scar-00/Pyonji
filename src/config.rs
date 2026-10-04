@@ -2,7 +2,7 @@ use crate::pty::{Event as PtyEvent, SshConnection};
 use crate::terminal::{SessionId, SplitDirection};
 use crate::ui::OverlayScreen;
 use crate::util::UnsafeRefMut;
-use crate::{EnterLuaRepl, EnterRename, ExecKeybind, Pyonji};
+use crate::{EnterLuaRepl, EnterRename, ExecKeybind, OpenPalette, Pyonji};
 use anyhow::{Context as _, Result, anyhow};
 use async_channel::Sender;
 use gpui::{App, Context, Entity, EntityId, KeyBinding, WeakEntity, Window};
@@ -176,32 +176,25 @@ impl LuaUserData for LuaProxy {
             Ok(())
         });
         methods.add_method_mut("bind", |lua, this, args: LuaMultiValue| {
-            if args.front().is_some_and(|arg| arg.is_table()) {
-                /*let (mods, key, func): (Vec<String>, String, LuaFunction) =
+            let (binding, func) = if args.front().is_some_and(|arg| arg.is_table()) {
+                let (mods, key, func): (Vec<String>, String, LuaFunction) =
                     FromLuaMulti::from_lua_multi(args, lua)?;
-                let mut state = Modifiers::default();
-                for modifier in &mods {
-                    state |= ConfigKeyBinding::parse_mod(modifier)?;
-                }
-                let key = ConfigKeyBinding::parse_key(&key)?;
-                let binding = ConfigKeyBinding {
-                    keystrokes: vec![SingleKeyBinding {
-                        modifiers: state,
-                        key,
-                    }],
-                };
-                this.cx.app.bind_keys([KeyBinding::new(
-                    binding.to_gpui_keys().as_str(),
-                    ExecKeybind(func.clone()),
-                    None,
-                )]);*/
-                todo!()
+                let binding = ConfigKeyBinding::parse(format!("<{}>{key}", mods.join("-")))?;
+                (binding, func)
             } else {
-                let (binding, func): (ConfigKeyBinding, LuaFunction) =
-                    FromLuaMulti::from_lua_multi(args, lua)?;
+                FromLuaMulti::from_lua_multi(args, lua)?
+            };
+            let actions: LuaTable = lua.named_registry_value("pyonji.actions")?;
+            if actions.get::<Option<String>>(func.clone())?.as_deref() == Some("palette") {
                 this.cx.app.bind_keys([KeyBinding::new(
-                    binding.to_gpui_keys().as_str(),
-                    ExecKeybind(func.clone()),
+                    &binding.to_gpui_keys(),
+                    OpenPalette,
+                    None,
+                )]);
+            } else {
+                this.cx.app.bind_keys([KeyBinding::new(
+                    &binding.to_gpui_keys(),
+                    ExecKeybind(func),
                     None,
                 )]);
             }
@@ -439,13 +432,16 @@ impl LuaUserData for LuaProxy {
             })
         });
         methods.add_function("open_palette", |lua, this: Option<LuaAnyUserData>| {
-            callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
-                let window = this.window.as_mut();
-                this.py.overlay.update(this.cx.app.as_mut(), |this, cx| {
-                    this.open(OverlayScreen::Palette, window, cx);
-                });
+            let result: LuaResult<LuaValue> = callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
+                this.window.dispatch_action(Box::new(OpenPalette), &mut this.cx.app);
                 Ok(())
-            })
+            });
+            let value = result?;
+            if let LuaValue::Function(func) = &value {
+                let actions: LuaTable = lua.named_registry_value("pyonji.actions")?;
+                actions.set(func.clone(), "palette")?;
+            }
+            Ok(value)
         });
         methods.add_function("open_rename", |lua, this: Option<LuaAnyUserData>| {
             callable_action!(lua, this => |this: &mut Self| -> LuaResult<()> {
@@ -655,6 +651,9 @@ pub fn with_env<R>(
 }
 
 pub fn install_inspect(lua: &Lua) -> Result<()> {
+    let actions = lua.create_table()?;
+    actions.set_metatable(Some(lua.create_table_from([("__mode", "k")])?))?;
+    lua.set_named_registry_value("pyonji.actions", actions)?;
     lua.load_std_libs(mlua::StdLib::DEBUG)?;
     {
         let chunk = lua.load(include_str!("../resources/lua/inspect.lua"));

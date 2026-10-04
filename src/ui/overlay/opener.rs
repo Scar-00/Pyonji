@@ -8,7 +8,7 @@ use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, ScrollHandle, Window,
     actions, div, prelude::*,
 };
-use gpui_base::input::{Input, InputEvent, InputState};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{
     Sizable,
     button::{Button, ButtonVariants},
@@ -83,6 +83,7 @@ pub struct FileOpener {
 
     /// Directory whose entries are currently loaded.
     cwd: PathBuf,
+    relative_base: PathBuf,
     listing: DirectoryListing,
     selected: Option<usize>,
 
@@ -108,6 +109,7 @@ impl FileOpener {
             path_input,
             scroll_handle: ScrollHandle::new(),
             cwd: PathBuf::new(),
+            relative_base: start_dir.clone(),
             listing: DirectoryListing::default(),
             selected: None,
             show_hidden: false,
@@ -129,38 +131,24 @@ impl FileOpener {
 
     // ------------------------------------------------------------- path logic
 
-    fn expand_tilde(p: &str) -> PathBuf {
-        if let Some(rest) = p.strip_prefix('~')
-            && let Some(home) = std::env::var_os("HOME")
-        {
-            return PathBuf::from(home).join(rest.trim_start_matches('/'));
-        }
-        PathBuf::from(p)
-    }
-
-    /// Split the input into (directory, filter fragment).
+    /// Native separators are recognized without treating Unix backslashes as separators.
     fn parse_input(&self, cx: &App) -> (PathBuf, String) {
-        let raw = self.path_input.read(cx).value().to_string();
-        match raw.rfind('/') {
-            Some(ix) => {
-                let (dir, frag) = raw.split_at(ix + 1);
-                let dir = if dir == "/" {
-                    PathBuf::from("/")
-                } else {
-                    Self::expand_tilde(dir)
-                };
-                (dir, frag.to_string())
-            }
-            None => (self.cwd.clone(), raw),
-        }
+        split_path_input(
+            self.path_input.read(cx).value().as_str(),
+            &self.cwd,
+            &self.relative_base,
+            cfg!(windows),
+            dirs::home_dir().as_deref(),
+        )
     }
 
     /// Replace the input with `dir/` (which triggers a reload via Change).
     fn set_input_path(&mut self, dir: &Path, window: &mut Window, cx: &mut Context<Self>) {
         let mut s = dir.to_string_lossy().to_string();
-        if !s.ends_with('/') {
-            s.push('/');
+        if !s.ends_with(std::path::MAIN_SEPARATOR) && !s.ends_with('/') {
+            s.push(std::path::MAIN_SEPARATOR);
         }
+        self.relative_base = dir.to_path_buf();
         self.path_input
             .update(cx, |state, cx| state.set_value(s, window, cx));
         // set_value may or may not emit Change depending on version; be safe.
@@ -275,14 +263,14 @@ impl FileOpener {
             self.activate(ix, window, cx);
         } else if frag.is_empty() {
             self.open_directory(cx);
-        } else if vis.len() == 1 {
-            self.activate(vis[0], window, cx);
         } else {
             let path = dir.join(&frag);
             if path.is_dir() {
                 self.set_input_path(&path, window, cx);
             } else if path.is_file() {
                 cx.emit(FileOpenerEvent::Opened(path));
+            } else if vis.len() == 1 {
+                self.activate(vis[0], window, cx);
             }
         }
     }
@@ -337,6 +325,10 @@ impl FileOpener {
                         let is_root = label == "/";
                         let crumb = div()
                             .id(("crumb", i))
+                            .role(gpui::accesskit::Role::Button)
+                            .tab_index(0)
+                            .focus_visible(|style| style.text_color(t.accent))
+                            .aria_label(format!("Go to {}", path.display()))
                             .px_1()
                             .rounded_sm()
                             .cursor_pointer()
@@ -345,8 +337,8 @@ impl FileOpener {
                                 this.set_input_path(&path, window, cx);
                             }))
                             .child(label);
-                        let sep = (!is_root && i > 0)
-                            .then(|| div().text_color(t.text_disabled).child("/"));
+                        let sep =
+                            (!is_root && i > 0).then(|| div().text_color(t.text_muted).child("/"));
                         sep.into_iter()
                             .map(IntoElement::into_any_element)
                             .chain(std::iter::once(crumb.into_any_element()))
@@ -363,11 +355,16 @@ impl FileOpener {
             .py_1()
             .rounded_md()
             .border_1()
-            .bg(t.surface)
+            .bg(gpui::rgba(0))
             .border_color(if focused { t.focus_ring } else { t.border })
             .text_color(t.text)
             .text_sm()
-            .child(Input::new(&self.path_input))
+            .child(
+                Input::new(&self.path_input)
+                    .appearance(false)
+                    .bordered(false)
+                    .role(gpui_base::RoleOverride::Presentational),
+            )
     }
 
     fn render_entry(&self, ix: usize, e: &Entry, cx: &Context<Self>) -> impl IntoElement {
@@ -376,6 +373,14 @@ impl FileOpener {
 
         div()
             .id(("entry", ix))
+            .aria_label(format!(
+                "{} {}",
+                if e.is_dir { "Directory" } else { "File" },
+                e.name
+            ))
+            .role(gpui::accesskit::Role::ListBoxOption)
+            .aria_selected(selected)
+            .when(selected, |row| row.aria_active_descendant())
             .w_full()
             .flex()
             .flex_row()
@@ -389,9 +394,9 @@ impl FileOpener {
             .border_color(if selected {
                 t.selected_border
             } else {
-                t.unselected_border
+                gpui::rgba(0)
             })
-            .bg(if selected { t.selected } else { t.unselected })
+            .bg(if selected { t.selected } else { gpui::rgba(0) })
             .when(!selected, |d| d.hover(|s| s.bg(t.hovered)))
             .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
                 if ev.click_count() >= 2 {
@@ -423,16 +428,11 @@ impl FileOpener {
                     }),
             )
             // size
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(t.text_disabled)
-                    .child(if e.is_dir {
-                        String::new()
-                    } else {
-                        human_size(e.size)
-                    }),
-            )
+            .child(div().text_xs().text_color(t.text_muted).child(if e.is_dir {
+                String::new()
+            } else {
+                human_size(e.size)
+            }))
     }
 
     fn render_list(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -479,6 +479,8 @@ impl FileOpener {
 
         div()
             .id("file-opener-list")
+            .role(gpui::accesskit::Role::ListBox)
+            .aria_label("Files and directories")
             .flex_1()
             .min_h_0()
             .flex()
@@ -500,6 +502,9 @@ impl FileOpener {
         div()
             .flex()
             .flex_row()
+            .flex_wrap()
+            .gap_2()
+            .flex_shrink_0()
             .justify_between()
             .items_center()
             .px_3()
@@ -520,10 +525,20 @@ impl FileOpener {
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
                     .gap_3()
                     .child(
                         div()
                             .id("toggle-hidden")
+                            .role(gpui::accesskit::Role::CheckBox)
+                            .tab_index(0)
+                            .focus_visible(|style| style.text_color(t.accent).underline())
+                            .aria_label("Show hidden files")
+                            .aria_toggled(if self.show_hidden {
+                                gpui::accesskit::Toggled::True
+                            } else {
+                                gpui::accesskit::Toggled::False
+                            })
                             .cursor_pointer()
                             .hover(|s| s.text_color(t.text))
                             .text_color(if self.show_hidden {
@@ -555,6 +570,7 @@ impl Render for FileOpener {
         div()
             .id("file-opener")
             .key_context(CONTEXT)
+            .tab_group()
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_next))
             .on_action(cx.listener(Self::on_prev))
@@ -564,28 +580,75 @@ impl Render for FileOpener {
             .size_full()
             .flex()
             .flex_col()
-            .bg(t.surface_elevated)
-            .border_1()
-            .border_color(t.border)
+            .bg(gpui::rgba(0))
             .rounded_lg()
             .overflow_hidden()
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_3()
-                    .border_b_1()
-                    .border_color(t.border)
-                    .child(self.render_breadcrumb(cx))
-                    .child(self.render_input(window, cx)),
+                crate::ui::combo_box::editable_combo_box(
+                    "file-search-results",
+                    "Open a path",
+                    "Type a path…",
+                    &self.path_input,
+                    true,
+                    cx,
+                )
+                .size_full()
+                .min_h_0()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_shrink_0()
+                        .gap_2()
+                        .p_3()
+                        .border_b_1()
+                        .border_color(t.border)
+                        .child(self.render_breadcrumb(cx))
+                        .child(self.render_input(window, cx)),
+                )
+                .child(self.render_list(cx))
+                .child(self.render_footer(cx)),
             )
-            .child(self.render_list(cx))
-            .child(self.render_footer(cx))
     }
 }
 
 // ------------------------------------------------------------------ helpers
+
+fn split_path_input(
+    raw: &str,
+    cwd: &Path,
+    base: &Path,
+    windows: bool,
+    home: Option<&Path>,
+) -> (PathBuf, String) {
+    let separator = |c| c == '/' || (windows && c == '\\');
+    let expand = |value: &str| {
+        if let Some(rest) = value.strip_prefix('~')
+            && (rest.is_empty() || rest.starts_with(separator))
+            && let Some(home) = home
+        {
+            return home.join(rest.trim_start_matches(separator));
+        }
+        let path = PathBuf::from(value);
+        let native_root =
+            windows && (value.starts_with('\\') || value.as_bytes().get(1) == Some(&b':'));
+        if path.is_absolute() || native_root {
+            path
+        } else {
+            base.join(path)
+        }
+    };
+    if raw == "~" {
+        return (expand(raw), String::new());
+    }
+    match raw.rfind(separator) {
+        Some(ix) => {
+            let (directory, fragment) = raw.split_at(ix + 1);
+            (expand(directory), fragment.to_string())
+        }
+        None => (cwd.to_path_buf(), raw.to_string()),
+    }
+}
 
 fn read_dir_sorted(dir: &Path) -> io::Result<Vec<Entry>> {
     let mut out: Vec<Entry> = fs::read_dir(dir)?
@@ -629,6 +692,72 @@ fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_drive_unc_and_forward_slash_paths_are_split() {
+        let cwd = Path::new("/current");
+        let base = Path::new("/base");
+        for (raw, directory, fragment) in [
+            (r"C:\", r"C:\", ""),
+            (
+                "C:\\Users\\Public\\Documents\\",
+                "C:\\Users\\Public\\Documents\\",
+                "",
+            ),
+            (
+                "C:\\Users\\Public\\Documents",
+                "C:\\Users\\Public\\",
+                "Documents",
+            ),
+            (
+                "C:/Users/Public/Documents/",
+                "C:/Users/Public/Documents/",
+                "",
+            ),
+            (
+                "\\\\server\\share\\folder\\",
+                "\\\\server\\share\\folder\\",
+                "",
+            ),
+            ("\\\\server\\share\\folder", "\\\\server\\share\\", "folder"),
+        ] {
+            assert_eq!(
+                split_path_input(raw, cwd, base, true, None),
+                (PathBuf::from(directory), fragment.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn relative_paths_use_a_stable_base_and_tilde_only_expands_home() {
+        let cwd = Path::new("/base/sub");
+        let base = Path::new("/base");
+        let home = Path::new("/home/test");
+        assert_eq!(
+            split_path_input("sub/file", cwd, base, false, Some(home)),
+            (base.join("sub"), "file".into())
+        );
+        assert_eq!(
+            split_path_input("sub/", cwd, base, false, Some(home)),
+            (base.join("sub"), "".into())
+        );
+        assert_eq!(
+            split_path_input("~/", cwd, base, false, Some(home)),
+            (home.to_path_buf(), "".into())
+        );
+        assert_eq!(
+            split_path_input("~", cwd, base, false, Some(home)),
+            (home.to_path_buf(), "".into())
+        );
+        assert_eq!(
+            split_path_input("~someone/file", cwd, base, false, Some(home)),
+            (base.join("~someone"), "file".into())
+        );
+        assert_eq!(
+            split_path_input(r"literal\name", cwd, base, false, Some(home)),
+            (cwd.to_path_buf(), r"literal\name".into())
+        );
+    }
 
     #[test]
     fn late_directory_results_cannot_replace_the_current_listing() {

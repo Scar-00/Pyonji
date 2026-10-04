@@ -73,6 +73,10 @@ impl CompletionMenu {
             });
         h_flex()
             .id(("lua-completion", index))
+            .aria_label(format!("Insert {} ({kind})", item.label))
+            .role(accesskit::Role::ListBoxOption)
+            .aria_selected(selected)
+            .when(selected, |row| row.aria_active_descendant())
             .w_full()
             .h(px(ROW_HEIGHT))
             .items_center()
@@ -306,114 +310,112 @@ impl RenderOnce for CompletionMenu {
             on_accept,
             ..
         } = self;
-        deferred(
-            anchored()
-                .anchor(Anchor::BottomLeft)
-                .offset(point(px(0.0), px(-8.0)))
-                .snap_to_window_with_margin(px(8.0))
-                .child(
-                    v_flex()
-                        .gap_2()
-                        .flex_none()
-                        .font_family(mono)
-                        .text_size(px(13.0))
-                        .text_color(theme.text)
-                        .when_some(signature_help, |popovers, help| {
-                            popovers
-                                .child(SignaturePopover::new(help, available_width.min(px(600.0))))
-                        })
-                        .when(has_items, |popovers| {
-                            popovers.child(
-                                h_flex()
-                                    .items_end()
-                                    .gap_2()
-                                    .child(
-                                        v_flex()
-                                            .id("lua-completion-menu")
-                                            .occlude()
-                                            .w(width)
-                                            .flex_none()
-                                            .overflow_hidden()
-                                            .rounded_md()
-                                            .border_1()
-                                            .border_color(theme.border)
-                                            .bg(theme.surface.opacity(0.15))
-                                            .backdrop_blur(px(24.0))
-                                            .text_color(theme.text)
-                                            .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                                                window.prevent_default();
-                                                cx.stop_propagation();
-                                            })
-                                            .child(
-                                                h_flex()
-                                                    .h(px(HEADER_HEIGHT))
-                                                    .flex_shrink_0()
-                                                    .px_3()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .text_size(px(11.0))
-                                                    .text_color(theme.text_muted)
-                                                    .child("Lua suggestions")
-                                                    .child(format!("{position} / {count}")),
-                                            )
-                                            .child(
-                                                div()
-                                                    .relative()
+        // Paint here to keep the suggestions under their editing ancestor in
+        // the accessibility tree. GPUI deferred draws preserve dispatch ancestry,
+        // but do not preserve the accessibility ancestor stack.
+        anchored()
+            .anchor(Anchor::BottomLeft)
+            .offset(point(px(0.0), px(-8.0)))
+            .snap_to_window_with_margin(px(8.0))
+            .child(
+                v_flex()
+                    .gap_2()
+                    .flex_none()
+                    .font_family(mono)
+                    .text_size(px(13.0))
+                    .text_color(theme.text)
+                    .when_some(signature_help, |popovers, help| {
+                        popovers.child(SignaturePopover::new(help, available_width.min(px(600.0))))
+                    })
+                    .when(has_items, |popovers| {
+                        popovers.child(
+                            h_flex()
+                                .items_end()
+                                .gap_2()
+                                .child(
+                                    v_flex()
+                                        .id("lua-completion-menu")
+                                        .role(accesskit::Role::ListBox)
+                                        .aria_label("Lua suggestions")
+                                        .occlude()
+                                        .w(width)
+                                        .flex_none()
+                                        .overflow_hidden()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .bg(theme.surface.opacity(0.15))
+                                        .backdrop_blur(px(24.0))
+                                        .text_color(theme.text)
+                                        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                                            window.prevent_default();
+                                            cx.stop_propagation();
+                                        })
+                                        .child(
+                                            h_flex()
+                                                .h(px(HEADER_HEIGHT))
+                                                .flex_shrink_0()
+                                                .px_3()
+                                                .items_center()
+                                                .justify_between()
+                                                .text_size(px(11.0))
+                                                .text_color(theme.text_muted)
+                                                .child("Lua suggestions")
+                                                .child(format!("{position} / {count}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .relative()
+                                                .w_full()
+                                                .h(px(list_height))
+                                                .flex_shrink_0()
+                                                .child(
+                                                    uniform_list(
+                                                        "completion-items-list",
+                                                        count,
+                                                        move |range, _, cx| {
+                                                            range
+                                                                .map(|index| {
+                                                                    Self::render_item(
+                                                                        &items[index],
+                                                                        index,
+                                                                        selected == Some(index),
+                                                                        &fragment,
+                                                                        on_accept.clone(),
+                                                                        cx,
+                                                                    )
+                                                                })
+                                                                .collect()
+                                                        },
+                                                    )
                                                     .w_full()
                                                     .h(px(list_height))
                                                     .flex_shrink_0()
-                                                    .child(
-                                                        uniform_list(
-                                                            "completion-items-list",
-                                                            count,
-                                                            move |range, _, cx| {
-                                                                range
-                                                                    .map(|index| {
-                                                                        Self::render_item(
-                                                                            &items[index],
-                                                                            index,
-                                                                            selected == Some(index),
-                                                                            &fragment,
-                                                                            on_accept.clone(),
-                                                                            cx,
-                                                                        )
-                                                                    })
-                                                                    .collect()
-                                                            },
-                                                        )
-                                                        .w_full()
-                                                        .h(px(list_height))
-                                                        .flex_shrink_0()
-                                                        .track_scroll(&scroll_handle),
-                                                    )
-                                                    .scrollbar(
-                                                        &scroll_handle,
-                                                        ScrollbarAxis::Vertical,
-                                                    ),
-                                            )
-                                            .child(
-                                                h_flex()
-                                                    .h(px(FOOTER_HEIGHT))
-                                                    .flex_shrink_0()
-                                                    .px_3()
-                                                    .items_center()
-                                                    .gap_4()
-                                                    .border_t_1()
-                                                    .border_color(theme.border)
-                                                    .when(!compact, |footer| {
-                                                        footer.child(hint("↑ ↓", "select", cx))
-                                                    })
-                                                    .child(hint("Tab", "insert", cx))
-                                                    .child(hint("Esc", "dismiss", cx)),
-                                            ),
-                                    )
-                                    .when(show_details, |popovers| popovers.child(details)),
-                            )
-                        }),
-                ),
-        )
-        .priority_auto()
-        .into_any_element()
+                                                    .track_scroll(&scroll_handle),
+                                                )
+                                                .scrollbar(&scroll_handle, ScrollbarAxis::Vertical),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .h(px(FOOTER_HEIGHT))
+                                                .flex_shrink_0()
+                                                .px_3()
+                                                .items_center()
+                                                .gap_4()
+                                                .border_t_1()
+                                                .border_color(theme.border)
+                                                .when(!compact, |footer| {
+                                                    footer.child(hint("↑ ↓", "select", cx))
+                                                })
+                                                .child(hint("Tab", "insert", cx))
+                                                .child(hint("Esc", "dismiss", cx)),
+                                        ),
+                                )
+                                .when(show_details, |popovers| popovers.child(details)),
+                        )
+                    }),
+            )
+            .into_any_element()
     }
 }
 

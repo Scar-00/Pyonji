@@ -190,11 +190,17 @@ fn split_notes(body: Option<&str>) -> (Option<String>, Option<String>) {
     (notes, changelog)
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
+struct UpdateTarget {
+    version: String,
+    asset_url: String,
+}
+
+#[derive(Clone, PartialEq)]
 enum UpdateState {
     Idle,
-    Updating { progress: f32 },
-    Complete,
+    Updating { target: UpdateTarget, progress: f32 },
+    Complete { target: UpdateTarget },
 }
 
 pub struct ReleasesView {
@@ -239,12 +245,12 @@ impl ReleasesView {
                 // Keep the selection where the filter left it, if it is still
                 // on screen.
                 let entries = this.entries(cx);
-                this.selected = entries
+                let selected = entries
                     .iter()
                     .find(|e| Some(e.ix) == this.selected)
                     .or_else(|| entries.first())
                     .map(|e| e.ix);
-                cx.notify();
+                this.select(selected, cx);
             }
         })
         .detach();
@@ -292,12 +298,21 @@ impl ReleasesView {
             _ = this.update(cx, |this, cx| {
                 match releases {
                     Ok(releases) => {
-                        let len = releases.len();
+                        let version = this
+                            .selected
+                            .and_then(|ix| this.releases.as_ref()?.get(ix))
+                            .map(|release| release.version().to_string());
                         this.releases = Some(releases.into_vec());
                         this.fetch_error = None;
                         // A refetch must not leave the selection past the end
                         // of the list; a first load opens on the newest.
-                        this.selected = Some(this.selected.filter(|ix| *ix < len).unwrap_or(0));
+                        let entries = this.entries(cx);
+                        let selected = entries
+                            .iter()
+                            .find(|entry| Some(&entry.version) == version.as_ref())
+                            .or_else(|| entries.first())
+                            .map(|entry| entry.ix);
+                        this.select(selected, cx);
                     }
                     Err(e) => {
                         this.fetch_error = Some(e.to_string());
@@ -384,12 +399,12 @@ impl ReleasesView {
             .update(cx, |input, cx| input.set_value("", window, cx));
         // `set_value` does not emit a change, so the bookkeeping is redone.
         let entries = self.entries(cx);
-        self.selected = entries
+        let selected = entries
             .iter()
             .find(|e| Some(e.ix) == self.selected)
             .or_else(|| entries.first())
             .map(|e| e.ix);
-        cx.notify();
+        self.select(selected, cx);
     }
 
     /// Escape peels one layer: it drops a filter that is narrowing the list,
@@ -411,7 +426,17 @@ impl ReleasesView {
     }
 
     fn select(&mut self, ix: Option<usize>, cx: &mut Context<Self>) {
+        if self.selected != ix {
+            self.body_scroll.set_offset(point(px(0.0), px(0.0)));
+        }
         self.selected = ix;
+        if let Some(position) = self
+            .entries(cx)
+            .iter()
+            .position(|entry| Some(entry.ix) == ix)
+        {
+            self.rail_scroll.scroll_to_item(position);
+        }
         cx.notify();
     }
 
@@ -459,18 +484,30 @@ impl ReleasesView {
             return;
         };
 
-        let url = asset.download_url().to_string();
-        self.update_state = UpdateState::Updating { progress: 0.0 };
+        let target = UpdateTarget {
+            version: release.version().to_string(),
+            asset_url: asset.download_url().to_string(),
+        };
+        self.update_state = UpdateState::Updating {
+            target: target.clone(),
+            progress: 0.0,
+        };
         cx.notify();
 
         cx.spawn_in_with_priority(Priority::RealtimeAudio, window, async move |this, cx| {
-            if let Err(e) = Self::download_self(&this, url, cx).await {
+            if let Err(e) = Self::download_self(&this, target.clone(), cx).await {
                 _ = this.update(cx, |this, cx| {
                     this.update_state = UpdateState::Idle;
                     cx.notify();
                 });
                 _ = cx.update(|window, cx| {
-                    window.dispatch_action(Box::new(PushError::new(e)), cx);
+                    window.dispatch_action(
+                        Box::new(PushError::new(format!(
+                            "Could not install v{}: {e}",
+                            target.version
+                        ))),
+                        cx,
+                    );
                 });
             }
         })
@@ -479,23 +516,25 @@ impl ReleasesView {
 
     async fn download_self(
         this: &WeakEntity<Self>,
-        url: String,
+        target: UpdateTarget,
         cx: &mut AsyncWindowContext,
     ) -> Result<()> {
         let client = Client::new();
         let res = client
-            .get(url)
+            .get(&target.asset_url)
             .header(reqwest::header::USER_AGENT, "Pyonji")
             .send()
             .compat()
-            .await?;
+            .await?
+            .error_for_status()?;
         let body = res.json::<AssetResult>().compat().await?;
         let res = client
             .get(body.browser_download_url)
             .header(reqwest::header::USER_AGENT, "Pyonji")
             .send()
             .compat()
-            .await?;
+            .await?
+            .error_for_status()?;
         let header = res
             .headers()
             .get(reqwest::header::CONTENT_LENGTH)
@@ -513,18 +552,29 @@ impl ReleasesView {
             downloaded += chunk.len();
             let progress = ((downloaded as f64 / length as f64) * 100.0).clamp(0.0, 100.0) as f32;
             _ = this.update(cx, |this, cx| {
-                this.update_state = UpdateState::Updating { progress };
+                if let UpdateState::Updating {
+                    progress: current, ..
+                } = &mut this.update_state
+                {
+                    *current = progress;
+                }
                 cx.notify();
             });
         }
         _ = this.update(cx, |this, cx| {
-            this.update_state = UpdateState::Updating { progress: 100.0 };
+            if let UpdateState::Updating { progress, .. } = &mut this.update_state {
+                *progress = 100.0;
+            }
             cx.notify();
         });
+        anyhow::ensure!(
+            downloaded == length,
+            "incomplete update download: received {downloaded} of {length} bytes"
+        );
         let path = file.path();
         self_replace::self_replace(path)?;
         _ = this.update(cx, |this, cx| {
-            this.update_state = UpdateState::Complete;
+            this.update_state = UpdateState::Complete { target };
             cx.notify();
         });
         Ok(())
@@ -546,7 +596,12 @@ impl ReleasesView {
 
     // ---------------------------------------------------------------- render
 
-    fn render_header(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+    fn render_header(
+        &self,
+        compact: bool,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
         let filtering = self
             .search_input
@@ -555,7 +610,9 @@ impl ReleasesView {
             .is_focused(window);
 
         h_flex()
-            .h(px(56.0))
+            .min_h(px(56.0))
+            .py_2()
+            .flex_wrap()
             .flex_shrink_0()
             .items_center()
             .gap_3()
@@ -576,18 +633,22 @@ impl ReleasesView {
                             .child("Running"),
                     )
                     .child(div().flex_shrink_0().text_color(theme.text).child(RUNNING))
-                    .when_some(self.status(cx), |this, (status, color)| {
-                        this.child(rule(theme))
-                            .child(div().min_w_0().truncate().text_color(color).child(status))
-                    }),
+                    .when_some(
+                        (!compact).then(|| self.status(cx)).flatten(),
+                        |this, (status, color)| {
+                            this.child(rule(theme))
+                                .child(div().min_w_0().truncate().text_color(color).child(status))
+                        },
+                    ),
             )
             .child(div().flex_1())
             .child(
                 // A ruled field to match the screen, lit only while focused so
                 // the caret is not the only focus cue.
                 h_flex()
-                    .w(px(240.0))
+                    .flex_1()
                     .min_w(px(120.0))
+                    .max_w(px(240.0))
                     .h(px(32.0))
                     .items_center()
                     .gap_2()
@@ -602,10 +663,11 @@ impl ReleasesView {
                     .child(
                         Icon::new(IconName::Search)
                             .small()
-                            .text_color(theme.text_disabled),
+                            .text_color(theme.text_muted),
                     )
                     .child(
                         Input::new(&self.search_input)
+                            .role(gpui_base::RoleOverride::Presentational)
                             .flex_1()
                             .appearance(false)
                             .bordered(false),
@@ -624,14 +686,22 @@ impl ReleasesView {
             )
     }
 
-    fn render_rail(&self, entries: &[Entry], cx: &Context<Self>) -> impl IntoElement {
+    fn render_rail(
+        &self,
+        entries: &[Entry],
+        compact: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
 
         v_flex()
             .id("releases-rail")
-            .w(px(RAIL))
-            .flex_shrink_0()
-            .border_r_1()
+            .role(gpui::accesskit::Role::ListBox)
+            .aria_label("Release versions")
+            .when(compact, |rail| rail.w_full().h(px(ROW * 2.0)).border_b_1())
+            .when(!compact, |rail| rail.w(px(RAIL)).border_r_1())
+            .when(!compact, |rail| rail.flex_shrink_0())
+            .when(compact, |rail| rail.flex_shrink_1().min_h_0())
             .border_color(theme.border)
             .overflow_y_scroll()
             .track_scroll(&self.rail_scroll)
@@ -647,6 +717,10 @@ impl ReleasesView {
 
         h_flex()
             .id(("version", entry.ix))
+            .aria_label(format!("View release v{}", entry.version))
+            .role(gpui::accesskit::Role::ListBoxOption)
+            .aria_selected(selected)
+            .when(selected, |row| row.aria_active_descendant())
             .w_full()
             .h(px(ROW))
             .flex_shrink_0()
@@ -703,7 +777,12 @@ impl ReleasesView {
             )
     }
 
-    fn render_body(&self, entries: &[Entry], cx: &Context<Self>) -> impl IntoElement {
+    fn render_body(
+        &self,
+        entries: &[Entry],
+        compact: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
 
         if self.releases.is_none() {
@@ -765,7 +844,7 @@ impl ReleasesView {
                 .child(
                     Icon::new(IconName::Inbox)
                         .size_8()
-                        .text_color(theme.text_disabled),
+                        .text_color(theme.text_muted),
                 )
                 .child(
                     div()
@@ -781,6 +860,10 @@ impl ReleasesView {
                     this.child(
                         div()
                             .id("clear-filter")
+                            .role(gpui::accesskit::Role::Button)
+                            .tab_index(0)
+                            .focus_visible(|style| style.border_color(theme.focus_ring))
+                            .aria_label("Clear release filter")
                             .px_2()
                             .py_1()
                             .border_1()
@@ -798,17 +881,25 @@ impl ReleasesView {
                 .into_any_element();
         }
 
-        h_flex()
+        div()
+            .flex()
+            .when(compact, |body| body.flex_col())
+            .when(!compact, |body| body.flex_row())
             .flex_1()
             .min_h_0()
             // `h_flex` centres children on the cross axis; the panes fill it.
             .items_stretch()
-            .child(self.render_rail(entries, cx))
-            .child(self.render_manifest(self.selected_entry(entries), cx))
+            .child(self.render_rail(entries, compact, cx))
+            .child(self.render_manifest(self.selected_entry(entries), compact, cx))
             .into_any_element()
     }
 
-    fn render_manifest(&self, entry: Option<&Entry>, cx: &Context<Self>) -> impl IntoElement {
+    fn render_manifest(
+        &self,
+        entry: Option<&Entry>,
+        compact: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
 
         let Some(entry) = entry else {
@@ -828,6 +919,7 @@ impl ReleasesView {
 
         v_flex()
             .id("releases-manifest")
+            .min_h_0()
             .flex_1()
             .min_w_0()
             .overflow_y_scroll()
@@ -837,8 +929,8 @@ impl ReleasesView {
                 v_flex()
                     .w_full()
                     .gap_5()
-                    .px_6()
-                    .py_5()
+                    .px_3()
+                    .py_3()
                     .child(
                         v_flex()
                             .gap_1()
@@ -877,13 +969,13 @@ impl ReleasesView {
                                 None => format!("{} builds", entry.build_count()),
                             })),
                     )
-                    .child(self.render_builds(entry, cx))
+                    .child(self.render_builds(entry, compact, cx))
                     .child(self.render_notes(entry, cx)),
             )
             .into_any_element()
     }
 
-    fn render_builds(&self, entry: &Entry, cx: &Context<Self>) -> impl IntoElement {
+    fn render_builds(&self, entry: &Entry, compact: bool, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
         let row = |build: &Build, mine: bool| {
@@ -892,7 +984,8 @@ impl ReleasesView {
                 .flex_shrink_0()
                 .items_center()
                 .gap_3()
-                .h(px(30.0))
+                .min_h(px(30.0))
+                .when(compact, |row| row.flex_col().items_start().gap_1().py_1())
                 .pl_3()
                 // The same accent rule the rail uses for selection marks the
                 // build that works here.
@@ -900,7 +993,7 @@ impl ReleasesView {
                 .border_color(if mine { theme.selected_border } else { none() })
                 .child(
                     div()
-                        .w(px(112.0))
+                        .when(!compact, |label| label.w(px(112.0)))
                         .flex_shrink_0()
                         .text_size(px(13.0))
                         .text_color(if mine { theme.text } else { theme.text_muted })
@@ -967,6 +1060,11 @@ impl ReleasesView {
                 this.child(
                     h_flex()
                         .id(("changelog", entry.ix))
+                        .role(gpui::accesskit::Role::Link)
+                        .tab_index(0)
+                        .focus_visible(|style| style.border_color(theme.focus_ring))
+                        .aria_label("Read the changelog on GitHub")
+                        .flex_wrap()
                         .w_full()
                         .items_center()
                         .gap_3()
@@ -1008,14 +1106,16 @@ impl ReleasesView {
         window: &Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        match self.update_state {
+        match &self.update_state {
             UpdateState::Idle => self
                 .render_install_footer(entry, window, cx)
                 .into_any_element(),
-            UpdateState::Updating { progress } => self
-                .render_update_footer(entry, progress, cx)
+            UpdateState::Updating { target, progress } => self
+                .render_update_footer(target, *progress, cx)
                 .into_any_element(),
-            UpdateState::Complete => self.render_complete_footer(cx).into_any_element(),
+            UpdateState::Complete { target } => {
+                self.render_complete_footer(target, cx).into_any_element()
+            }
         }
     }
 
@@ -1031,7 +1131,9 @@ impl ReleasesView {
         let roomy = window.viewport_size().width >= px(900.);
 
         h_flex()
-            .h(px(56.0))
+            .min_h(px(56.0))
+            .py_2()
+            .flex_wrap()
             .flex_shrink_0()
             .items_center()
             .gap_4()
@@ -1122,18 +1224,25 @@ impl ReleasesView {
             .gap_4()
             .child(hint("↑↓", "choose"))
             .child(hint("⏎", "install"))
-            .child(hint("esc", "close"))
+            .child(hint(
+                "esc",
+                if self.search_input.read(cx).value().is_empty() {
+                    "close"
+                } else {
+                    "clear filter"
+                },
+            ))
     }
 
     fn render_update_footer(
         &self,
-        entry: Option<&Entry>,
+        target: &UpdateTarget,
         progress: f32,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let progress = progress.clamp(0.0, 100.0);
         let theme = cx.theme();
-        let version = entry.map(|e| e.version.as_str()).unwrap_or("");
+        let version = &target.version;
 
         v_flex()
             .flex_shrink_0()
@@ -1167,11 +1276,17 @@ impl ReleasesView {
             )
     }
 
-    fn render_complete_footer(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_complete_footer(
+        &self,
+        target: &UpdateTarget,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
 
         h_flex()
-            .h(px(56.0))
+            .min_h(px(56.0))
+            .py_2()
+            .flex_wrap()
             .flex_shrink_0()
             .items_center()
             .gap_2()
@@ -1183,7 +1298,7 @@ impl ReleasesView {
                     .flex_1()
                     .text_size(px(13.0))
                     .text_color(theme.text)
-                    .child("Installed. Restart to run it."),
+                    .child(format!("Installed v{}. Restart to run it.", target.version)),
             )
             .child(
                 Button::new("restart-later")
@@ -1216,19 +1331,33 @@ impl Render for ReleasesView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entries = self.entries(cx);
         let selected = self.selected_entry(&entries);
+        let compact = window.viewport_size().width < px(764.0);
 
         v_flex()
             .id("releases-view")
             .key_context(Self::CONTEXT)
+            .tab_group()
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_select_next))
             .on_action(cx.listener(Self::on_select_prev))
             .on_action(cx.listener(Self::on_confirm))
             .on_action(cx.listener(Self::on_cancel))
             .size_full()
-            .child(self.render_header(window, cx))
-            .child(self.render_body(&entries, cx))
-            .child(self.render_footer(selected, window, cx))
+            .child(
+                crate::ui::combo_box::editable_combo_box(
+                    "release-search-results",
+                    "Releases",
+                    "Filter versions",
+                    &self.search_input,
+                    true,
+                    cx,
+                )
+                .size_full()
+                .min_h_0()
+                .child(self.render_header(compact, window, cx))
+                .child(self.render_body(&entries, compact, cx))
+                .child(self.render_footer(selected, window, cx)),
+            )
     }
 }
 
