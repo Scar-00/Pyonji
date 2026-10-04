@@ -556,8 +556,6 @@ impl Render for SessionsView {
             .overflow_hidden()
             .rounded_lg()
             .bg(rgba(0))
-            .border_1()
-            .border_color(cx.theme().border)
             .on_action(cx.listener(|this, _: &Next, _, cx| this.navigate(false, cx)))
             .on_action(cx.listener(|this, _: &Prev, _, cx| this.navigate(true, cx)))
             .on_action(cx.listener(Self::on_submit))

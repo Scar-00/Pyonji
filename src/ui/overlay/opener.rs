@@ -581,8 +581,6 @@ impl Render for FileOpener {
             .flex()
             .flex_col()
             .bg(gpui::rgba(0))
-            .border_1()
-            .border_color(t.border)
             .rounded_lg()
             .overflow_hidden()
             .child(

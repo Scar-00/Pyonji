@@ -108,6 +108,8 @@ impl Overlay {
                 .p_0()
                 .backdrop_blur(px(24.0))
                 .bg(cx.theme().surface.opacity(0.15))
+                .border_color(cx.theme().border)
+                .shadow(crate::ui::surface_shadow())
                 .close_button(false);
             let dialog = match (width, height) {
                 (Some(width), Some(height)) => dialog.w(width).h(height),

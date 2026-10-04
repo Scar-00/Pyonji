@@ -564,6 +564,7 @@ impl Pyonji {
         let note = Notification::new()
             .icon(notification_icon(kind, cx))
             .bg(cx.theme().surface.opacity(0.15))
+            .shadow(crate::ui::surface_shadow())
             .title(title)
             .autohide(autohide)
             .placement(Anchor::TopRight)
