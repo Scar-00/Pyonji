@@ -264,6 +264,7 @@ impl Terminal {
                 cursor_style: &session.cursor_style,
                 geometry,
                 is_active: Some(session_id) == active,
+                selection: session.selection.as_ref(),
             });
         }
         let Some(renderer) = self.renderer.as_mut() else {
@@ -304,9 +305,26 @@ impl Render for Terminal {
         container_query(cx.processor(|this, size: Size<Pixels>, window, cx| {
             this.sync_surface(size, window, cx);
             this.paint(cx);
+            let py = this.pyonji.upgrade();
+            let terminal_label = py.as_ref().map(|py| {
+                let py = py.read(cx);
+                py.active_session().and_then(|id| py.session_manager.session(id))
+                    .map(|session| format!("Terminal: {}", session.title()))
+                    .unwrap_or_else(|| "Terminal".to_string())
+            }).unwrap_or_else(|| "Terminal".to_string());
+            let terminal_text = py.as_ref().and_then(|py| {
+                let py = py.read(cx);
+                py.active_session().and_then(|id| py.session_manager.session(id))
+                    .map(|session| session.vt.screen().contents())
+            }).unwrap_or_default();
             div()
-                .size_full()
                 .on_prepaint(cx.processor(Self::on_prepaint))
+                .id("terminal-output")
+                .role(accesskit::Role::Terminal)
+                .aria_label(terminal_label)
+                .aria_value(terminal_text)
+                .aria_description("Drag to select output. Shift-drag overrides application mouse input. Control Shift C copies the selection.")
+                .size_full()
                 .children(this.target.as_ref().map(|target| {
                     target
                         .surface()

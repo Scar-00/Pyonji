@@ -39,6 +39,7 @@ use gpui::{prelude::*, *};
 use gpui_base::*;
 use gpui_component::{
     Icon, Root, ThemeMode, WindowExt,
+    menu::PopupMenu,
     notification::{Notification, NotificationType},
 };
 use gpui_component_assets as gassets;
@@ -67,6 +68,7 @@ actions!([
     Next,
     Prev,
     ClipboardPaste,
+    ClipboardCopy,
 ]);
 
 #[derive(clap::Parser)]
@@ -144,6 +146,8 @@ struct Pyonji {
     current_tab: Option<usize>,
     detached_sessions: Vec<SessionId>,
     wheel_remainder: f32,
+    selection_drag: Option<SessionId>,
+    context_menu: Option<(Point<Pixels>, Entity<PopupMenu>)>,
 
     //views
     terminal: Entity<Terminal>,
@@ -177,7 +181,11 @@ impl Pyonji {
     fn init(cx: &mut App) {
         use ui::overlay;
 
-        cx.bind_keys([KeyBinding::new("ctrl-shift-v", ClipboardPaste, None)]);
+        cx.bind_keys([
+            KeyBinding::new("ctrl-shift-v", ClipboardPaste, Some(Terminal::CONTEXT)),
+            KeyBinding::new("ctrl-shift-c", ClipboardCopy, Some(Terminal::CONTEXT)),
+            KeyBinding::new("ctrl-shift-p", OpenPalette, Some(Terminal::CONTEXT)),
+        ]);
 
         ui::status_bar::init(cx);
         overlay::palette::init(cx);
@@ -220,6 +228,20 @@ impl Pyonji {
 
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
+        cx.on_blur(&focus_handle, window, |this, _, cx| {
+            this.selection_drag = None;
+            this.terminal
+                .update(cx, |terminal, _| terminal.divider_drag = None);
+        })
+        .detach();
+        cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.selection_drag = None;
+                this.terminal
+                    .update(cx, |terminal, _| terminal.divider_drag = None);
+            }
+        })
+        .detach();
 
         let py = cx.weak_entity();
         Self::spawn_inital_session(window, cx);
@@ -234,6 +256,8 @@ impl Pyonji {
             current_tab: Some(0),
             detached_sessions: vec![],
             wheel_remainder: 0.0,
+            selection_drag: None,
+            context_menu: None,
 
             terminal: cx.new(|cx| Terminal::new(py.clone(), cx)),
             status_bar: Self::setup_status_bar(window, cx),
@@ -460,6 +484,78 @@ impl Pyonji {
         });
     }
 
+    fn on_copy(&mut self, _: &ClipboardCopy, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(session) = self
+            .active_session()
+            .and_then(|id| self.session_manager.session(id))
+            && let Some(selection) = &session.selection
+        {
+            let text = selection.text(session.vt.screen());
+            if !text.is_empty() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+        }
+    }
+
+    fn show_terminal_menu(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let can_copy = self
+            .active_session()
+            .and_then(|id| self.session_manager.session(id))
+            .is_some_and(|session| session.selection.is_some());
+        let focus = self.focus_handle.clone();
+        let menu = PopupMenu::build(window, cx, |menu, _, _| {
+            menu.action_context(focus)
+                .menu_with_enable("Copy", Box::new(ClipboardCopy), can_copy)
+                .menu("Paste", Box::new(ClipboardPaste))
+        });
+        cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {
+            this.context_menu = None;
+            window.focus(&this.focus_handle, cx);
+            cx.notify();
+        })
+        .detach();
+        window.focus(&menu.focus_handle(cx), cx);
+        self.context_menu = Some((position, menu));
+        cx.notify();
+    }
+
+    fn extend_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(id) = self.selection_drag else {
+            return;
+        };
+        let terminal = self.terminal.read(cx);
+        let Some((col, row)) = terminal.mouse_to_cell(position, self) else {
+            return;
+        };
+        let Some((_, geometry)) = self
+            .tab_layouts(terminal.rows, terminal.cols)
+            .into_iter()
+            .find(|(session_id, _)| *session_id == id)
+        else {
+            return;
+        };
+        // Keep a drag in its original pane, even when the pointer crosses a divider.
+        let col = col
+            .saturating_sub(1)
+            .saturating_sub(geometry.x)
+            .min(geometry.cols.saturating_sub(1));
+        let row = row
+            .saturating_sub(1)
+            .saturating_sub(geometry.y)
+            .min(geometry.rows.saturating_sub(1));
+        if let Some(session) = self.session_manager.session_mut(id)
+            && let Some(selection) = &mut session.selection
+        {
+            selection.extend(session.vt.screen(), row, col);
+            cx.notify();
+        }
+    }
+
     fn on_paste(&mut self, _: &ClipboardPaste, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(session) = self.active_session()
             && let Some(item) = cx.read_from_clipboard()
@@ -558,17 +654,41 @@ impl Pyonji {
                     .on_key_down(cx.listener(Self::handle_key_down))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_mouse_up))
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, event, window, cx| {
+                            if this.selection_drag.is_some()
+                                || this.terminal.read(cx).divider_drag.is_some()
+                            {
+                                this.handle_mouse_up(event, window, cx);
+                            }
+                        }),
+                    )
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::handle_mouse_down))
+                    .on_mouse_up(MouseButton::Right, cx.listener(Self::handle_mouse_up))
+                    .on_mouse_down(MouseButton::Middle, cx.listener(Self::handle_mouse_down))
+                    .on_mouse_up(MouseButton::Middle, cx.listener(Self::handle_mouse_up))
                     .on_mouse_move(cx.listener(Self::handle_mouse_move))
                     .on_scroll_wheel(cx.listener(Self::handle_scroll))
                     .on_action(cx.listener(Self::on_open_sessions))
                     .on_action(cx.listener(Self::on_open_detached))
                     .on_action(cx.listener(Self::on_open_releases))
-                    .on_action(cx.listener(Self::on_open_palette))
                     .on_action(cx.listener(Self::on_paste))
+                    .on_action(cx.listener(Self::on_copy))
                     .child(self.terminal.clone())
                     .children(Root::render_dialog_layer(window, cx)),
             )
             .child(self.status_bar.clone())
+            .children(self.context_menu.as_ref().map(|(position, menu)| {
+                deferred(
+                    anchored()
+                        .position(*position)
+                        .anchor(Anchor::TopLeft)
+                        .snap_to_window_with_margin(px(8.0))
+                        .child(menu.clone()),
+                )
+                .priority_auto()
+            }))
     }
 }
 
@@ -578,6 +698,7 @@ impl Render for Pyonji {
 
         v_flex()
             .id("main-view")
+            .on_action(cx.listener(Self::on_open_palette))
             .track_focus(&self.focus_handle)
             .size_full()
             .bg(theme.background)
@@ -656,6 +777,9 @@ impl Pyonji {
         if !self.focus_handle.is_focused(window) {
             window.focus(&self.focus_handle, cx);
         }
+        if event.button == MouseButton::Left {
+            self.selection_drag = None;
+        }
         let terminal = self.terminal.clone();
         // Divider drags start on left press, like before — they take over the
         // gesture so the press never reaches the pane underneath.
@@ -681,6 +805,25 @@ impl Pyonji {
             return;
         };
         self.set_active_session(session_id);
+        let local = event.modifiers.shift
+            || self
+                .session_manager
+                .session(session_id)
+                .is_some_and(|session| {
+                    session.vt.screen().mouse_protocol_mode() == vt100::MouseProtocolMode::None
+                });
+        if local && event.button == MouseButton::Right {
+            self.show_terminal_menu(event.position, window, cx);
+            return;
+        }
+        if local && event.button == MouseButton::Left {
+            if let Some(session) = self.session_manager.session_mut(session_id) {
+                session.selection = Some(Selection::new(session.vt.screen(), row - 1, col - 1));
+                self.selection_drag = Some(session_id);
+                cx.notify();
+            }
+            return;
+        }
         if let Some(session) = self.session_manager.session_mut(session_id) {
             if !session.uses_local_scrollback() {
                 session.reset_scrollback();
@@ -691,6 +834,11 @@ impl Pyonji {
     }
 
     fn handle_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.button == MouseButton::Left && self.selection_drag.is_some() {
+            self.extend_selection(event.position, cx);
+            self.selection_drag = None;
+            return;
+        }
         if self
             .terminal
             .update(cx, |this, _| this.divider_drag.take().is_some())
@@ -720,6 +868,10 @@ impl Pyonji {
         if let Some(drag) = self.terminal.read(cx).divider_drag.clone() {
             let (x, y) = self.terminal.read(cx).pt_to_term(event.position);
             self.resize_dragged_divider(&drag, x, y, cx);
+            return;
+        }
+        if self.selection_drag.is_some() {
+            self.extend_selection(event.position, cx);
             return;
         }
         let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
@@ -804,6 +956,7 @@ impl Pyonji {
                 }
             }
         }
+        self.extend_selection(event.position, cx);
     }
 
     /*fn handle_key_up(&mut self, key: &str) -> bool {
@@ -1538,7 +1691,7 @@ impl Theme {
 
             // Text
             text: Rgba::new(220.0 / 255.0, 220.0 / 255.0, 220.0 / 255.0, 1.0),
-            text_muted: Rgba::new(140.0 / 255.0, 140.0 / 255.0, 140.0 / 255.0, 1.0),
+            text_muted: Rgba::new(160.0 / 255.0, 160.0 / 255.0, 160.0 / 255.0, 1.0),
             text_disabled: Rgba::new(90.0 / 255.0, 90.0 / 255.0, 90.0 / 255.0, 1.0),
 
             // Tabs / list items
@@ -1574,6 +1727,47 @@ impl Theme {
             tooltip_background: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
             border: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
             focus_ring: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 1.0),
+        }
+    }
+}
+
+#[cfg(test)]
+mod theme_readability_tests {
+    use super::Theme;
+    use gpui::Rgba;
+
+    fn luminance(color: Rgba) -> f32 {
+        let channel = |v: f32| {
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color.red) + 0.7152 * channel(color.green) + 0.0722 * channel(color.blue)
+    }
+
+    #[test]
+    fn supporting_text_and_search_matches_remain_readable_on_ui_surfaces() {
+        let theme = Theme::new();
+        for background in [
+            theme.background,
+            theme.surface,
+            theme.surface_elevated,
+            theme.selected,
+            theme.hovered,
+        ] {
+            for foreground in [
+                theme.text,
+                theme.text_muted,
+                theme.accent,
+                theme.search_match,
+                theme.search_match_active,
+            ] {
+                // Search match tokens are rendered as opaque text, with an underline.
+                let contrast = (luminance(foreground) + 0.05) / (luminance(background) + 0.05);
+                assert!(contrast >= 4.5, "text contrast {contrast} is below 4.5:1");
+            }
         }
     }
 }

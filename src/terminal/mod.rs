@@ -1,7 +1,9 @@
 pub mod manager;
+mod selection;
 use crate::pty::Pty;
 use gpui::{KeyDownEvent, Modifiers, MouseButton};
 pub use manager::*;
+pub use selection::Selection;
 
 #[derive(Debug)]
 pub enum CursorState {
@@ -576,6 +578,7 @@ pub struct TerminalSession {
     custom_title: Option<String>,
     pub mouse_pressed_button: Option<MouseButton>,
     pub last_mouse_cell: Option<(u16, u16)>,
+    pub selection: Option<Selection>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

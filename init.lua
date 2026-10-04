@@ -104,6 +104,7 @@ function NextFreeTab()
     return nil;
 end
 
+py:bind('<ctrl-b> p', py.open_palette());
 py:bind('<ctrl-b> l', py.open_lua());
 py:bind('<ctrl-b> r', py.open_rename());
 py:bind('<ctrl-b> f', py.open_sessions());

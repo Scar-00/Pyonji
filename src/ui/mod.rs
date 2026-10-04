@@ -1,3 +1,4 @@
+mod combo_box;
 mod completion_menu;
 pub mod overlay;
 mod signature_help;

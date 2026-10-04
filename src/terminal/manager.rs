@@ -141,6 +141,7 @@ impl SessionManager {
                 custom_title: None,
                 mouse_pressed_button: None,
                 last_mouse_cell: None,
+                selection: None,
             },
         );
         Ok(id)
@@ -174,6 +175,7 @@ impl SessionManager {
                 custom_title: None,
                 mouse_pressed_button: None,
                 last_mouse_cell: None,
+                selection: None,
             },
         );
         Ok(id)
@@ -187,6 +189,9 @@ impl SessionManager {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
+        // Grid coordinates stop referring to the selected text after output changes.
+        // Clearing prevents Copy from silently copying a different command result.
+        session.selection = None;
         session.interrupt_pty_data(data);
         session.vt.process(data);
     }
@@ -210,6 +215,7 @@ impl SessionManager {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
+        session.selection = None;
         session.pty.resize(rows, cols);
         session.vt.screen_mut().set_size(rows, cols);
     }

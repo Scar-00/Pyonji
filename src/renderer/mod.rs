@@ -80,6 +80,7 @@ pub struct Pane<'a> {
     pub cursor_style: &'a CursorState,
     pub geometry: PaneGeometry,
     pub is_active: bool,
+    pub selection: Option<&'a crate::terminal::Selection>,
 }
 
 pub struct ImePreedit {
@@ -168,16 +169,36 @@ impl Renderer {
                         vt100::Color::Default => Color::rgb(0xc6, 0xd0, 0xf5),
                         x => Color::from(x),
                     };
-                    let bg_color = Color::from(cell.bgcolor());
+                    let selected = pane
+                        .selection
+                        .is_some_and(|selection| selection.contains(pane.screen, row, col));
+                    let fg_color = if selected {
+                        Color::rgb(24, 24, 24)
+                    } else {
+                        fg_color
+                    };
+                    let bg_color = if selected {
+                        Color::rgb(201, 167, 232)
+                    } else {
+                        Color::from(cell.bgcolor())
+                    };
                     let x = self.font_size / 2.0 * (f32::from(pane.geometry.x) + f32::from(col));
                     let y = self.line_height * (f32::from(pane.geometry.y) + f32::from(row) + 1.0);
                     {
                         let [x, y] = self.ndc([x, y], size);
-                        let bg_color = if cell.inverse() { fg_color } else { bg_color };
+                        let bg_color = if cell.inverse() && !selected {
+                            fg_color
+                        } else {
+                            bg_color
+                        };
                         self.background_renderer
                             .add_rect(x, y, w, h, bg_color.inner());
                     }
-                    let fg_color = if cell.inverse() { bg_color } else { fg_color };
+                    let fg_color = if cell.inverse() && !selected {
+                        bg_color
+                    } else {
+                        fg_color
+                    };
                     let contents = cell.contents();
                     let bold = cell.bold();
                     #[allow(clippy::if_not_else)]

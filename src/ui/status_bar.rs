@@ -41,7 +41,6 @@ pub fn init(cx: &mut App) {
 #[allow(dead_code)]
 pub enum StatusBarMode {
     Sessions,
-    Cmd,
     Lua,
     Rename { inital: String, session: SessionId },
 }
@@ -316,7 +315,7 @@ impl Focusable for StatusBar {
 }
 
 impl Render for StatusBar {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         h_flex()
             .id("status-bar")
@@ -330,7 +329,41 @@ impl Render for StatusBar {
             .items_center()
             .backdrop_blur(px(16.0))
             .map(|this| match &self.mode {
-                Mode::Sessions => this.child(SessionView::new(&self.pyonji)),
+                Mode::Sessions => {
+                    let py = util::read!(self.pyonji, cx);
+                    let shortcut = window
+                        .bindings_for_action_in(&crate::OpenPalette, &py.focus_handle)
+                        .last()
+                        .map(|binding| {
+                            binding
+                                .keystrokes()
+                                .iter()
+                                .map(|key| key.inner().unparse())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        });
+                    this.child(SessionView::new(&self.pyonji)).child(
+                        Button::new("commands")
+                            .accessibility_label("Open Commands")
+                            .px_2()
+                            .py_1()
+                            .flex_shrink_0()
+                            .text_color(theme.accent)
+                            .focus_visible(|style| {
+                                style
+                                    .bg(theme.selected)
+                                    .border_1()
+                                    .border_color(theme.focus_ring)
+                            })
+                            .child(shortcut.map_or_else(
+                                || "Commands".to_string(),
+                                |key| format!("Commands  {key}"),
+                            ))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(crate::OpenPalette), cx)
+                            }),
+                    )
+                }
                 Mode::Rename { inital, session } => {
                     this.child(RenameView::new(&self.pyonji, inital.clone(), *session))
                 }
@@ -386,7 +419,6 @@ impl Render for StatusBar {
                     }));
                     this.child(view)
                 }
-                _ => this,
             })
             .into_any_element()
     }
@@ -418,17 +450,24 @@ impl RenderOnce for SessionView {
         let pyonji = self.pyonji.clone();
         h_flex()
             .id("status-sessions-list")
+            .flex_1()
+            .min_w_0()
+            .role(accesskit::Role::TabList)
+            .aria_label("Terminal tabs")
             .gap_3()
             .overflow_x_scroll()
             .children(py.tabs.iter().enumerate().filter_map(move |(i, tab)| {
                 let id = tab.as_ref().and_then(|tab| tab.active_session())?;
                 let title = py.session_manager.session(id)?.title();
-                let label = format!("[{i}] - {title}");
+                let label = format!("[{}] - {title}", i + 1);
                 let selected = py.current_tab == Some(i);
                 let pyonji = pyonji.clone();
                 Some(
-                    h_flex()
-                        .id(("sessions-label", i))
+                    Button::new(("sessions-label", i))
+                        .role(accesskit::Role::Tab)
+                        .aria_selected(selected)
+                        .accessibility_label(label.clone())
+                        .focus_visible(|style| style.border_1().border_color(theme.focus_ring))
                         .items_center()
                         .justify_center()
                         .px_1()
@@ -716,45 +755,52 @@ impl RenderOnce for LuaView {
         let input_click = input_state.clone();
         let py_click = self.pyonji.clone();
 
-        v_flex()
-            .key_context(StatusBar::CONTEXT)
-            .when_some(self.on_next, |this, a| this.on_action(a))
-            .when_some(self.on_prev, |this, a| this.on_action(a))
-            .on_action(window.listener_for(
-                &input_state,
-                move |input, _: &LuaAcceptCompletion, window, cx| {
-                    Self::accept_completion(&py_accept, input, None, window, cx);
-                },
-            ))
-            .w_full()
-            .when(items.is_some() || signature.is_some(), |view| {
-                view.child({
-                    CompletionMenu::new(
-                        items.unwrap_or_default(),
-                        selected,
-                        fragment,
-                        self.scroll_handle,
-                        move |index, window, cx| {
-                            input_click.update(cx, |input, cx| {
-                                Self::accept_completion(
-                                    &py_click,
-                                    input,
-                                    Some((generation, index)),
-                                    window,
-                                    cx,
-                                );
-                            });
-                        },
-                    )
-                    .signature_help(signature)
-                })
+        crate::ui::combo_box::editable_combo_box(
+            "lua-search-results",
+            "Lua repl",
+            "Lua repl",
+            &input_state,
+            items.is_some(),
+            cx,
+        )
+        .key_context(StatusBar::CONTEXT)
+        .when_some(self.on_next, |this, a| this.on_action(a))
+        .when_some(self.on_prev, |this, a| this.on_action(a))
+        .on_action(window.listener_for(
+            &input_state,
+            move |input, _: &LuaAcceptCompletion, window, cx| {
+                Self::accept_completion(&py_accept, input, None, window, cx);
+            },
+        ))
+        .w_full()
+        .when(items.is_some() || signature.is_some(), |view| {
+            view.child({
+                CompletionMenu::new(
+                    items.unwrap_or_default(),
+                    selected,
+                    fragment,
+                    self.scroll_handle,
+                    move |index, window, cx| {
+                        input_click.update(cx, |input, cx| {
+                            Self::accept_completion(
+                                &py_click,
+                                input,
+                                Some((generation, index)),
+                                window,
+                                cx,
+                            );
+                        });
+                    },
+                )
+                .signature_help(signature)
             })
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .child(Input::new(&input_state)),
-            )
+        })
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .child(Input::new(&input_state)),
+        )
     }
 }
 
@@ -1096,8 +1142,10 @@ mod tests {
 
     #[test]
     fn insertion_does_not_reopen_suggestions_but_the_next_edit_does() {
-        let mut completion = LuaCompletion::default();
-        completion.accepted_input = Some(("string.byte".into(), 11));
+        let mut completion = LuaCompletion {
+            accepted_input: Some(("string.byte".into(), 11)),
+            ..Default::default()
+        };
         assert!(completion.take_accepted_input("string.byte", 11));
         assert!(!completion.take_accepted_input("string.byte(", 12));
         completion.accepted_input = Some(("print".into(), 5));

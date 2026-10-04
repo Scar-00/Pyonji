@@ -102,7 +102,7 @@ impl RenderOnce for SignaturePopover {
             .rounded_md()
             .border_1()
             .border_color(theme.border)
-            .bg(theme.surface.opacity(0.15))
+            .bg(theme.surface_elevated)
             .backdrop_blur(px(24.0))
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
                 window.prevent_default();

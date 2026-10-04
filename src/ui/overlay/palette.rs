@@ -12,7 +12,7 @@ use gpui::{
     SharedString, UniformListScrollHandle, WeakEntity, Window, actions, div, prelude::*, px, rgba,
     uniform_list,
 };
-use gpui_base::{actions::Cancel, h_flex, v_flex};
+use gpui_base::{Button, actions::Cancel, h_flex, v_flex};
 use gpui_component::{
     WindowExt,
     input::{Input, InputEvent, InputState},
@@ -153,13 +153,14 @@ impl PaletteView {
     /// Put the highlight on the best match — where an empty list starts, and
     /// where every new query starts again.
     fn select_first(&mut self, cx: &mut Context<Self>) {
-        if let Some(name) = self
-            .matches(cx)
+        let matches = self.matches(cx);
+        self.selected = matches
             .first()
-            .map(|entry| entry.command.name.clone())
-        {
-            self.select(&name, cx);
+            .map(|entry| entry.command.name.clone().into());
+        if self.selected.is_some() {
+            self.scroll_to(0, &matches);
         }
+        cx.notify();
     }
 
     /// Move the highlight `delta` rows, stopping at the ends rather than
@@ -384,6 +385,7 @@ impl PaletteView {
                             .text_color(theme.text)
                             .child(
                                 Input::new(&self.query)
+                                    .role(gpui_base::RoleOverride::Presentational)
                                     .flex_1()
                                     .bordered(false)
                                     .appearance(false),
@@ -400,7 +402,7 @@ impl PaletteView {
                                 .gap_1p5()
                                 .font_family(mono(cx))
                                 .text_size(px(11.0))
-                                .text_color(theme.text_disabled)
+                                .text_color(theme.text_muted)
                                 .child(format!("{shown}"))
                                 .child(div().text_color(theme.border).child("/"))
                                 .child(format!("{total}")),
@@ -418,7 +420,7 @@ impl PaletteView {
             .pl_3()
             .font_family(mono(cx))
             .text_size(px(10.0))
-            .text_color(theme.text_disabled)
+            .text_color(theme.text_muted)
             .child(origin.label())
     }
 
@@ -437,8 +439,14 @@ impl PaletteView {
         };
         let name: SharedString = command.name.clone().into();
 
-        h_flex()
-            .id(name.clone())
+        Button::new(name.clone())
+            .accessibility_label(format!("Run {}: {}", command.name, command.summary))
+            .role(gpui::accesskit::Role::ListBoxOption)
+            .aria_selected(selected)
+            .focusable(false)
+            .tab_stop(false)
+            .when(selected, |row| row.aria_active_descendant())
+            .focus_visible(|style| style.border_color(theme.focus_ring))
             .w_full()
             .h(px(ROW))
             .flex_shrink_0()
@@ -506,7 +514,7 @@ impl PaletteView {
                             .border_1()
                             .border_color(theme.border)
                             .text_size(px(11.0))
-                            .text_color(theme.text_disabled)
+                            .text_color(theme.text_muted)
                             .child(format!("<{}>", arg.name))
                     })),
             )
@@ -516,11 +524,7 @@ impl PaletteView {
                     .min_w_0()
                     .truncate()
                     .text_size(px(12.0))
-                    .text_color(if selected {
-                        theme.text_muted
-                    } else {
-                        theme.text_disabled
-                    })
+                    .text_color(theme.text_muted)
                     .child(command.summary.clone()),
             )
             // The gutter stays empty until a row is selected, so a mark in it
@@ -546,6 +550,8 @@ impl PaletteView {
 
         h_flex()
             .id("palette-list")
+            .role(gpui::accesskit::Role::ListBox)
+            .aria_label("Matching commands")
             //.flex_1()
             .size_full()
             .py_1()
@@ -623,7 +629,7 @@ impl PaletteView {
                         .child(
                             div()
                                 .text_size(px(12.0))
-                                .text_color(theme.text_disabled)
+                                .text_color(theme.text_muted)
                                 .child("Did you mean"),
                         )
                         .child(
@@ -645,7 +651,9 @@ impl PaletteView {
             .unwrap_or_else(|| String::from("nothing selected"));
 
         h_flex()
-            .h(px(FOOTER))
+            .min_h(px(FOOTER))
+            .py_2()
+            .flex_wrap()
             .flex_shrink_0()
             .items_center()
             .gap_4()
@@ -665,7 +673,17 @@ impl PaletteView {
             .child(hint(cx, "\u{2191}\u{2193}", "choose"))
             .child(hint(cx, "\u{23ce}", "run"))
             .child(hint(cx, "tab", "complete"))
-            .child(hint(cx, "esc", "close"))
+            .child(hint(
+                cx,
+                "esc",
+                if !commands::query_args(&self.line(cx)).is_empty() {
+                    "clear arguments"
+                } else if !self.line(cx).trim().is_empty() {
+                    "clear filter"
+                } else {
+                    "close"
+                },
+            ))
     }
 }
 
@@ -682,6 +700,7 @@ impl Render for PaletteView {
         v_flex()
             .id("command-palette")
             .key_context(CONTEXT)
+            .tab_group()
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_next))
             .on_action(cx.listener(Self::on_prev))
@@ -690,9 +709,21 @@ impl Render for PaletteView {
             .on_action(cx.listener(Self::on_cancel))
             .size_full()
             .overflow_hidden()
-            .child(self.render_line(matches.len(), cx))
-            .child(self.render_list(matches.clone(), cx))
-            .child(self.render_footer(&matches, cx))
+            .child(
+                crate::ui::combo_box::editable_combo_box(
+                    "command-search-results",
+                    "Commands",
+                    "Run a command, or a few letters of one",
+                    &self.query,
+                    true,
+                    cx,
+                )
+                .size_full()
+                .min_h_0()
+                .child(self.render_line(matches.len(), cx))
+                .child(self.render_list(matches.clone(), cx))
+                .child(self.render_footer(&matches, cx)),
+            )
     }
 }
 
@@ -701,6 +732,8 @@ impl Render for PaletteView {
 /// A name with the characters the query matched set apart, which is what says
 /// *why* a row is on the list.
 fn marked(name: &str, marks: &[Range<usize>], mark: Rgba, text: Rgba) -> impl IntoElement {
+    let mut mark = mark;
+    mark.alpha = 1.0;
     let mut spans: Vec<gpui::Div> = Vec::new();
     let mut at = 0;
     for range in marks {
@@ -716,8 +749,7 @@ fn marked(name: &str, marks: &[Range<usize>], mark: Rgba, text: Rgba) -> impl In
         }
         spans.push(
             div()
-                .text_color(text)
-                .bg(mark)
+                .text_color(mark)
                 .underline()
                 .child(name[range.clone()].to_string()),
         );

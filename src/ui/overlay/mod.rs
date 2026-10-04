@@ -102,12 +102,12 @@ impl Overlay {
             OverlayScreen::Detached => self.detached.update(cx, |this, cx| this.reset(window, cx)),
             _ => {}
         }
-        let (width, height) = Self::dialog_size(screen, window);
-        let builder = cx.processor(move |this, dialog: Dialog, _window, cx| {
+        let builder = cx.processor(move |this, dialog: Dialog, window, cx| {
+            let (width, height) = Self::dialog_size(screen, window);
             let dialog = dialog
                 .p_0()
                 .backdrop_blur(px(24.0))
-                .bg(cx.theme().surface.opacity(0.15))
+                .bg(cx.theme().surface)
                 .close_button(false);
             let dialog = match (width, height) {
                 (Some(width), Some(height)) => dialog.w(width).h(height),
@@ -115,13 +115,41 @@ impl Overlay {
                 (None, Some(height)) => dialog.h(height),
                 (None, None) => dialog.h_4_5(),
             };
-            dialog.child(div().size_full().p_1().child(match screen {
-                OverlayScreen::Palette => this.palette.clone().into_any_element(),
-                OverlayScreen::Sessions => this.sessions.clone().into_any_element(),
-                OverlayScreen::Detached => this.detached.clone().into_any_element(),
-                OverlayScreen::Releases => this.releases.clone().into_any_element(),
-                OverlayScreen::Opener => this.opener.clone().into_any_element(),
-            }))
+            dialog.child(
+                gpui_base::v_flex()
+                    .size_full()
+                    .min_h_0()
+                    .child(
+                        gpui_base::h_flex()
+                            .w_full()
+                            .flex_shrink_0()
+                            .justify_end()
+                            .px_2()
+                            .py_1()
+                            .child(
+                                gpui_base::Button::new("close-overlay")
+                                    .accessibility_label("Close overlay")
+                                    .px_2()
+                                    .py_1()
+                                    .text_color(cx.theme().text_muted)
+                                    .focus_visible(|style| {
+                                        style
+                                            .bg(cx.theme().selected)
+                                            .border_1()
+                                            .border_color(cx.theme().focus_ring)
+                                    })
+                                    .child("Close")
+                                    .on_click(|_, window, cx| window.close_dialog(cx)),
+                            ),
+                    )
+                    .child(div().flex_1().min_h_0().w_full().p_1().child(match screen {
+                        OverlayScreen::Palette => this.palette.clone().into_any_element(),
+                        OverlayScreen::Sessions => this.sessions.clone().into_any_element(),
+                        OverlayScreen::Detached => this.detached.clone().into_any_element(),
+                        OverlayScreen::Releases => this.releases.clone().into_any_element(),
+                        OverlayScreen::Opener => this.opener.clone().into_any_element(),
+                    })),
+            )
         });
         window.open_dialog(cx, builder);
         let handle = match screen {
@@ -141,13 +169,13 @@ impl Overlay {
             OverlayScreen::Palette => (px(620.), px(520.)),
             OverlayScreen::Sessions | OverlayScreen::Detached => (px(660.), px(520.)),
             OverlayScreen::Releases => (px(920.), px(500.)),
-            _ => return (None, None),
+            OverlayScreen::Opener => (px(760.), px(560.)),
         };
         let size = window.viewport_size();
         let inset = px(64.);
         (
-            Some(width.min((size.width - inset).max(px(320.)))),
-            Some(height.min((size.height - inset).max(px(280.)))),
+            Some(width.min((size.width - inset.min(size.width * 0.1)).max(px(0.)))),
+            Some(height.min((size.height - inset.min(size.height * 0.1)).max(px(0.)))),
         )
     }
 

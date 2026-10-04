@@ -43,7 +43,6 @@
 ---@field open_detached fun(self: Pyonji?) list hidden sessions to attach again
 ---@field open_releases fun(self: Pyonji?)
 ---@field open_opener fun(self: Pyonji?)
----@field open_command fun(self: Pyonji?) opens the `:` command line
 ---@field open_lua fun() opens the `>` lua prompt
 ---@field open_rename fun(self: Pyonji?)
 ---@field rename RenameFn
@@ -78,21 +77,21 @@ py:config({
     },
 });
 
+-- Commands is also available from the status bar. Remap this shortcut here.
+py:bind('<ctrl-shift>p', py.open_palette());
+
 --[[
 -- Methods are callable two ways:
 --  * py:method(...) runs the action immediately and returns a real value
 --    (e.g. py:create_session() returns the new session id)
 --  * py.method(...) returns a callback instead, which can be used with py:bind
-py:bind({ "ctrl", "shift" }, "F", py.open_salette());
+py:bind({ "ctrl", "shift" }, "F", py.open_palette());
 py:bind({ "ctrl", "shift" }, "S", py.open_sessions());
 
--- Nothing is bound by default except paste on ctrl-shift-v. The two command
--- surfaces are on the right of the status bar, and the bar shows the key here
--- once one is bound:
+-- Commands, copy, and paste have default shortcuts. Add a sequence if preferred:
 py:bind('<ctrl-b> p', py.open_palette());
-py:bind('<ctrl-b> g', py.open_command());
 
--- py:register adds a command to both the palette and the `:` line. The
+-- py:register adds a command to the palette. The
 -- argument names are read off the function, so they show up as <placeholders>:
 py:register("open", function (...)
     print(...);
