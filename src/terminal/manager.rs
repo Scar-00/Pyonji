@@ -1,7 +1,7 @@
 use anyhow::Result;
+use async_channel::Sender;
 use mlua::prelude::*;
 use std::{collections::HashMap, path::Path};
-use winit::event_loop::EventLoopProxy;
 
 use crate::{
     pty::{Event, Pty, SshConnection},
@@ -24,6 +24,15 @@ impl FromLua for SessionId {
     }
 }
 
+/// Parsed from a command line, where a session is written as its bare number.
+impl std::str::FromStr for SessionId {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.trim().parse()?))
+    }
+}
+
 impl IntoLua for SessionId {
     fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue> {
         self.0.into_lua(lua)
@@ -32,7 +41,7 @@ impl IntoLua for SessionId {
 
 pub struct CB {
     id: SessionId,
-    proxy: EventLoopProxy<Event>,
+    proxy: Sender<Event>,
 }
 
 impl CB {
@@ -64,7 +73,7 @@ impl Callbacks for CB {
         };
         _ = self
             .proxy
-            .send_event(Event::ProgramChanged((self.id, title)));
+            .send_blocking(Event::ProgramChanged((self.id, title)));
     }
 
     fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, _ty: &[u8], _data: &[u8]) {}
@@ -93,11 +102,11 @@ impl Callbacks for CB {
 pub struct SessionManager {
     current_id: u64,
     sessions: HashMap<SessionId, TerminalSession>,
-    proxy: EventLoopProxy<Event>,
+    proxy: Sender<Event>,
 }
 
 impl SessionManager {
-    pub fn new(proxy: EventLoopProxy<Event>) -> Self {
+    pub fn new(proxy: Sender<Event>) -> Self {
         Self {
             current_id: 0,
             sessions: HashMap::new(),
@@ -132,11 +141,13 @@ impl SessionManager {
                 custom_title: None,
                 mouse_pressed_button: None,
                 last_mouse_cell: None,
+                selection: None,
             },
         );
         Ok(id)
     }
 
+    #[allow(dead_code)]
     pub fn create_remote_session(
         &mut self,
         rows: u16,
@@ -164,6 +175,7 @@ impl SessionManager {
                 custom_title: None,
                 mouse_pressed_button: None,
                 last_mouse_cell: None,
+                selection: None,
             },
         );
         Ok(id)
@@ -177,6 +189,9 @@ impl SessionManager {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
+        // Grid coordinates stop referring to the selected text after output changes.
+        // Clearing prevents Copy from silently copying a different command result.
+        session.selection = None;
         session.interrupt_pty_data(data);
         session.vt.process(data);
     }
@@ -200,6 +215,7 @@ impl SessionManager {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
+        session.selection = None;
         session.pty.resize(rows, cols);
         session.vt.screen_mut().set_size(rows, cols);
     }

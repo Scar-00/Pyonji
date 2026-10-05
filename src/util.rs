@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 use anyhow::{Context as _, Result};
 use std::{
     any::Any,
@@ -8,8 +9,6 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender};
-
-use crate::ResultExt;
 
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -23,6 +22,7 @@ impl<T> UnsafeRefMut<T> {
         Self(v as _)
     }
 
+    #[allow(clippy::mut_from_ref)]
     pub fn as_mut(&self) -> &mut T {
         unsafe { self.0.as_mut_unchecked() }
     }
@@ -61,7 +61,7 @@ impl<Idx, T: IndexMut<Idx>> IndexMut<Idx> for UnsafeRefMut<T> {
         <T as IndexMut<Idx>>::index_mut(self, index)
     }
 }
-
+/*
 pub struct Worker {
     thread: JoinHandle<()>,
     tx: Sender<Box<dyn Fn() -> Box<dyn Any + Send> + Send>>,
@@ -218,4 +218,14 @@ mod test {
         println!("vec = {vec:?}");
         assert_eq!(vec.len(), 101);
     }
+}*/
+
+macro_rules! read {
+    ($path: expr, $cx: ident) => {{
+        let v = $path
+            .upgrade()
+            .expect("child survived longer then parent view");
+        v.read($cx)
+    }};
 }
+pub(crate) use read;

@@ -5,13 +5,13 @@ use bytemuck::{Pod, Zeroable};
 use etagere::{AtlasAllocator, BucketedAtlasAllocator};
 use smallvec::SmallVec;
 use swash::{
+    CacheKey, Charmap, FontRef,
     scale::{
-        image::{Content, Image},
         Render, ScaleContext, Source, StrikeWith,
+        image::{Content, Image},
     },
     shape::{Direction, ShapeContext},
     zeno::{Format, Placement, Vector},
-    CacheKey, Charmap, FontRef,
 };
 use wgpu::{
     AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
@@ -64,23 +64,9 @@ var image_tex: texture_2d<f32>;
 @group(0) @binding(3)
 var image_samp: sampler;
 
-fn srgb_channel_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        return c / 12.92;
-    }
-    return pow((c + 0.055) / 1.055, 2.4);
-}
-
-fn to_linear(srgba: vec4<u32>) -> vec4<f32> {
-    let c = vec4<f32>(srgba) / 255.0;
-    return vec4<f32>(
-        srgb_channel_to_linear(c.r),
-        srgb_channel_to_linear(c.g),
-        srgb_channel_to_linear(c.b),
-        c.a,
-    );
-}
-
+// NOTE: GPUI composites in pass-through sRGB (see background.rs): glyph
+// colors arrive as sRGB-encoded bytes, so just normalize them instead of
+// converting to linear (which would darken all text).
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
@@ -97,7 +83,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         case 0u: {
             let tex = textureSample(glyph_tex, glyph_samp, vec2<f32>(in.uv));
             var alpha = pow(tex.r, 1.43);
-            let color = to_linear(in.color);
+            let color = vec4<f32>(in.color) / 255.0;
             return vec4<f32>(color.xyz, alpha);
         }
         case 1u: {
@@ -132,6 +118,7 @@ pub enum FontVariant {
     Normal,
     Bold,
     Ime,
+    Icon,
     Emoji,
 }
 
@@ -168,6 +155,11 @@ impl Font {
             key: self.key,
         }
     }
+
+    fn size_for_width(&self, width: f32) -> f32 {
+        let metrics = self.as_ref().metrics(&[]);
+        width * f32::from(metrics.units_per_em) / metrics.max_width
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -197,12 +189,14 @@ pub struct TerminalRenderer {
     bold_font: Font,
     ime_font: Font,
     icon_font: Font,
+    emoji_font: Font,
     scale_context: ScaleContext,
     shape_context: ShapeContext,
     normal_glyph_map: Vec<Option<Glyph>>,
     bold_glyph_map: Vec<Option<Glyph>>,
     ime_glyph_map: Vec<Option<Glyph>>,
     icon_glyph_map: Vec<Option<Glyph>>,
+    emoji_glyph_map: Vec<Option<Glyph>>,
     glyph_atlas: BucketedAtlasAllocator,
     image_atlas: AtlasAllocator,
     atlas_size: [f32; 2],
@@ -216,6 +210,7 @@ impl TerminalRenderer {
         include_bytes!("../../../resources/fonts/NotoSansMonoCJKkr-Regular.otf");
     const ICON_FONT: &[u8] =
         include_bytes!("../../../resources/fonts/JetBrainsMonoNerdFontMono-Regular.ttf");
+    const EMOJI_FONT: &[u8] = include_bytes!("../../../resources/fonts/NotoEmoji.ttf");
     const DEFAULT_BUFFER_SIZE: u64 = (1024 * 16) * 32;
 
     fn load_glyph(&mut self, variant: FontVariant, id: u16) -> Option<Image> {
@@ -223,12 +218,14 @@ impl TerminalRenderer {
             FontVariant::Normal => &self.normal_font,
             FontVariant::Bold => &self.bold_font,
             FontVariant::Ime => &self.ime_font,
-            FontVariant::Emoji => &self.icon_font,
+            FontVariant::Icon => &self.icon_font,
+            FontVariant::Emoji => &self.emoji_font,
         };
+        let font_size = self.font_size_for_variant(variant);
         let mut scaler = self
             .scale_context
             .builder(font.as_ref())
-            .size(self.font_size)
+            .size(font_size)
             .hint(true)
             .build();
 
@@ -350,7 +347,18 @@ impl TerminalRenderer {
             FontVariant::Normal => &self.normal_font,
             FontVariant::Bold => &self.bold_font,
             FontVariant::Ime => &self.ime_font,
-            FontVariant::Emoji => &self.icon_font,
+            FontVariant::Icon => &self.icon_font,
+            FontVariant::Emoji => &self.emoji_font,
+        }
+    }
+
+    fn font_size_for_variant(&self, variant: FontVariant) -> f32 {
+        if variant == FontVariant::Emoji {
+            // Two terminal cells span font_size pixels. Noto Emoji's advance
+            // is wider than one em, so fit its outlines to that width.
+            self.emoji_font.size_for_width(self.font_size)
+        } else {
+            self.font_size
         }
     }
 
@@ -359,7 +367,8 @@ impl TerminalRenderer {
             FontVariant::Normal => &self.normal_glyph_map,
             FontVariant::Bold => &self.bold_glyph_map,
             FontVariant::Ime => &self.ime_glyph_map,
-            FontVariant::Emoji => &self.icon_glyph_map,
+            FontVariant::Icon => &self.icon_glyph_map,
+            FontVariant::Emoji => &self.emoji_glyph_map,
         }
     }
 
@@ -368,22 +377,35 @@ impl TerminalRenderer {
             FontVariant::Normal => &mut self.normal_glyph_map,
             FontVariant::Bold => &mut self.bold_glyph_map,
             FontVariant::Ime => &mut self.ime_glyph_map,
-            FontVariant::Emoji => &mut self.icon_glyph_map,
+            FontVariant::Icon => &mut self.icon_glyph_map,
+            FontVariant::Emoji => &mut self.emoji_glyph_map,
         }
     }
 
     fn text_font_variant_for_cluster(&self, cluster: &str, bold: bool) -> FontVariant {
-        if Self::font_supports_cluster(&self.normal_font, cluster) {
-            if bold {
-                FontVariant::Bold
-            } else {
-                FontVariant::Normal
-            }
-        } else if Self::font_supports_cluster(&self.ime_font, cluster) {
-            FontVariant::Ime
+        let text_variant = if bold {
+            FontVariant::Bold
         } else {
-            FontVariant::Emoji
-        }
+            FontVariant::Normal
+        };
+        Self::font_variant_for_cluster(
+            cluster,
+            &[
+                (text_variant, self.font(text_variant)),
+                (FontVariant::Ime, &self.ime_font),
+                (FontVariant::Icon, &self.icon_font),
+                (FontVariant::Emoji, &self.emoji_font),
+            ],
+        )
+    }
+
+    fn font_variant_for_cluster(cluster: &str, fonts: &[(FontVariant, &Font)]) -> FontVariant {
+        fonts
+            .iter()
+            .find_map(|(variant, font)| {
+                Self::font_supports_cluster(font, cluster).then_some(*variant)
+            })
+            .unwrap_or(FontVariant::Icon)
     }
 
     fn font_supports_cluster(font: &Font, cluster: &str) -> bool {
@@ -457,12 +479,15 @@ impl TerminalRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: TextureDimension::D2,
-            format: TextureFormat::Rgba8UnormSrgb,
+            // NOTE: must stay non-sRGB. An Srgb format would make sampling
+            // decode to linear, darkening color glyphs on GPUI's
+            // pass-through (Bgra8Unorm, no conversions) pipeline.
+            format: TextureFormat::Rgba8Unorm,
             usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
             view_formats: &[],
         });
 
-        let image_view = glyph_texture.create_view(&TextureViewDescriptor::default());
+        let image_view = image_texture.create_view(&TextureViewDescriptor::default());
 
         let image_sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("font-atlas-texture-sampler"),
@@ -589,6 +614,7 @@ impl TerminalRenderer {
         let bold_font = Font::from_data(Self::BOLD_FONT, 0).unwrap();
         let ime_font = Font::from_data(Self::IME_FONT, 0).unwrap();
         let icon_font = Font::from_data(Self::ICON_FONT, 0).unwrap();
+        let emoji_font = Font::from_data(Self::EMOJI_FONT, 0).unwrap();
 
         let (normal_font, bold_font) = if let Some(font_family) = font_family {
             let normal_font = Self::load_font(
@@ -637,12 +663,14 @@ impl TerminalRenderer {
             bold_glyph_map: Vec::new(),
             ime_glyph_map: Vec::new(),
             icon_glyph_map: Vec::new(),
+            emoji_glyph_map: Vec::new(),
             scale_context: ScaleContext::new(),
             shape_context: ShapeContext::new(),
             normal_font,
             bold_font,
             ime_font,
             icon_font,
+            emoji_font,
             glyph_atlas: glyph_atlas_allocator,
             image_atlas: image_atlas_allocator,
             atlas_size: [tex_limits as f32, tex_limits as f32],
@@ -656,6 +684,7 @@ impl TerminalRenderer {
         self.bold_glyph_map.clear();
         self.ime_glyph_map.clear();
         self.icon_glyph_map.clear();
+        self.emoji_glyph_map.clear();
         Self::clear_texture(&self.image_atlas_texture, queue);
         Self::clear_texture(&self.glyph_atlas_texture, queue);
         queue.submit([]);
@@ -781,13 +810,10 @@ impl TerminalRenderer {
         color: Color,
         bold: bool,
     ) {
-        let color = color.inner(); //.to_linear();
+        let color = color.inner();
 
-        let variant = if bold {
-            FontVariant::Bold
-        } else {
-            FontVariant::Normal
-        };
+        let mut cluster = [0; 4];
+        let variant = self.text_font_variant_for_cluster(glyph.encode_utf8(&mut cluster), bold);
         let Some(glyph) = self.get_or_create_glyph(queue, variant, glyph) else {
             return;
         };
@@ -854,7 +880,7 @@ impl TerminalRenderer {
         variant: FontVariant,
         color: Color,
     ) {
-        let color = color.inner(); //.to_linear();
+        let color = color.inner();
 
         let Some(glyph) = self.get_or_create_glyph_id(queue, variant, glyph) else {
             return;
@@ -927,14 +953,16 @@ impl TerminalRenderer {
             FontVariant::Normal => &self.normal_font,
             FontVariant::Bold => &self.bold_font,
             FontVariant::Ime => &self.ime_font,
-            FontVariant::Emoji => &self.icon_font,
+            FontVariant::Icon => &self.icon_font,
+            FontVariant::Emoji => &self.emoji_font,
         };
+        let font_size = self.font_size_for_variant(variant);
 
         let mut shaper = self
             .shape_context
             .builder(font.as_ref())
             .direction(Direction::LeftToRight)
-            .size(self.font_size)
+            .size(font_size)
             .build();
 
         shaper.add_str(cluster);
@@ -954,6 +982,100 @@ impl TerminalRenderer {
                 variant,
                 color,
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_fallbacks_cover_emoji_and_preserve_text_and_icons() {
+        let normal = Font::from_data(TerminalRenderer::NORMAL_FONT, 0).unwrap();
+        let bold = Font::from_data(TerminalRenderer::BOLD_FONT, 0).unwrap();
+        let ime = Font::from_data(TerminalRenderer::IME_FONT, 0).unwrap();
+        let icon = Font::from_data(TerminalRenderer::ICON_FONT, 0).unwrap();
+        let emoji = Font::from_data(TerminalRenderer::EMOJI_FONT, 0).unwrap();
+
+        for text_variant in [FontVariant::Normal, FontVariant::Bold] {
+            let fonts = [
+                (
+                    text_variant,
+                    if text_variant == FontVariant::Bold {
+                        &bold
+                    } else {
+                        &normal
+                    },
+                ),
+                (FontVariant::Ime, &ime),
+                (FontVariant::Icon, &icon),
+                (FontVariant::Emoji, &emoji),
+            ];
+            for (cluster, expected) in [
+                ("A", text_variant),
+                ("한", FontVariant::Ime),
+                ("\u{f015}", FontVariant::Icon),
+                ("📦", FontVariant::Emoji),
+                ("📦\u{fe0f}", FontVariant::Emoji),
+                ("👩\u{200d}💻", FontVariant::Emoji),
+                ("👍🏽", FontVariant::Emoji),
+                ("🇩🇪", FontVariant::Emoji),
+            ] {
+                assert_eq!(
+                    TerminalRenderer::font_variant_for_cluster(cluster, &fonts),
+                    expected,
+                    "{cluster}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_emoji_shape_and_rasterize_as_monochrome_masks() {
+        let font = Font::from_data(TerminalRenderer::EMOJI_FONT, 0).unwrap();
+        let cell_span = 38.0;
+        let font_size = font.size_for_width(cell_span);
+        let mut shape_context = ShapeContext::new();
+        let mut scale_context = ScaleContext::new();
+        for cluster in ["📦", "📦\u{fe0f}", "👩\u{200d}💻", "👍🏽", "🇩🇪"] {
+            let mut shaper = shape_context
+                .builder(font.as_ref())
+                .direction(Direction::LeftToRight)
+                .size(font_size)
+                .build();
+            shaper.add_str(cluster);
+            let mut glyph_ids = Vec::new();
+            shaper.shape_with(|cluster| {
+                glyph_ids.extend(cluster.glyphs.iter().map(|glyph| glyph.id))
+            });
+            assert_eq!(glyph_ids.len(), 1, "{cluster} should shape as one emoji");
+            let id = glyph_ids[0];
+            assert_ne!(id, 0, "{cluster} must not use the missing glyph");
+            let mut scaler = scale_context
+                .builder(font.as_ref())
+                .size(font_size)
+                .hint(true)
+                .build();
+            let image = Render::new(&[
+                Source::ColorOutline(0),
+                Source::ColorBitmap(StrikeWith::BestFit),
+                Source::Outline,
+            ])
+            .format(Format::Alpha)
+            .render(&mut scaler, id)
+            .unwrap();
+            assert_eq!(image.content, Content::Mask, "{cluster}");
+            assert!(image.placement.left >= 0, "{cluster}");
+            assert!(
+                image.placement.left as f32 + image.placement.width as f32 <= cell_span,
+                "{cluster} must fit two terminal cells"
+            );
+            assert_eq!(
+                image.data.len(),
+                (image.placement.width * image.placement.height) as usize
+            );
+            assert!(image.data.iter().any(|&alpha| alpha != 0), "{cluster}");
         }
     }
 }

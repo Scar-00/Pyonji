@@ -6,8 +6,8 @@ use std::{
 
 use crate::terminal::SessionId;
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
-use winit::event_loop::EventLoopProxy;
+use async_channel::Sender;
+use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 #[derive(Debug, Clone)]
 pub struct SshConnection {
@@ -18,7 +18,7 @@ pub struct SshConnection {
 
 pub struct Pty {
     master: Box<dyn MasterPty>,
-    writer: Box<dyn Write + Send>,
+    writer: Sender<Vec<u8>>,
     killer: Box<dyn ChildKiller>,
 }
 
@@ -28,14 +28,13 @@ pub enum Event {
     ProgramChanged((SessionId, String)),
     ConfigChanged,
     LuaPrint(String),
-    Exit,
 }
 
 impl Pty {
     pub fn new(
         rows: u16,
         cols: u16,
-        tx: EventLoopProxy<Event>,
+        tx: Sender<Event>,
         id: SessionId,
         path: Option<&Path>,
     ) -> Result<Self> {
@@ -55,6 +54,7 @@ impl Pty {
             cmd.cwd(path);
         }
         cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
         std::env::vars_os().for_each(|var| {
             cmd.env(var.0, var.1);
         });
@@ -80,7 +80,7 @@ impl Pty {
             let tx = tx.clone();
             move || {
                 _ = child.wait();
-                _ = tx.send_event(Event::Closed(id));
+                _ = tx.send_blocking(Event::Closed(id));
             }
         });
 
@@ -89,11 +89,11 @@ impl Pty {
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => {
-                        _ = tx.send_event(Event::Closed(id));
+                        _ = tx.send_blocking(Event::Closed(id));
                         break;
                     }
                     Ok(n) => {
-                        _ = tx.send_event(Event::Data(id, buf[..n].to_vec()));
+                        _ = tx.send_blocking(Event::Data(id, buf[..n].to_vec()));
                     }
                 }
             }
@@ -101,7 +101,7 @@ impl Pty {
 
         Ok(Self {
             master: pair.master,
-            writer,
+            writer: Self::spawn_writer(writer),
             killer,
         })
     }
@@ -109,7 +109,7 @@ impl Pty {
     pub fn new_remote(
         rows: u16,
         cols: u16,
-        tx: EventLoopProxy<Event>,
+        tx: Sender<Event>,
         id: SessionId,
         ssh: &SshConnection,
     ) -> Result<Self> {
@@ -127,6 +127,7 @@ impl Pty {
         let mut cmd = CommandBuilder::new(program_name);
         cmd.arg(format!("{}@{}", ssh.user_name, ssh.ip));
         cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
         std::env::vars_os().for_each(|var| {
             cmd.env(var.0, var.1);
         });
@@ -152,7 +153,7 @@ impl Pty {
             let tx = tx.clone();
             move || {
                 _ = child.wait();
-                _ = tx.send_event(Event::Closed(id));
+                _ = tx.send_blocking(Event::Closed(id));
             }
         });
 
@@ -161,11 +162,11 @@ impl Pty {
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => {
-                        _ = tx.send_event(Event::Closed(id));
+                        _ = tx.send_blocking(Event::Closed(id));
                         break;
                     }
                     Ok(n) => {
-                        _ = tx.send_event(Event::Data(id, buf[..n].to_vec()));
+                        _ = tx.send_blocking(Event::Data(id, buf[..n].to_vec()));
                     }
                 }
             }
@@ -173,7 +174,7 @@ impl Pty {
 
         Ok(Self {
             master: pair.master,
-            writer,
+            writer: Self::spawn_writer(writer),
             killer,
         })
 
@@ -248,8 +249,21 @@ impl Pty {
         });*/
     }
 
+    fn spawn_writer(mut writer: Box<dyn Write + Send>) -> Sender<Vec<u8>> {
+        // Keep input ordered without dropping bytes when the PTY stops reading.
+        let (tx, rx) = async_channel::unbounded::<Vec<u8>>();
+        std::thread::spawn(move || {
+            while let Ok(buf) = rx.recv_blocking() {
+                if writer.write_all(&buf).is_err() {
+                    break;
+                }
+            }
+        });
+        tx
+    }
+
     pub fn add_bytes(&mut self, buf: impl AsRef<[u8]>) {
-        _ = self.writer.write(buf.as_ref());
+        _ = self.writer.force_send(buf.as_ref().to_vec());
     }
 
     pub fn add_csi_key(&mut self, csi_param: Option<u8>, byte: u8) {
@@ -308,5 +322,105 @@ impl Pty {
             }
             .to_string()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        io,
+        sync::mpsc::{self, Receiver, Sender},
+        time::Duration,
+    };
+
+    struct BlockingWriter {
+        started: Sender<()>,
+        release: Receiver<()>,
+        finished: Sender<Vec<u8>>,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for BlockingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.bytes.is_empty() {
+                self.started.send(()).unwrap();
+                self.release.recv().unwrap();
+            }
+            // Force write_all to retry partial writes.
+            let len = buf.len().min(2);
+            self.bytes.extend_from_slice(&buf[..len]);
+            Ok(len)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Drop for BlockingWriter {
+        fn drop(&mut self) {
+            let _ = self.finished.send(std::mem::take(&mut self.bytes));
+        }
+    }
+
+    #[test]
+    fn blocked_writer_preserves_queued_input_and_drains_on_close() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let tx = Pty::spawn_writer(Box::new(BlockingWriter {
+            started: started_tx,
+            release: release_rx,
+            finished: finished_tx,
+            bytes: Vec::new(),
+        }));
+
+        assert_eq!(tx.force_send(b"first".to_vec()).unwrap(), None);
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        // Input must enqueue immediately even while the writer is blocked.
+        assert_eq!(tx.force_send(b"second".to_vec()).unwrap(), None);
+        assert_eq!(tx.force_send(b"third".to_vec()).unwrap(), None);
+        for byte in 0..=u8::MAX {
+            assert_eq!(tx.force_send(vec![byte]).unwrap(), None);
+        }
+        drop(tx);
+        release_tx.send(()).unwrap();
+
+        let mut expected = b"firstsecondthird".to_vec();
+        expected.extend(0..=u8::MAX);
+        assert_eq!(
+            finished_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            expected
+        );
+    }
+
+    struct FailingWriter(Sender<()>);
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Drop for FailingWriter {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    #[test]
+    fn writer_exits_on_write_error_while_sender_is_alive() {
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let tx = Pty::spawn_writer(Box::new(FailingWriter(finished_tx)));
+
+        tx.force_send(b"input".to_vec()).unwrap();
+        finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(tx);
     }
 }

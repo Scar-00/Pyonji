@@ -1,7 +1,5 @@
 ---@meta
 
-require('lua.keybind');
-
 ---@class SshSession
 ---@field name string
 ---@field user_name ?string
@@ -10,7 +8,6 @@ require('lua.keybind');
 ---@alias Value<T> T | fun(): T
 
 ---@alias BindFn
----| fun(self: Pyonji, mods: Modifier[], key: Key, action: function)
 ---| fun(self: Pyonji, binding: string, action: function)
 
 ---@alias RenameFn
@@ -21,6 +18,7 @@ require('lua.keybind');
 ---@field font_family ?Value<string>
 ---@field font_size ?Value<number>
 ---@field line_height ?Value<number>
+---@field status_height ?Value<number> status bar height as a multiple of line_height (default 1.0)
 ---@field fullscreen ?Value<boolean>
 ---@field default_cwd ?Value<string>
 ---@field ssh_sessions ?SshSession[]
@@ -40,14 +38,13 @@ require('lua.keybind');
 ---@field bind BindFn
 ---@field register fun(self: Pyonji, name: string, action: function)
 ---@field config fun(self: Pyonji, config: Config)
----@field open_palette fun(self: Pyonji)
----@field open_sessions fun(self: Pyonji)
----@field open_detached fun(self: Pyonji)
----@field open_releases fun(self: Pyonji)
----@field open_opener fun(self: Pyonji)
----@field open_command fun(self: Pyonji) opens the `:` command prompt
----@field open_lua fun(self: Pyonji) opens the `>` lua prompt
----@field open_rename fun(self: Pyonji)
+---@field open_palette fun(self: Pyonji?) command palette: filter, pick, run
+---@field open_sessions fun(self: Pyonji?)
+---@field open_detached fun(self: Pyonji?) list hidden sessions to attach again
+---@field open_releases fun(self: Pyonji?)
+---@field open_opener fun(self: Pyonji?)
+---@field open_lua fun() opens the `>` lua prompt
+---@field open_rename fun(self: Pyonji?)
 ---@field rename RenameFn
 ---@field detach fun(self: Pyonji): boolean
 ---@field attach fun(self: Pyonji, session: integer, tab: integer?): boolean
@@ -55,16 +52,15 @@ require('lua.keybind');
 ---@field move_to fun(self: Pyonji, tab: integer): boolean
 ---@field split fun(self: Pyonji, direction: string): integer?
 ---@field create_session fun(self: Pyonji, dir: string?, tab: integer?, direction: string?, parent: integer?): integer
----@field switch_tab fun(self: Pyonji, tab: integer): boolean
+---@field switch_tab fun(self: Pyonji?, tab: integer): boolean
 ---@field next_tab fun(self: Pyonji): integer
 ---@field prev_tab fun(self: Pyonji): integer
 ---@field focus_next_pane fun(self: Pyonji): integer?
----@field write fun(self: Pyonji, text: string): boolean
----@field write_to fun(self: Pyonji, session: integer, text: string): boolean
+---@field write fun(self: Pyonji, session: integer, text: string): boolean
+---@field reload_config fun(self: Pyonji)
 ---@field toggle_fullscreen fun(self: Pyonji): boolean
 ---@field toggle_decorations fun(self: Pyonji)
 ---@field toggle_status_bar fun(self: Pyonji)
----@field reload_config fun(self: Pyonji)
 ---@field quit fun(self: Pyonji)
 
 ---@type Pyonji
@@ -81,6 +77,9 @@ py:config({
     },
 });
 
+-- Open Commands with this shortcut. Remap it here.
+py:bind('<ctrl-shift>p', py.open_palette());
+
 --[[
 -- Methods are callable two ways:
 --  * py:method(...) runs the action immediately and returns a real value
@@ -89,7 +88,12 @@ py:config({
 py:bind({ "ctrl", "shift" }, "F", py.open_palette());
 py:bind({ "ctrl", "shift" }, "S", py.open_sessions());
 
-py:register("test", function (...)
+-- Commands, copy, and paste have default shortcuts. Add a sequence if preferred:
+py:bind('<ctrl-b> p', py.open_palette());
+
+-- py:register adds a command to the palette. The
+-- argument names are read off the function, so they show up as <placeholders>:
+py:register("open", function (...)
     print(...);
 end);
 --]]

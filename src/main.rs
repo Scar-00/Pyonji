@@ -7,242 +7,166 @@
     clippy::struct_field_names,
     clippy::too_many_lines,
     clippy::cast_sign_loss,
-    clippy::struct_excessive_bools,
     clippy::type_complexity
 )]
 
+mod assets;
+mod commands;
 mod config;
-#[cfg(feature = "install")]
 mod logging;
-mod overlay;
+mod lua_complete;
 mod pty;
 mod renderer;
-mod status;
 mod terminal;
-//mod util;
+mod ui;
+mod util;
 
-use mlua::{
-    Lua, LuaOptions, StdLib,
-    prelude::{LuaFunction, LuaMultiValue, LuaTable},
+use assets::{GlobalAssets, PyonjiAsset, PyonjiAssetsSource};
+use pty::Event;
+use terminal::{Tab as TerminalTab, *};
+use tracing::Level;
+use tracing_subscriber::fmt::time;
+use ui::Overlay;
+use ui::Terminal;
+
+use std::path::Path;
+use std::{array, path::PathBuf, sync::Arc};
+
+use anyhow::anyhow;
+use async_channel::{Receiver, Sender};
+use clap::Parser;
+use gpui::{prelude::*, *};
+use gpui_base::*;
+use gpui_component::{
+    Icon, Root, ThemeMode, WindowExt,
+    notification::{Notification, NotificationType},
 };
-use smol::Task;
-#[cfg(not(feature = "install"))]
+use gpui_component_assets as gassets;
+use mlua::prelude::*;
+use smallvec::{SmallVec, smallvec};
 use tracing_subscriber::prelude::*;
 
-use anyhow::{Context, Result};
-use clap::Parser;
-use pty::Event as PtyEvent;
-use renderer::{ImePreedit, Pane, Renderer, StatusLine, StatusTab};
-use std::{
-    array, collections::HashMap, fmt::Display, mem, panic::Location, path::{Path, PathBuf}, sync::Arc
-};
-use tracing::error;
-use winit::{
-    application::ApplicationHandler,
-    dpi::{PhysicalPosition, PhysicalSize},
-    event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
-    keyboard::{KeyCode, ModifiersState, PhysicalKey},
-    window::{Icon, Window, WindowId},
-};
-
+use crate::config::LuaAction;
+use crate::logging::LogEmitter;
+use crate::logging::ResultLogExt as _;
+use crate::logging::TracingLogSubscriber;
+use crate::ui::DividerDrag;
 use crate::{
-    config::KeyBinding,
-    overlay::{LuaAction, Overlay, Screen},
     pty::SshConnection,
-    status::{Mode, StatusBar},
-    terminal::{
-        Divider, PaneGeometry, PanePathStep, SessionId, SessionManager, SplitDirection, Tab,
-        TerminalSession,
-    },
+    ui::{OverlayScreen, StatusBar, StatusBarEvent, StatusBarMode},
 };
 
-struct LocalExecutor {
-    inner: smol::LocalExecutor<'static>,
-    window: Option<Arc<Window>>,
-}
-
-impl LocalExecutor {
-    pub fn new() -> Self {
-        Self {
-            inner: smol::LocalExecutor::new(),
-            window: None,
-        }
-    }
-
-    pub fn spawn<R: 'static>(&self, f: impl 'static + AsyncFn() -> R) -> Task<R> {
-        let task = self.inner.spawn(async move { f().await });
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        };
-        task
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    pub fn try_tick(&self) -> bool {
-        self.inner.try_tick()
-    }
-
-    fn set_window(&mut self, window: Arc<Window>) {
-        self.window = Some(window);
-    }
-}
+actions!([
+    EnterRename,
+    EnterLuaRepl,
+    OpenPalette,
+    OpenReleases,
+    OpenSessions,
+    OpenDetached,
+    Submit,
+    Next,
+    Prev,
+    ClipboardPaste,
+    ClipboardCopy,
+]);
 
 #[derive(clap::Parser)]
 struct Cli {
     path: Option<PathBuf>,
 }
 
-struct App {
-    args: Cli,
-    renderer: Option<Renderer>,
-    pub window: Option<Arc<Window>>,
-    session_manager: SessionManager,
-    pub ssh_sessions: Vec<SshConnection>,
-    modifiers: ModifiersState,
-    line_height: f32,
-    font_size: f32,
-    font_family: Option<String>,
-    rows: u16,
-    cols: u16,
-    tabs: [Option<Tab>; 9],
-    action_mode: bool,
-    pending_move_to_tab: bool,
-    current_tab: usize,
-    detached_sessions: Vec<SessionId>,
-    cursor_pos: Option<(f64, f64)>,
-    wheel_remainder: f32,
-    divider_drag: Option<DividerDrag>,
-    resize_mode_held: bool,
-    resize_mode_used: bool,
-    ime_enabled: bool,
-    ime_preedit: Option<String>,
-    status_bar_hidden: bool,
-    status_bar: StatusBar,
-    _proxy: EventLoopProxy<PtyEvent>,
-
-    pub local_executer: LocalExecutor,
-
-    overlay: Option<Overlay>,
-
-    action: KeyBinding,
-    keymap: HashMap<KeyBinding, KeyAction>,
-    registered_callbacks: Vec<LuaAction>,
-    fullscreen: bool,
-    default_cwd: Option<PathBuf>,
-
-    lua: Lua,
-}
-
-#[derive(Clone, Copy)]
-struct PaneHit {
-    session_id: SessionId,
-    col: u16,
-    row: u16,
-}
-
-#[derive(Clone)]
-struct DividerDrag {
-    path: Vec<PanePathStep>,
-    direction: SplitDirection,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BuiltinAction {
-    Action,
-    Palette,
-    Sessions,
-    Tab(usize),
-    NextTab,
-    PrevTab,
-    NextPane,
-    SplitVertical,
-    SplitHorizontal,
-    ToggleDecorations,
-    ToggleStatusBar,
-    StatusPrompt,
-    LuaPrompt,
-    MoveToTab,
-    DetachSession,
-    RenameSession,
-    Detached,
-}
-
-#[derive(Debug, Clone)]
-pub enum KeyAction {
-    Builtin(BuiltinAction),
-    Custom(LuaFunction),
-}
-
-fn main() -> Result<()> {
+fn main() {
     cfg_select! {
         feature = "install" => {
             logging::init();
         }
-        _ => {
-            tracing_subscriber::registry()
-                .with(tracing_subscriber::fmt::layer())
-                .with(tracing_subscriber::filter::LevelFilter::WARN)
-                .init();
-        }
+        _ => {}
     };
-    let cli = Cli::parse();
 
-    let event_loop = EventLoop::<PtyEvent>::with_user_event()
-        .build()
-        .context("failed to create event loop")?;
-    let proxy = event_loop.create_proxy();
+    let log_emitter = LogEmitter::new();
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_file(false)
+                .with_level(false)
+                .with_timer(time::ChronoLocal::new("%H:%M:%S".into()))
+                .with_writer(TracingLogSubscriber::new(&log_emitter)),
+        )
+        .with(tracing_subscriber::filter::LevelFilter::WARN)
+        .init();
 
-    config::watch(proxy.clone());
+    gpui_platform::application()
+        .with_assets(GlobalAssets::new([
+            Box::new(gassets::Assets),
+            Box::new(PyonjiAssetsSource),
+        ]))
+        .run(|cx| {
+            gpui_component::init(cx);
+            gpui_tokio::init(cx);
+            Theme::init(cx);
 
-    let lua = unsafe { Lua::unsafe_new_with(StdLib::ALL_SAFE, LuaOptions::new()) };
-    config::install_inspect(&lua)?;
-    for (name, source) in config::LUA_MODULES {
-        let function = lua.load(*source).into_function()?;
-        let package: LuaTable = lua.globals().get("package")?;
-        let preload: LuaTable = package.get("preload")?;
-        preload.set(*name, function.clone())?;
-        function.call::<()>(())?;
-    }
-    {
-        let proxy = proxy.clone();
-        let print = lua.create_function(move |lua, args: LuaMultiValue| {
-            let tostring: LuaFunction = lua.globals().get("tostring")?;
-            let mut parts = Vec::new();
-            for value in args {
-                let text: String = tostring.call(value)?;
-                parts.push(text);
-            }
-            _ = proxy.send_event(PtyEvent::LuaPrint(parts.join("\t")));
-            Ok(())
-        })?;
-        lua.globals().set("print", print)?;
-        lua.globals().set("trace", lua.create_function(|lua, args: LuaMultiValue| {
-            let tostring: LuaFunction = lua.globals().get("tostring")?;
-            let mut parts = Vec::new();
-            for value in args {
-                let text: String = tostring.call(value)?;
-                parts.push(text);
-            }
-            tracing::error!("{}", parts.join("\t"));
-            Ok(())
-        })?)?;
-    }
-    let mut app = App::new(cli, lua.clone(), proxy);
+            let window_options = Pyonji::window_options(cx);
+            cx.open_window(window_options, |window, cx| {
+                Theme::apply_component_theme(window, cx);
 
-    config::load(&mut app);
+                window
+                    .spawn(cx, async move |cx| {
+                        while let Some(ev) = log_emitter.recv().await {
+                            _ = cx.update(|window, cx| {
+                                let action = match ev.level {
+                                    Level::ERROR => PushError::new(ev.line).boxed_clone(),
+                                    Level::WARN => PushWarning::new(ev.line).boxed_clone(),
+                                    _ => PushInfo::new(ev.line).boxed_clone(),
+                                };
+                                window.dispatch_action(action, cx);
+                            })
+                        }
+                    })
+                    .detach();
 
-    event_loop.set_control_flow(ControlFlow::Wait);
-    event_loop.run_app(&mut app).map_err(|error| {
-        error!(%error, "event loop failed");
-        error.into()
-    })
+                let py = cx.new(|cx| Pyonji::new(window, cx));
+                cx.new(|cx| Root::new(py, window, cx))
+            })
+            .expect("open window");
+        });
 }
 
-impl App {
+struct Pyonji {
+    cli: Cli,
+    lua: Lua,
+    _tx: Sender<Event>,
+    focus_handle: FocusHandle,
+
+    //workspace
+    session_manager: SessionManager,
+    tabs: [Option<TerminalTab>; 9],
+    current_tab: Option<usize>,
+    detached_sessions: Vec<SessionId>,
+    wheel_remainder: f32,
+    selection_drag: Option<SessionId>,
+
+    //views
+    terminal: Entity<Terminal>,
+    status_bar: Entity<StatusBar>,
+    overlay: Entity<Overlay>,
+
+    //jobs
+    _event_loop_task: Task<()>,
+    _subscriptions: SmallVec<[Subscription; 4]>,
+
+    //config
+    font_family: Option<String>,
+    font_size: f32,
+    line_height: f32,
+    default_cwd: Option<PathBuf>,
+    ssh_sessions: Vec<SshConnection>,
+    registered_callbacks: Vec<LuaAction>,
+    editor: Option<String>,
+}
+
+impl Pyonji {
     const TITLE: &str = cfg_select! {
         feature = "install" => "Pyonji",
         _ => {
@@ -250,678 +174,672 @@ impl App {
         },
     };
     const ICON: &[u8] = include_bytes!("../resources/icon.ico");
-    const STATUS_BAR_ROWS: u16 = 1;
-}
+    const INITIAL_SIZE: (f32, f32) = (1280.0, 720.0);
 
-impl App {
-    pub fn new(cli: Cli, lua: Lua, proxy: EventLoopProxy<PtyEvent>) -> Self {
+    fn init(cx: &mut App) {
+        use ui::overlay;
+
+        cx.bind_keys([
+            KeyBinding::new("ctrl-shift-v", ClipboardPaste, Some(Terminal::CONTEXT)),
+            KeyBinding::new("ctrl-shift-c", ClipboardCopy, Some(Terminal::CONTEXT)),
+            KeyBinding::new("ctrl-shift-p", OpenPalette, Some(Terminal::CONTEXT)),
+        ]);
+
+        ui::status_bar::init(cx);
+        overlay::palette::init(cx);
+        overlay::sessions::init(cx);
+        overlay::releases::init(cx);
+        overlay::opener::init(cx);
+    }
+
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let cli = Cli::parse();
+        let lua = unsafe { Lua::unsafe_new() };
+        _ = config::install_inspect(&lua);
+        for (name, source) in config::LUA_MODULES {
+            let function = lua.load(*source).into_function().unwrap();
+            let package: LuaTable = lua.globals().get("package").unwrap();
+            let preload: LuaTable = package.get("preload").unwrap();
+            preload.set(*name, function.clone()).unwrap();
+            function.call::<()>(()).unwrap();
+        }
+        let (tx, rx) = async_channel::unbounded();
+        {
+            let tx = tx.clone();
+            if let Ok(print) = lua.create_function(move |lua, args: mlua::MultiValue| {
+                let tostring: mlua::Function = lua.globals().get("tostring")?;
+                let mut parts = Vec::new();
+                for value in args {
+                    let text: String = tostring.call(value)?;
+                    parts.push(text);
+                }
+                _ = tx.try_send(Event::LuaPrint(parts.join("\t")));
+                Ok(())
+            }) {
+                _ = lua.globals().set("print", print);
+            }
+        }
+
+        Self::init(cx);
+
+        config::watch(tx.clone());
+
+        let focus_handle = cx.focus_handle();
+        window.focus(&focus_handle, cx);
+        cx.on_blur(&focus_handle, window, |this, _, cx| {
+            this.selection_drag = None;
+            this.terminal
+                .update(cx, |terminal, _| terminal.divider_drag = None);
+        })
+        .detach();
+        cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.selection_drag = None;
+                this.terminal
+                    .update(cx, |terminal, _| terminal.divider_drag = None);
+            }
+        })
+        .detach();
+
+        let py = cx.weak_entity();
+        Self::spawn_inital_session(window, cx);
         Self {
-            args: cli,
-            renderer: None,
-            window: None,
-            session_manager: SessionManager::new(proxy.clone()),
-            ssh_sessions: vec![],
-            modifiers: ModifiersState::default(),
-            font_size: 24.0,
-            line_height: 28.0,
-            font_family: None,
-            rows: 20,
-            cols: 80,
-            tabs: array::from_fn(|_| None),
-            action_mode: false,
-            pending_move_to_tab: false,
-            current_tab: 0,
-            detached_sessions: vec![],
-            cursor_pos: None,
-            wheel_remainder: 0.0,
-            divider_drag: None,
-            resize_mode_held: false,
-            resize_mode_used: false,
-            ime_enabled: false,
-            ime_preedit: None,
-            status_bar_hidden: false,
-            status_bar: StatusBar::new(),
-            _proxy: proxy,
-
-            local_executer: LocalExecutor::new(),
-
-            overlay: None,
-
-            action: KeyBinding {
-                mods: ModifiersState::CONTROL,
-                key: KeyCode::KeyB,
-            },
-            keymap: Self::default_keymap(),
-            registered_callbacks: vec![],
-            fullscreen: false,
-            default_cwd: None,
-
+            cli,
             lua,
+            _tx: tx.clone(),
+            focus_handle,
+
+            session_manager: SessionManager::new(tx.clone()),
+            tabs: array::from_fn(|_| None),
+            current_tab: Some(0),
+            detached_sessions: vec![],
+            wheel_remainder: 0.0,
+            selection_drag: None,
+
+            terminal: cx.new(|cx| Terminal::new(py.clone(), cx)),
+            status_bar: Self::setup_status_bar(window, cx),
+            overlay: cx.new(|cx| Overlay::new(py.clone(), window, cx)),
+
+            _event_loop_task: Self::spawn_event_loop(rx, window, cx),
+            _subscriptions: smallvec![],
+
+            font_family: None,
+            font_size: 38.0,
+            line_height: 1.1,
+            default_cwd: None,
+            ssh_sessions: vec![],
+            registered_callbacks: vec![],
+            editor: None,
         }
     }
 
-    fn ui(&mut self) {
-        let Some(mut overlay) = self.overlay.take() else {
-            return;
-        };
-        if overlay.shown() {
-            overlay.draw(self).expect("drawing overlay");
-        }
-        self.overlay = Some(overlay);
-    }
-
-    pub fn default_keymap() -> HashMap<KeyBinding, KeyAction> {
-        use BuiltinAction as B;
-        let mut keymap = HashMap::new();
-        keymap.insert(
-            KeyBinding {
-                mods: ModifiersState::CONTROL,
-                key: KeyCode::KeyB,
-            },
-            KeyAction::Builtin(B::Action),
-        );
-        keymap.insert(
-            KeyBinding {
-                mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
-                key: KeyCode::KeyF,
-            },
-            KeyAction::Builtin(B::Palette),
-        );
-        keymap.insert(
-            KeyBinding {
-                mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
-                key: KeyCode::KeyS,
-            },
-            KeyAction::Builtin(B::Sessions),
-        );
-        let action_keys: &[(KeyCode, BuiltinAction)] = &[
-            (KeyCode::Digit1, B::Tab(0)),
-            (KeyCode::Digit2, B::Tab(1)),
-            (KeyCode::Digit3, B::Tab(2)),
-            (KeyCode::Digit4, B::Tab(3)),
-            (KeyCode::Digit5, B::Tab(4)),
-            (KeyCode::Digit6, B::Tab(5)),
-            (KeyCode::Digit7, B::Tab(6)),
-            (KeyCode::Digit8, B::Tab(7)),
-            (KeyCode::Digit9, B::Tab(8)),
-            (KeyCode::KeyK, B::NextTab),
-            (KeyCode::KeyJ, B::PrevTab),
-            (KeyCode::KeyW, B::NextPane),
-            (KeyCode::KeyV, B::SplitVertical),
-            (KeyCode::KeyH, B::SplitHorizontal),
-            (KeyCode::KeyT, B::ToggleDecorations),
-            (KeyCode::KeyS, B::ToggleStatusBar),
-            (KeyCode::KeyP, B::Palette),
-            (KeyCode::Semicolon, B::StatusPrompt),
-            (KeyCode::KeyL, B::LuaPrompt),
-            (KeyCode::KeyM, B::MoveToTab),
-            (KeyCode::KeyD, B::DetachSession),
-            (KeyCode::KeyR, B::RenameSession),
-            (KeyCode::KeyA, B::Detached),
-        ];
-        for (key, action) in action_keys {
-            keymap.insert(
-                KeyBinding {
-                    mods: ModifiersState::empty(),
-                    key: *key,
-                },
-                KeyAction::Builtin(*action),
-            );
-        }
-        keymap
-    }
-
-    fn dispatch_builtin(&mut self, action: BuiltinAction) -> bool {
-        match action {
-            BuiltinAction::Action => {
-                self.resize_mode_held = true;
-                self.resize_mode_used = false;
-                self.action_mode = true;
-            }
-            BuiltinAction::Palette => {
-                if let Some(overlay) = self.overlay.as_mut() {
-                    overlay.show(Some(Screen::CmdPalette));
+    fn setup_status_bar(window: &mut Window, cx: &mut Context<Self>) -> Entity<StatusBar> {
+        let py = cx.weak_entity();
+        let bar = cx.new(|cx| StatusBar::new(py, cx));
+        cx.subscribe_in(
+            &bar,
+            window,
+            |this, status_bar, ev: &StatusBarEvent, window, cx| match ev {
+                StatusBarEvent::Dismiss => {
+                    status_bar.update(cx, |this, cx| {
+                        this.set_mode(StatusBarMode::Sessions, cx);
+                        this.reset_history();
+                    });
+                    window.focus(&this.focus_handle, cx);
                 }
-                self.request_redraw();
-            }
-            BuiltinAction::Sessions => {
-                if let Some(overlay) = self.overlay.as_mut() {
-                    overlay.show(Some(Screen::Sessions));
+                StatusBarEvent::Renamed(id, title) => {
+                    if let Some(session) = this.session_manager.session_mut(*id) {
+                        session.rename(title.clone());
+                    }
                 }
-                self.request_redraw();
-            }
-            BuiltinAction::Tab(index) => {
-                let _ = self.switch_tab(index);
-            }
-            BuiltinAction::NextTab => {
-                let _ = self.switch_tab(self.next_tab_index());
-            }
-            BuiltinAction::PrevTab => {
-                let _ = self.switch_tab(self.previous_tab_index());
-            }
-            BuiltinAction::NextPane => {
-                let _ = self.focus_next_pane();
-            }
-            BuiltinAction::SplitVertical => {
-                let _ = self.split_current_tab(SplitDirection::Vertical);
-            }
-            BuiltinAction::SplitHorizontal => {
-                let _ = self.split_current_tab(SplitDirection::Horizontal);
-            }
-            BuiltinAction::ToggleDecorations => {
-                if let Some(window) = self.window.as_mut() {
-                    window.set_decorations(!window.is_decorated());
-                    window.request_redraw();
-                }
-            }
-            BuiltinAction::ToggleStatusBar => {
-                self.status_bar_hidden = !self.status_bar_hidden;
-                self.resize_tab();
-                self.request_redraw();
-            }
-            BuiltinAction::StatusPrompt => self.open_status_prompt(),
-            BuiltinAction::LuaPrompt => self.open_lua_prompt(),
-            BuiltinAction::MoveToTab => {
-                self.pending_move_to_tab = true;
-                self.action_mode = true;
-                self.request_redraw();
-            }
-            BuiltinAction::DetachSession => {
-                let _ = self.detach_active_session();
-            }
-            BuiltinAction::RenameSession => self.open_rename_prompt(),
-            BuiltinAction::Detached => {
-                if let Some(overlay) = self.overlay.as_mut() {
-                    overlay.show(Some(Screen::Detached));
-                }
-                self.request_redraw();
-            }
-        }
-        true
-    }
-}
-
-impl ApplicationHandler<PtyEvent> for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let icon = image::load_from_memory(Self::ICON).ok().and_then(|image| {
-            let data = image.to_rgba8().to_vec();
-            Icon::from_rgba(data, image.width(), image.height()).ok()
-        });
-        let Ok(window) = event_loop.create_window(
-            Window::default_attributes()
-                .with_inner_size(PhysicalSize::new(1280, 720))
-                .with_active(true)
-                .with_window_icon(icon)
-                .with_maximized(self.fullscreen)
-                .with_title(Self::TITLE),
-        ) else {
-            event_loop.exit();
-            return;
-        };
-        window.set_ime_allowed(true);
-        let size = window.inner_size();
-        self.rows = (size.height as f32 / self.line_height) as u16;
-        self.cols = (size.width as f32 / (self.font_size / 2.0)) as u16;
-
-        let window = Arc::new(window);
-        self.renderer = match Renderer::new(
-            window.clone(),
-            self.font_family.as_deref(),
-            self.font_size,
-            self.line_height,
-        ) {
-            Ok(renderer) => Some(renderer),
-            Err(error) => {
-                error!(error = ?error, "failed to initialize renderer");
-                None
-            }
-        };
-        self.window = Some(window.clone());
-        self.local_executer.set_window(window.clone());
-        self.overlay = Overlay::new(self, size, self.font_size, self.line_height).ok();
-
-        match self.session_manager.create_session(
-            self.terminal_rows().max(1),
-            self.cols.max(1),
-            self.args.path.as_deref().or(self.default_cwd.as_deref()),
-        ) {
-            Ok(session) => {
-                self.tabs[0] = Some(Tab::new(session));
-                self.current_tab = 0;
-                self.resize_tab();
-            }
-            Err(error) => error!(error = ?error, "failed to create initial session"),
-        }
-        self.update_ime_cursor_area();
-        window.request_redraw();
-    }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.status_bar.clear_message_if_expired() {
-            if let Some(window) = self.window.as_ref() {
-                window.request_redraw();
-            }
-            event_loop.set_control_flow(ControlFlow::Wait);
-            return;
-        }
-        event_loop.set_control_flow(match self.status_bar.message_expiry() {
-            Some(expiry) => ControlFlow::WaitUntil(expiry),
-            None => ControlFlow::Wait,
-        });
-    }
-
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: PtyEvent) {
-        match event {
-            PtyEvent::Closed(id) => {
-                if self.close_session(id) && self.session_manager.is_empty() {
-                    event_loop.exit();
-                }
-            }
-            PtyEvent::Data(id, data) => {
-                self.session_manager.update_session(id, &data);
-                self.update_ime_cursor_area();
-                self.request_redraw();
-            }
-            PtyEvent::ProgramChanged((id, title)) => {
-                let Some(session) = self.session_manager.session_mut(id) else {
-                    return;
-                };
-                session.set_title(title);
-            }
-            PtyEvent::ConfigChanged => {
-                config::load(self);
-                self.request_redraw();
-            }
-            PtyEvent::LuaPrint(text) => {
-                self.status_bar
-                    .show_message(text.replace(['\n', '\r'], " "));
-                self.request_redraw();
-            }
-            PtyEvent::Exit => event_loop.exit(),
-        }
-    }
-
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
-        event: WindowEvent,
-    ) {
-        match event {
-            WindowEvent::RedrawRequested => {
-                //let start = std::time::Instant::now();
-                let panes = self.tab_layouts();
-                let active = self.active_session();
-                let dividers = self.tab_dividers();
-                let status_tabs = self.status_tabs();
-                let status_input = self.status_bar.status_input(self.cols);
-                let status_message = if self.status_bar_hidden {
-                    None
-                } else {
-                    self.status_bar.message().map(str::to_string)
-                };
-                let status = if status_tabs.is_none()
-                    && status_input.is_none()
-                    && status_message.is_none()
-                {
-                    None
-                } else {
-                    Some(StatusLine {
-                        tabs: status_tabs.as_deref(),
-                        input: status_input.as_ref(),
-                        message: status_message.as_deref(),
-                    })
-                };
-                let ime_preedit = self.ime_preedit();
-                self.ui();
-                let Some(renderer) = self.renderer.as_mut() else {
-                    return;
-                };
-
-                let mut pane_data = Vec::with_capacity(panes.len());
-                for (session_id, geometry) in panes {
-                    let Some(session) = self.session_manager.session(session_id) else {
-                        continue;
-                    };
-                    pane_data.push(Pane {
-                        screen: session.vt.screen(),
-                        cursor_style: &session.cursor_style,
-                        geometry,
-                        is_active: Some(session_id) == active,
+                StatusBarEvent::ExecLua(code) => {
+                    let lua = this.lua.clone();
+                    config::with_env(this, window, cx, |_| lua.load(code).exec()).log();
+                    this.status_bar.update(cx, |this, cx| {
+                        this.push_lua_history(code.clone());
+                        this.reset_history();
+                        cx.notify();
                     });
                 }
-                if let Err(e) = renderer.render(
-                    &pane_data,
-                    &dividers,
-                    status,
-                    ime_preedit.as_ref(),
-                    self.overlay.as_ref(),
-                ) {
-                    error!(error = ?e, "failed to render");
-                }
-                if !self.local_executer.is_empty() {
-                    self.local_executer.try_tick();
-                    self.request_redraw();
-                }
-                //println!("render = {:?}", start.elapsed());
-            }
-            WindowEvent::Resized(size) => {
-                if size.width == 0 || size.height == 0 {
-                    return;
-                }
-                self.rows = (size.height as f32 / self.line_height) as u16;
-                self.cols = (size.width as f32 / (self.font_size / 2.0)) as u16;
-                self.resize_tab();
-                let Some((window, renderer)) = self.window.as_ref().zip(self.renderer.as_mut())
-                else {
-                    return;
-                };
-                renderer.resize(size);
-                window.request_redraw();
-                if let Some(overlay) = self.overlay.as_mut() {
-                    overlay.resize(size, self.font_size, self.line_height);
-                }
-                self.update_ime_cursor_area();
-            }
-            WindowEvent::ModifiersChanged(mods) => {
-                self.modifiers = mods.state();
-                if !self.modifiers.control_key() {
-                    self.resize_mode_held = false;
-                    if self.resize_mode_used {
-                        self.action_mode = false;
-                    }
-                    self.resize_mode_used = false;
-                }
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                self.cursor_pos = Some((position.x, position.y));
-                if let Some(drag) = self.divider_drag.clone() {
-                    self.resize_dragged_divider(&drag, position.x, position.y);
-                    return;
-                }
-                let Some(hit) = self.pane_hit_test(position.x, position.y) else {
-                    return;
-                };
-                if let Some(session) = self.session_manager.session_mut(hit.session_id) {
-                    let reset_scrollback = if session.uses_local_scrollback() {
-                        false
-                    } else {
-                        session.reset_scrollback()
-                    };
-                    session.handle_mouse_move(self.modifiers, hit.col, hit.row);
-                    if reset_scrollback {
-                        self.request_redraw();
-                    }
-                }
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                let Some((x, y)) = self.cursor_pos else {
-                    return;
-                };
+            },
+        )
+        .detach();
+        bar
+    }
 
-                if button == MouseButton::Left {
-                    match state {
-                        ElementState::Pressed => {
-                            if let Some(divider) = self.divider_hit_test(x, y) {
-                                let drag = DividerDrag {
-                                    path: divider.path,
-                                    direction: divider.direction,
-                                };
-                                self.resize_dragged_divider(&drag, x, y);
-                                self.divider_drag = Some(drag);
-                                return;
+    fn spawn_event_loop(
+        rx: Receiver<Event>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                if let Ok(event) = rx.recv().await {
+                    _ = this.update_in(cx, |this, window, cx| match event {
+                        Event::Closed(id) => {
+                            if this.close_session(id, cx) && this.session_manager.is_empty() {
+                                cx.quit();
+                            }
+                            cx.notify();
+                        }
+                        Event::Data(id, data) => {
+                            this.session_manager.update_session(id, &data);
+                            cx.notify();
+                        }
+                        Event::ProgramChanged((id, title)) => {
+                            if let Some(session) = this.session_manager.session_mut(id) {
+                                session.set_title(title);
+                                cx.notify();
                             }
                         }
-                        ElementState::Released if self.divider_drag.take().is_some() => {
-                            return;
+                        Event::ConfigChanged => {
+                            if let Err(e) = config::load(this, window, cx) {
+                                window.dispatch_action(Box::new(PushError::new(e)), cx);
+                            }
+                            cx.notify();
                         }
-                        ElementState::Released => {}
-                    }
-                }
-
-                let Some(hit) = self.pane_hit_test(x, y) else {
-                    return;
-                };
-
-                if state == ElementState::Pressed {
-                    self.set_active_session(hit.session_id);
-                    self.update_ime_cursor_area();
-                }
-
-                if let Some(session) = self.session_manager.session_mut(hit.session_id) {
-                    let reset_scrollback = if session.uses_local_scrollback() {
-                        false
-                    } else {
-                        session.reset_scrollback()
-                    };
-                    session.handle_mouse_button(button, state, self.modifiers, hit.col, hit.row);
-                    if reset_scrollback {
-                        self.request_redraw();
-                    }
+                        Event::LuaPrint(text) => {
+                            let text = text.replace(['\r'], " ");
+                            if !text.is_empty() {
+                                window.dispatch_action(Box::new(PushLuaPrint::new(text)), cx);
+                            }
+                        }
+                    });
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let Some((x, y)) = self.cursor_pos else {
-                    return;
-                };
-                let Some(hit) = self.pane_hit_test(x, y) else {
-                    return;
-                };
-                let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(pos) => {
-                        if self.line_height > 0.0 {
-                            (pos.y as f32) / self.line_height
-                        } else {
-                            0.0
-                        }
-                    }
-                };
-                let uses_local_scrollback = self
+        })
+    }
+
+    fn spawn_inital_session(window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in_with_priority(Priority::High, window, async move |this, cx| {
+            _ = this.update_in(cx, |this, window, cx| {
+                if let Err(e) = config::load(this, window, cx) {
+                    window.dispatch_action(Box::new(PushError::new(e)), cx);
+                }
+                let res = this
                     .session_manager
-                    .session(hit.session_id)
-                    .is_some_and(TerminalSession::uses_local_scrollback);
-                let whole_lines = if uses_local_scrollback {
-                    self.take_wheel_steps(lines)
-                } else {
-                    self.wheel_remainder = 0.0;
-                    0
-                };
-
-                if let Some(session) = self.session_manager.session_mut(hit.session_id) {
-                    if uses_local_scrollback {
-                        if whole_lines != 0 && session.scroll_scrollback(whole_lines) {
-                            self.request_redraw();
-                        }
-                    } else {
-                        let reset_scrollback = session.reset_scrollback();
-                        session.handle_mouse_wheel(lines, self.modifiers, hit.col, hit.row);
-                        if reset_scrollback {
-                            self.request_redraw();
-                        }
+                    .create_session(20, 80, this.cli.path.as_deref());
+                match res {
+                    Ok(id) => {
+                        this.tabs[0] = Some(TerminalTab::new(id));
+                        this.current_tab = Some(0);
+                        cx.notify();
                     }
+                    Err(e) => {
+                        window.dispatch_action(Box::new(PushError::new(e.to_string())), cx);
+                    }
+                }
+            });
+        })
+        .detach()
+    }
+
+    fn on_enter_rename(&mut self, _: &EnterRename, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.active_session() else {
+            return;
+        };
+        let Some(inital) = self.session_manager.session(session) else {
+            return;
+        };
+        let inital = inital.title();
+        let mode = StatusBarMode::Rename {
+            inital: inital.to_string(),
+            session,
+        };
+        self.status_bar.update(cx, |this, cx| {
+            this.set_mode(mode, cx);
+        });
+    }
+
+    fn on_enter_lua(&mut self, _: &EnterLuaRepl, _: &mut Window, cx: &mut Context<Self>) {
+        self.status_bar.update(cx, |this, cx| {
+            this.set_mode(StatusBarMode::Lua, cx);
+        });
+    }
+
+    fn on_switch_tab(&mut self, tab: &SwitchTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.switch_tab(tab.0, cx);
+    }
+
+    fn on_error(&mut self, error: &PushError, window: &mut Window, cx: &mut Context<Self>) {
+        Self::push_note(
+            NotificationType::Error,
+            "Error",
+            error.string.clone(),
+            error.autohide,
+            window,
+            cx,
+        );
+    }
+
+    fn on_warning(&mut self, warning: &PushWarning, window: &mut Window, cx: &mut Context<Self>) {
+        Self::push_note(
+            NotificationType::Warning,
+            "Warning",
+            warning.string.clone(),
+            warning.autohide,
+            window,
+            cx,
+        );
+    }
+
+    fn on_info(&mut self, info: &PushInfo, window: &mut Window, cx: &mut Context<Self>) {
+        Self::push_note(
+            NotificationType::Info,
+            "Info",
+            info.string.clone(),
+            true,
+            window,
+            cx,
+        );
+    }
+
+    fn on_lua_print(&mut self, print: &PushLuaPrint, window: &mut Window, cx: &mut Context<Self>) {
+        fn lua_icon(cx: &App) -> Icon {
+            Icon::new(PyonjiAsset::Lua).text_color(gpui_component::ActiveTheme::theme(cx).info)
+        }
+
+        let note = Notification::new()
+            .icon(lua_icon(cx))
+            .bg(cx.theme().surface)
+            .title("Lua")
+            .autohide(true)
+            .placement(Anchor::TopRight)
+            .message(print.string.clone());
+
+        window.push_notification(note, cx);
+    }
+
+    fn on_exec(&mut self, func: &ExecKeybind, window: &mut Window, cx: &mut Context<Self>) {
+        let func = func.0.clone();
+        if let Err(e) = config::with_env(self, window, cx, |this| func.call::<()>(this)) {
+            window.dispatch_action(Box::new(PushError::new(e)), cx);
+        }
+    }
+
+    fn on_open_sessions(&mut self, _: &OpenSessions, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlay.update(cx, |this, cx| {
+            this.open(OverlayScreen::Sessions, window, cx);
+        });
+    }
+
+    fn on_open_detached(&mut self, _: &OpenDetached, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlay.update(cx, |this, cx| {
+            this.open(OverlayScreen::Detached, window, cx);
+        });
+    }
+
+    fn on_open_palette(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlay.update(cx, |this, cx| {
+            this.open(OverlayScreen::Palette, window, cx);
+        });
+    }
+
+    fn on_open_releases(&mut self, _: &OpenReleases, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlay.update(cx, |this, cx| {
+            this.open(OverlayScreen::Releases, window, cx);
+        });
+    }
+
+    fn on_copy(&mut self, _: &ClipboardCopy, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(session) = self
+            .active_session()
+            .and_then(|id| self.session_manager.session(id))
+            && let Some(selection) = &session.selection
+        {
+            let text = selection.text(session.vt.screen());
+            if !text.is_empty() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+        }
+    }
+
+    fn extend_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(id) = self.selection_drag else {
+            return;
+        };
+        let terminal = self.terminal.read(cx);
+        let Some((col, row)) = terminal.mouse_to_cell(position, self) else {
+            return;
+        };
+        let Some((_, geometry)) = self
+            .tab_layouts(terminal.rows, terminal.cols)
+            .into_iter()
+            .find(|(session_id, _)| *session_id == id)
+        else {
+            return;
+        };
+        // Keep a drag in its original pane, even when the pointer crosses a divider.
+        let col = col
+            .saturating_sub(1)
+            .saturating_sub(geometry.x)
+            .min(geometry.cols.saturating_sub(1));
+        let row = row
+            .saturating_sub(1)
+            .saturating_sub(geometry.y)
+            .min(geometry.rows.saturating_sub(1));
+        if let Some(session) = self.session_manager.session_mut(id)
+            && let Some(selection) = &mut session.selection
+        {
+            selection.extend(session.vt.screen(), row, col);
+            cx.notify();
+        }
+    }
+
+    fn on_paste(&mut self, _: &ClipboardPaste, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(session) = self.active_session()
+            && let Some(item) = cx.read_from_clipboard()
+            && let Some(text) = item.text()
+        {
+            self.session_manager.send_text(session, &text);
+        }
+    }
+
+    fn push_note(
+        kind: NotificationType,
+        title: impl Into<SharedString>,
+        message: impl Into<SharedString>,
+        autohide: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        fn notification_icon(kind: NotificationType, cx: &App) -> Icon {
+            let theme = gpui_component::ActiveTheme::theme(cx);
+            match kind {
+                NotificationType::Error => {
+                    Icon::new(PyonjiAsset::NotificationError).text_color(theme.danger)
+                }
+                NotificationType::Warning => {
+                    Icon::new(PyonjiAsset::NotificationWarning).text_color(theme.warning)
+                }
+                NotificationType::Success => {
+                    Icon::new(PyonjiAsset::NotificationSuccess).text_color(theme.success)
+                }
+                NotificationType::Info => {
+                    Icon::new(PyonjiAsset::NotificationInfo).text_color(theme.info)
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
-                if self.status_bar.is_active() {
-                    let mut status_bar = mem::take(&mut self.status_bar);
-                    status_bar.handle_key(self, &event);
-                    self.status_bar = status_bar;
-                    self.request_redraw();
-                    return;
-                }
-                if let PhysicalKey::Code(code) = event.physical_key {
-                    if code == self.action.key && event.state == ElementState::Released {
-                        self.resize_mode_held = false;
-                        if self.resize_mode_used {
-                            self.action_mode = false;
-                        }
-                        self.resize_mode_used = false;
-                        return;
-                    }
-                    if event.state != ElementState::Pressed {
-                        return;
-                    }
-                    if self.resize_mode_held {
-                        match code {
-                            KeyCode::ArrowLeft => {
-                                self.resize_mode_used = true;
-                                self.resize_active_pane(SplitDirection::Vertical, -1);
-                                return;
-                            }
-                            KeyCode::ArrowRight => {
-                                self.resize_mode_used = true;
-                                self.resize_active_pane(SplitDirection::Vertical, 1);
-                                return;
-                            }
-                            KeyCode::ArrowUp => {
-                                self.resize_mode_used = true;
-                                self.resize_active_pane(SplitDirection::Horizontal, -1);
-                                return;
-                            }
-                            KeyCode::ArrowDown => {
-                                self.resize_mode_used = true;
-                                self.resize_active_pane(SplitDirection::Horizontal, 1);
-                                return;
-                            }
-                            _ => {}
-                        }
-                    }
-                    let pressed = KeyBinding {
-                        mods: self.modifiers,
-                        key: code,
-                    };
-                    let was_in_action_mode = self.action_mode;
-                    let is_action_trigger = matches!(
-                        self.keymap.get(&pressed),
-                        Some(KeyAction::Builtin(BuiltinAction::Action))
-                    );
-                    if was_in_action_mode && !is_action_trigger {
-                        self.action_mode = false;
-                        self.request_redraw();
-                    }
-                    if pressed.mods.is_empty() && self.pending_move_to_tab {
-                        self.pending_move_to_tab = false;
-                        self.request_redraw();
-                        if let Some(target) = Self::tab_digit_index(code)
-                            && let Some(session) = self.active_session()
-                        {
-                            self.move_session_to_tab(session, target);
-                        }
-                        return;
-                    }
-                    if let Some(action) = self.keymap.get(&pressed).cloned()
-                        && (is_action_trigger
-                            || !(pressed.mods.is_empty() && !was_in_action_mode))
-                    {
-                        match action {
-                            KeyAction::Custom(func) => {
-                                config::with_env(self, |this| {
-                                    func.call::<()>(this)?;
-                                    Ok(())
-                                })
-                                .into_log();
-                                self.request_redraw();
-                            }
-                            KeyAction::Builtin(action) => {
-                                self.dispatch_builtin(action);
-                            }
-                        }
-                        return;
-                    }
-                }
+        }
 
-                if let Some(mut overlay) = self.overlay.take() {
-                    if overlay.shown() {
-                        overlay.handle_input(self, &event);
-                        self.request_redraw();
-                        self.overlay = Some(overlay);
-                        return;
-                    }
-                    self.overlay = Some(overlay);
-                }
+        let note = Notification::new()
+            .icon(notification_icon(kind, cx))
+            .bg(cx.theme().surface.opacity(0.15))
+            .shadow(crate::ui::surface_shadow())
+            .title(title)
+            .autohide(autohide)
+            .placement(Anchor::TopRight)
+            .backdrop_blur(px(24.0))
+            .message(message);
 
-                let Some(active_session) = self.active_session() else {
-                    return;
-                };
-                let is_csi = self.is_csi();
-                if let Some(session) = self.session_manager.session_mut(active_session) {
-                    let reset_scrollback = session.reset_scrollback();
-                    session.handle_key_press(&event, self.modifiers, is_csi);
-                    if reset_scrollback {
-                        self.request_redraw();
-                    }
-                }
-            }
-            WindowEvent::CloseRequested => {
-                event_loop.exit();
-            }
-            WindowEvent::Ime(event) => self.handle_ime_event(event),
-            _ => {}
+        window.push_notification(note, cx);
+    }
+
+    fn window_options(cx: &mut App) -> WindowOptions {
+        let icon: Option<Arc<image::RgbaImage>> = image::load_from_memory(Self::ICON)
+            .map(|image| Arc::new(image.to_rgba8()))
+            .inspect_err(|error| tracing::error!(%error, "failed to decode window icon"))
+            .ok();
+        let (initial_width, initial_height) = Self::INITIAL_SIZE;
+        let initial_size = size(px(initial_width), px(initial_height));
+        let initial_origin = cx
+            .primary_display()
+            .map(|display| {
+                let bounds = display.bounds();
+                let x = (f32::from(bounds.size.width) - initial_width).max(0.0) / 2.0
+                    + f32::from(bounds.origin.x);
+                let y = (f32::from(bounds.size.height) - initial_height).max(0.0) / 2.0
+                    + f32::from(bounds.origin.y);
+                point(px(x), px(y))
+            })
+            .unwrap_or_default();
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                initial_origin,
+                initial_size,
+            ))),
+            titlebar: Some(TitlebarOptions {
+                title: Some(Self::TITLE.into()),
+                appears_transparent: false,
+                traffic_light_position: None,
+            }),
+            app_id: Some("pyonji".to_string()),
+            icon,
+            ..Default::default()
         }
     }
 }
 
-impl App {
-    fn request_redraw(&self) -> bool {
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
-            return true;
-        }
-        false
+impl Pyonji {
+    fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .size_full()
+            .p_2()
+            .child(
+                div()
+                    .size_full()
+                    .track_focus(&self.focus_handle)
+                    .key_context(Terminal::CONTEXT)
+                    .on_action(cx.listener(Self::on_enter_rename))
+                    .on_action(cx.listener(Self::on_enter_lua))
+                    .on_action(cx.listener(Self::on_switch_tab))
+                    .on_key_down(cx.listener(Self::handle_key_down))
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_mouse_up))
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, event, window, cx| {
+                            if this.selection_drag.is_some()
+                                || this.terminal.read(cx).divider_drag.is_some()
+                            {
+                                this.handle_mouse_up(event, window, cx);
+                            }
+                        }),
+                    )
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::handle_mouse_down))
+                    .on_mouse_up(MouseButton::Right, cx.listener(Self::handle_mouse_up))
+                    .on_mouse_down(MouseButton::Middle, cx.listener(Self::handle_mouse_down))
+                    .on_mouse_up(MouseButton::Middle, cx.listener(Self::handle_mouse_up))
+                    .on_mouse_move(cx.listener(Self::handle_mouse_move))
+                    .on_scroll_wheel(cx.listener(Self::handle_scroll))
+                    .on_action(cx.listener(Self::on_open_sessions))
+                    .on_action(cx.listener(Self::on_open_detached))
+                    .on_action(cx.listener(Self::on_open_releases))
+                    .on_action(cx.listener(Self::on_paste))
+                    .on_action(cx.listener(Self::on_copy))
+                    .child(self.terminal.clone())
+                    .children(Root::render_dialog_layer(window, cx)),
+            )
+            .child(self.status_bar.clone())
     }
+}
 
-    fn next_tab_index(&self) -> usize {
-        (self.current_tab + 1) % self.tabs.len()
+impl Render for Pyonji {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+
+        v_flex()
+            .id("main-view")
+            .on_action(cx.listener(Self::on_open_palette))
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .bg(theme.background)
+            .text_color(theme.text)
+            .on_action(cx.listener(Self::on_error))
+            .on_action(cx.listener(Self::on_warning))
+            .on_action(cx.listener(Self::on_info))
+            .on_action(cx.listener(Self::on_lua_print))
+            .on_action(cx.listener(Self::on_exec))
+            .child(Self::render_main(self, window, cx))
+            .children(Root::render_sheet_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
     }
+}
 
-    fn previous_tab_index(&self) -> usize {
-        if self.current_tab == 0 {
-            self.tabs.len() - 1
-        } else {
-            self.current_tab - 1
-        }
-    }
-
-    fn switch_to_previous_live_tab_or_stay(&mut self, closed_tab: usize) {
-        if let Some(tab) = (0..self.tabs.len())
-            .map(|offset| (closed_tab + self.tabs.len() - 1 - offset) % self.tabs.len())
-            .find(|&tab| self.tabs[tab].is_some())
-        {
-            self.current_tab = tab;
-            self.wheel_remainder = 0.0;
-            self.resize_tab();
+impl Pyonji {
+    fn handle_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.focus_handle.is_focused(window) {
             return;
         }
+        if event.is_held {
+            return self.handle_key_repeat(event, window, cx);
+        }
 
-        self.current_tab = closed_tab.min(self.tabs.len().saturating_sub(1));
+        if self.terminal.read(cx).resize_mode_held {
+            let delta = match event.keystroke.key.as_str() {
+                "left" => Some((SplitDirection::Vertical, -1)),
+                "right" => Some((SplitDirection::Vertical, 1)),
+                "up" => Some((SplitDirection::Horizontal, -1)),
+                "down" => Some((SplitDirection::Horizontal, 1)),
+                _ => None,
+            };
+            if let Some((direction, delta)) = delta {
+                self.terminal.update(cx, |this, _| {
+                    this.resize_mode_held = true;
+                });
+                self.resize_active_pane(direction, delta, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+        }
+
+        let Some(active_session) = self.active_session() else {
+            return;
+        };
+        let reset_scrollback = self
+            .session_manager
+            .session_mut(active_session)
+            .is_some_and(TerminalSession::reset_scrollback);
+        let consumed = self
+            .session_manager
+            .session_mut(active_session)
+            .is_some_and(|session| session.handle_key_down(event));
+        if consumed {
+            window.prevent_default();
+            cx.stop_propagation();
+        }
+        if reset_scrollback {
+            cx.notify();
+        }
     }
 
-    fn cursor_to_cell(&self, x: f64, y: f64) -> Option<(u16, u16)> {
-        if self.cols == 0 || self.rows == 0 || self.font_size <= 0.0 || self.line_height <= 0.0 {
-            return None;
+    fn handle_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.focus_handle.is_focused(window) {
+            window.focus(&self.focus_handle, cx);
         }
-
-        let cell_width = self.font_size / 2.0;
-        let col = ((x.max(0.0) as f32) / cell_width).floor() as i32 + 1;
-        let row = ((y.max(0.0) as f32) / self.line_height).floor() as i32 + 1;
-        let col = col.clamp(1, i32::from(self.cols)) as u16;
-        let row = row.clamp(1, i32::from(self.rows)) as u16;
-        Some((col, row))
+        if event.button == MouseButton::Left {
+            self.selection_drag = None;
+        }
+        let terminal = self.terminal.clone();
+        // Divider drags start on left press, like before — they take over the
+        // gesture so the press never reaches the pane underneath.
+        let (x, y) = terminal.read(cx).pt_to_term(event.position);
+        if event.button == MouseButton::Left
+            && let Some(divider) = terminal.read(cx).divider_hit_test(x, y, self)
+        {
+            let drag = DividerDrag {
+                path: divider.path,
+                direction: divider.direction,
+            };
+            self.resize_dragged_divider(&drag, x, y, cx);
+            terminal.update(cx, |this, cx| {
+                this.divider_drag = Some(drag);
+                cx.notify();
+            });
+            return;
+        }
+        let Some((col, row)) = terminal.read(cx).mouse_to_cell(event.position, self) else {
+            return;
+        };
+        let Some((session_id, col, row)) = terminal.read(cx).pane_at(col, row, self) else {
+            return;
+        };
+        self.set_active_session(session_id);
+        let local = event.modifiers.shift
+            || self
+                .session_manager
+                .session(session_id)
+                .is_some_and(|session| {
+                    session.vt.screen().mouse_protocol_mode() == vt100::MouseProtocolMode::None
+                });
+        if local && event.button == MouseButton::Left {
+            if let Some(session) = self.session_manager.session_mut(session_id) {
+                session.selection = Some(Selection::new(session.vt.screen(), row - 1, col - 1));
+                self.selection_drag = Some(session_id);
+                cx.notify();
+            }
+            return;
+        }
+        if let Some(session) = self.session_manager.session_mut(session_id) {
+            if !session.uses_local_scrollback() {
+                session.reset_scrollback();
+            }
+            session.handle_mouse_down(event.button, &event.modifiers, col, row);
+        }
+        cx.notify();
     }
 
-    fn is_csi(&self) -> Option<u8> {
-        let mut value = 1u8;
-        if self.modifiers.shift_key() {
-            value += 1;
+    fn handle_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.button == MouseButton::Left && self.selection_drag.is_some() {
+            self.extend_selection(event.position, cx);
+            self.selection_drag = None;
+            return;
         }
-        if self.modifiers.alt_key() {
-            value += 2;
+        if self
+            .terminal
+            .update(cx, |this, _| this.divider_drag.take().is_some())
+        {
+            return;
         }
-        if self.modifiers.control_key() {
-            value += 4;
+        let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
+            return;
+        };
+        let Some((session_id, col, row)) = self.terminal.read(cx).pane_at(col, row, self) else {
+            return;
+        };
+        if let Some(session) = self.session_manager.session_mut(session_id) {
+            session.handle_mouse_up(event.button, &event.modifiers, col, row);
         }
-        if value == 1 { None } else { Some(value) }
+    }
+
+    fn handle_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.pressed_button.is_none() {
+            return;
+        }
+        if let Some(drag) = self.terminal.read(cx).divider_drag.clone() {
+            let (x, y) = self.terminal.read(cx).pt_to_term(event.position);
+            self.resize_dragged_divider(&drag, x, y, cx);
+            return;
+        }
+        if self.selection_drag.is_some() {
+            self.extend_selection(event.position, cx);
+            return;
+        }
+        let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
+            return;
+        };
+        let Some((session_id, col, row)) = self.terminal.read(cx).pane_at(col, row, self) else {
+            return;
+        };
+        if let Some(session) = self.session_manager.session_mut(session_id) {
+            session.handle_mouse_move(&event.modifiers, col, row);
+        }
     }
 
     fn take_wheel_steps(&mut self, delta_lines: f32) -> i32 {
@@ -937,344 +855,287 @@ impl App {
         whole
     }
 
-    fn active_session(&self) -> Option<SessionId> {
-        self.tabs[self.current_tab]
-            .as_ref()
-            .and_then(Tab::active_session)
-    }
-
-    fn tab_layouts(&self) -> Vec<(SessionId, PaneGeometry)> {
-        let rows = self.terminal_rows();
-        self.tabs[self.current_tab]
-            .as_ref()
-            .map(|tab| {
-                tab.layout(PaneGeometry {
-                    x: 0,
-                    y: 0,
-                    cols: self.cols,
-                    rows,
-                })
-            })
-            .unwrap_or_default()
-    }
-
-    fn tab_dividers(&self) -> Vec<Divider> {
-        let rows = self.terminal_rows();
-        self.tabs[self.current_tab]
-            .as_ref()
-            .map(|tab| {
-                tab.dividers(PaneGeometry {
-                    x: 0,
-                    y: 0,
-                    cols: self.cols,
-                    rows,
-                })
-            })
-            .unwrap_or_default()
-    }
-
-    fn resize_tab(&mut self) {
-        self.resize_tab_at(self.current_tab);
-    }
-
-    fn resize_tab_at(&mut self, index: usize) {
-        let rows = self.terminal_rows();
-        let Some(tab) = self.tabs[index].as_ref() else {
-            return;
-        };
-        for (session_id, geometry) in tab.layout(PaneGeometry {
-            x: 0,
-            y: 0,
-            cols: self.cols,
-            rows,
-        }) {
-            self.session_manager.resize_session(
-                session_id,
-                geometry.rows.max(1),
-                geometry.cols.max(1),
-            );
-        }
-        if index == self.current_tab {
-            self.update_ime_cursor_area();
-        }
-    }
-
-    fn pane_hit_test(&self, x: f64, y: f64) -> Option<PaneHit> {
-        let (col, row) = self.cursor_to_cell(x, y)?;
-        for (session_id, geometry) in self.tab_layouts() {
-            if !geometry.contains_global_cell(col, row) {
-                continue;
+    fn resize_dragged_divider(
+        &mut self,
+        drag: &DividerDrag,
+        x: f32,
+        y: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .terminal
+            .read(cx)
+            .resize_dragged_divider(drag, x, y, self)
+        {
+            if let Some(tab) = self.current_tab {
+                self.resize_tab(tab, cx);
             }
-            let (col, row) = geometry.local_cell(col, row);
-            return Some(PaneHit {
-                session_id,
-                col,
-                row,
-            });
-        }
-        None
-    }
-
-    fn divider_hit_test(&self, x: f64, y: f64) -> Option<Divider> {
-        const HIT_SLOP: f64 = 6.0;
-        let cell_width = f64::from(self.font_size) / 2.0;
-        let line_height = f64::from(self.line_height);
-        if cell_width <= 0.0 || line_height <= 0.0 {
-            return None;
-        }
-        for divider in self.tab_dividers() {
-            match divider.direction {
-                SplitDirection::Vertical => {
-                    let line_x = cell_width * f64::from(divider.x);
-                    let min_y = line_height * f64::from(divider.y);
-                    let max_y = line_height * f64::from(divider.y + divider.rows);
-                    if (x - line_x).abs() <= HIT_SLOP
-                        && y >= min_y - HIT_SLOP
-                        && y <= max_y + HIT_SLOP
-                    {
-                        return Some(divider);
-                    }
-                }
-                SplitDirection::Horizontal => {
-                    let line_y = line_height * f64::from(divider.y);
-                    let min_x = cell_width * f64::from(divider.x);
-                    let max_x = cell_width * f64::from(divider.x + divider.cols);
-                    if (y - line_y).abs() <= HIT_SLOP
-                        && x >= min_x - HIT_SLOP
-                        && x <= max_x + HIT_SLOP
-                    {
-                        return Some(divider);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    fn cursor_to_grid_position(&self, x: f64, y: f64) -> Option<(f32, f32)> {
-        if self.font_size <= 0.0 || self.line_height <= 0.0 {
-            return None;
-        }
-        let cell_width = self.font_size / 2.0;
-        let col = (x.max(0.0) as f32 / cell_width).clamp(0.0, f32::from(self.cols));
-        let row =
-            (y.max(0.0) as f32 / self.line_height).clamp(0.0, f32::from(self.terminal_rows()));
-        Some((col, row))
-    }
-
-    fn set_active_session(&mut self, session_id: SessionId) {
-        let Some(tab) = self.tabs[self.current_tab].as_mut() else {
-            return;
-        };
-        if tab.set_active_session(session_id) {
             self.wheel_remainder = 0.0;
-            self.update_ime_cursor_area();
-            self.request_redraw();
+            cx.notify();
         }
     }
 
-    fn focus_next_pane(&mut self) -> Option<SessionId> {
-        let tab = self.tabs[self.current_tab].as_mut()?;
-        let next = tab.focus_next()?;
-        self.wheel_remainder = 0.0;
-        self.update_ime_cursor_area();
-        self.request_redraw();
-        Some(next)
-    }
-
-    fn resize_active_pane(&mut self, direction: SplitDirection, delta_first: i16) {
-        let area = PaneGeometry {
-            x: 0,
-            y: 0,
-            cols: self.cols,
-            rows: self.terminal_rows(),
-        };
-        let Some(tab) = self.tabs[self.current_tab].as_mut() else {
+    fn handle_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some((col, row)) = self.terminal.read(cx).mouse_to_cell(event.position, self) else {
             return;
         };
-        if !tab.resize_active_split(area, direction, delta_first) {
-            return;
-        }
-        self.wheel_remainder = 0.0;
-        self.resize_tab();
-        self.request_redraw();
-    }
-
-    fn resize_dragged_divider(&mut self, drag: &DividerDrag, x: f64, y: f64) {
-        let Some((col, row)) = self.cursor_to_grid_position(x, y) else {
+        let Some((session_id, col, row)) = self.terminal.read(cx).pane_at(col, row, self) else {
             return;
         };
-        let position = match drag.direction {
-            SplitDirection::Vertical => col,
-            SplitDirection::Horizontal => row,
-        };
-        let area = PaneGeometry {
-            x: 0,
-            y: 0,
-            cols: self.cols,
-            rows: self.terminal_rows(),
-        };
-        let Some(tab) = self.tabs[self.current_tab].as_mut() else {
-            return;
-        };
-        if !tab.resize_split_by_position(area, &drag.path, drag.direction, position) {
-            return;
-        }
-        self.wheel_remainder = 0.0;
-        self.resize_tab();
-        self.request_redraw();
-    }
-
-    fn split_current_tab(&mut self, direction: SplitDirection) -> Option<SessionId> {
-        let active_session = self.active_session()?;
-        let (_, geometry) = self
-            .tab_layouts()
-            .into_iter()
-            .find(|(session_id, _)| *session_id == active_session)?;
-
-        let can_split = match direction {
-            SplitDirection::Horizontal => geometry.rows >= 2,
-            SplitDirection::Vertical => geometry.cols >= 2,
-        };
-        if !can_split {
-            return None;
-        }
-
-        let new_rows = match direction {
-            SplitDirection::Horizontal => geometry.rows / 2,
-            SplitDirection::Vertical => geometry.rows,
-        }
-        .max(1);
-        let new_cols = match direction {
-            SplitDirection::Horizontal => geometry.cols,
-            SplitDirection::Vertical => geometry.cols / 2,
-        }
-        .max(1);
-
-        let session_id = match self.session_manager.create_session(
-            new_rows,
-            new_cols,
-            self.default_cwd.as_deref(),
-        ) {
-            Ok(session_id) => session_id,
-            Err(error) => {
-                error!(error = ?error, "failed to split session");
-                return None;
+        let line_height = self.font_size * self.line_height;
+        let lines = match event.delta {
+            ScrollDelta::Lines(lines) => lines.y,
+            ScrollDelta::Pixels(pixels) => {
+                let scale = self.terminal.read(cx).scale.max(f32::EPSILON);
+                f32::from(pixels.y) / (line_height / scale)
             }
         };
-        let tab = self.tabs[self.current_tab].as_mut()?;
-
-        if !tab.split_active(direction, session_id) {
-            return None;
-        }
-
-        self.wheel_remainder = 0.0;
-        self.resize_tab();
-        self.request_redraw();
-        Some(session_id)
-    }
-
-    fn switch_tab(&mut self, tab: usize) -> bool {
-        if tab >= self.tabs.len() {
-            return false;
-        }
-        if self.tabs[tab].is_none() {
-            let id = match self.session_manager.create_session(
-                self.terminal_rows().max(1),
-                self.cols.max(1),
-                self.default_cwd.as_deref(),
-            ) {
-                Ok(id) => id,
-                Err(error) => {
-                    error!(error = ?error, "failed to create tab session");
-                    return false;
-                }
-            };
-            self.tabs[tab] = Some(Tab::new(id));
-        }
-
-        self.current_tab = tab;
-        self.wheel_remainder = 0.0;
-        self.resize_tab();
-        self.update_ime_cursor_area();
-        self.request_redraw();
-        true
-    }
-
-    fn move_session_to_tab(&mut self, session: SessionId, target: usize) -> bool {
-        if target >= self.tabs.len() || target == self.current_tab {
-            return false;
-        }
-        let mut source = None;
-        for (index, tab) in self.tabs.iter_mut().enumerate() {
-            if index == target {
-                continue;
-            }
-            if let Some(tab) = tab.as_mut()
-                && tab.remove_session(session)
-            {
-                source = Some(index);
-                break;
-            }
-        }
-        let Some(source) = source else {
-            return false;
-        };
-        self.detached_sessions.retain(|id| *id != session);
-
-        match self.tabs[target].as_mut() {
-            Some(tab) => {
-                if !tab.split_active(SplitDirection::Vertical, session) {
-                    self.detached_sessions.push(session);
-                }
-            }
-            None => self.tabs[target] = Some(Tab::new(session)),
-        }
-
-        self.current_tab = target;
-        self.wheel_remainder = 0.0;
-        if self.tabs[source]
-            .as_ref()
-            .is_some_and(|tab| !tab.is_empty())
-        {
-            self.resize_tab_at(source);
-        }
-        self.resize_tab();
-        self.request_redraw();
-        true
-    }
-
-    fn detach_active_session(&mut self) -> bool {
-        let Some(active_session) = self.active_session() else {
-            return false;
-        };
-        let Some(tab) = self.tabs[self.current_tab].as_mut() else {
-            return false;
-        };
-        if !tab.remove_session(active_session) {
-            return false;
-        }
-        self.detached_sessions.push(active_session);
-        if self.tabs[self.current_tab]
-            .as_ref()
-            .is_some_and(Tab::is_empty)
-        {
-            self.tabs[self.current_tab] = None;
-            self.switch_to_previous_live_tab_or_stay(self.current_tab);
+        let uses_local_scrollback = self
+            .session_manager
+            .session(session_id)
+            .is_some_and(TerminalSession::uses_local_scrollback);
+        let whole_lines = if uses_local_scrollback {
+            self.take_wheel_steps(lines)
         } else {
-            self.resize_tab();
+            self.wheel_remainder = 0.0;
+            0
+        };
+        if let Some(session) = self.session_manager.session_mut(session_id) {
+            if uses_local_scrollback {
+                if whole_lines != 0 && session.scroll_scrollback(whole_lines) {
+                    cx.notify();
+                }
+            } else {
+                let reset_scrollback = session.reset_scrollback();
+                session.handle_mouse_wheel(lines, &event.modifiers, col, row);
+                if reset_scrollback {
+                    cx.notify();
+                }
+            }
         }
-        self.update_ime_cursor_area();
-        self.request_redraw();
+        self.extend_selection(event.position, cx);
+    }
+
+    /*fn handle_key_up(&mut self, key: &str) -> bool {
+        if key.to_lowercase() == self.action.key {
+            self.resize_mode_held = false;
+            if self.resize_mode_used {
+                self.action_mode = false;
+            }
+            self.resize_mode_used = false;
+            true
+        } else {
+            false
+        }
+    }*/
+
+    fn handle_key_repeat(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.terminal.read(cx).resize_mode_held {
+            let delta = match event.keystroke.key.as_str() {
+                "left" => Some((SplitDirection::Vertical, -1)),
+                "right" => Some((SplitDirection::Vertical, 1)),
+                "up" => Some((SplitDirection::Horizontal, -1)),
+                "down" => Some((SplitDirection::Horizontal, 1)),
+                _ => None,
+            };
+            if let Some((direction, delta)) = delta {
+                self.terminal.update(cx, |this, _| {
+                    this.resize_mode_held = true;
+                });
+                self.resize_active_pane(direction, delta, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+        }
+        if let Some(active_session) = self.active_session() {
+            let consumed = self
+                .session_manager
+                .session_mut(active_session)
+                .is_some_and(|session| session.handle_key_down(event));
+            if consumed {
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+        }
+    }
+
+    pub fn create_session(
+        &mut self,
+        dir: Option<&Path>,
+        tab: Option<usize>,
+        parent: Option<SessionId>,
+        cx: &mut Context<Self>,
+    ) -> Result<SessionId> {
+        let slot = match tab.or(self.current_tab) {
+            Some(slot) if slot < self.tabs.len() => slot,
+            _ => return Err(anyhow!("tab index out of range")),
+        };
+        let cwd = self.default_cwd.clone();
+        let owned_dir = dir.map(PathBuf::from);
+        let path = owned_dir.as_deref().or(cwd.as_deref());
+        let id = self
+            .session_manager
+            .create_session(20, 80, path)
+            .map_err(mlua::Error::external)?;
+        if self.tabs[slot].is_none() {
+            self.tabs[slot] = Some(TerminalTab::new(id));
+        } else {
+            let placed = self.tabs[slot]
+                .as_mut()
+                .map(
+                    |tab| match parent.filter(|id| tab.sessions().contains(id)) {
+                        Some(at) => tab.split_on(at, SplitDirection::Vertical, id),
+                        None => tab.split_active(SplitDirection::Vertical, id),
+                    },
+                )
+                .unwrap_or(false);
+            if !placed {
+                self.session_manager.remove_session(id);
+                return Err(anyhow!("failed to place session"));
+            }
+        }
+        self.resize_tab(slot, cx);
+        Ok(id)
+    }
+
+    pub fn create_remote_session(
+        &mut self,
+        connection: &SshConnection,
+        tab: Option<usize>,
+        parent: Option<SessionId>,
+        cx: &mut Context<Self>,
+    ) -> Result<SessionId> {
+        let slot = match tab.or(self.current_tab) {
+            Some(slot) if slot < self.tabs.len() => slot,
+            _ => return Err(anyhow!("tab index out of range")),
+        };
+        let id = self
+            .session_manager
+            .create_remote_session(20, 80, connection)
+            .map_err(mlua::Error::external)?;
+        if self.tabs[slot].is_none() {
+            self.tabs[slot] = Some(TerminalTab::new(id));
+        } else {
+            let placed = self.tabs[slot]
+                .as_mut()
+                .map(
+                    |tab| match parent.filter(|id| tab.sessions().contains(id)) {
+                        Some(at) => tab.split_on(at, SplitDirection::Vertical, id),
+                        None => tab.split_active(SplitDirection::Vertical, id),
+                    },
+                )
+                .unwrap_or(false);
+            if !placed {
+                self.session_manager.remove_session(id);
+                return Err(anyhow!("failed to place session"));
+            }
+        }
+        self.resize_tab(slot, cx);
+        Ok(id)
+    }
+
+    pub fn split_active(
+        &mut self,
+        direction: SplitDirection,
+        cx: &mut Context<Self>,
+    ) -> Result<SessionId> {
+        let current = self.current_tab.ok_or_else(|| anyhow!("no active tab"))?;
+        if self.active_session().is_none() {
+            return Err(anyhow!("no active session to split"));
+        }
+        let id = self
+            .session_manager
+            .create_session(20, 80, self.default_cwd.as_deref())?;
+        let placed = self.tabs[current]
+            .as_mut()
+            .is_some_and(|tab| tab.split_active(direction, id));
+        if !placed {
+            self.session_manager.remove_session(id);
+            return Err(anyhow!("failed to split the active pane"));
+        }
+        self.resize_tab(current, cx);
+        cx.notify();
+        Ok(id)
+    }
+
+    pub fn attach_session(
+        &mut self,
+        session: SessionId,
+        target: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.session_manager.session(session).is_none() {
+            return false;
+        }
+        let Some(target) = target.or(self.current_tab) else {
+            return false;
+        };
+        let source_tabs = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, tab)| {
+                (index != target
+                    && tab
+                        .as_ref()
+                        .is_some_and(|tab| tab.sessions().contains(&session)))
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if !attach_session_to_tabs(&mut self.tabs, &mut self.detached_sessions, session, target) {
+            return false;
+        }
+        self.current_tab = Some(target);
+        self.wheel_remainder = 0.0;
+        for source in source_tabs {
+            self.resize_tab(source, cx);
+        }
+        self.resize_tab(target, cx);
+        cx.notify();
         true
     }
 
-    fn close_session(&mut self, session: SessionId) -> bool {
+    pub fn detach_session(&mut self, session: SessionId, cx: &mut Context<Self>) -> bool {
+        if self.session_manager.session(session).is_none() {
+            return false;
+        }
+        if !self.detached_sessions.contains(&session) {
+            self.detached_sessions.push(session);
+        }
+        let mut emptied_current = false;
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            let Some(state) = tab.as_mut() else { continue };
+            if state.remove_session(session) && state.is_empty() {
+                *tab = None;
+                emptied_current |= Some(index) == self.current_tab;
+            }
+        }
+        if let Some(current) = self.current_tab {
+            if emptied_current {
+                self.switch_to_previous_live_tab_or_stay(current, cx);
+            } else {
+                self.resize_tab(current, cx);
+            }
+        }
+        self.wheel_remainder = 0.0;
+        cx.notify();
+        true
+    }
+
+    pub fn close_session(&mut self, session: SessionId, cx: &mut Context<Self>) -> bool {
         if self.session_manager.session(session).is_none() {
             return false;
         }
         self.session_manager.remove_session(session);
-        self.detached_sessions.retain(|detached| *detached != session);
+        self.detached_sessions
+            .retain(|detached| *detached != session);
 
         let mut removed_current_tab = false;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
@@ -1286,359 +1147,589 @@ impl App {
             }
             if tab_state.is_empty() {
                 *tab = None;
-                removed_current_tab |= index == self.current_tab;
+                removed_current_tab |= Some(index) == self.current_tab;
             }
         }
+
+        let Some(current_tab) = self.current_tab else {
+            return true;
+        };
 
         if removed_current_tab {
-            self.switch_to_previous_live_tab_or_stay(self.current_tab);
+            self.switch_to_previous_live_tab_or_stay(current_tab, cx);
         } else {
-            self.resize_tab();
+            self.resize_tab(current_tab, cx);
         }
-        self.update_ime_cursor_area();
-        self.request_redraw();
         true
     }
 
-    fn reattach_session(&mut self, session: SessionId, target: usize) -> bool {
-        if target >= self.tabs.len() || !self.detached_sessions.contains(&session) {
+    pub fn switch_tab(&mut self, tab: usize, cx: &mut Context<Self>) -> bool {
+        let terminal = self.terminal.read(cx);
+        if tab >= self.tabs.len() {
             return false;
         }
-        self.detached_sessions.retain(|id| *id != session);
-        match self.tabs[target].as_mut() {
-            Some(tab) => {
-                if !tab.split_active(SplitDirection::Vertical, session) {
-                    self.detached_sessions.push(session);
+        if self.tabs[tab].is_none() {
+            let id = match self.session_manager.create_session(
+                terminal.rows.max(1),
+                terminal.cols.max(1),
+                self.default_cwd.as_deref(),
+            ) {
+                Ok(id) => id,
+                Err(error) => {
+                    tracing::error!(error = ?error, "failed to create tab session");
                     return false;
                 }
-            }
-            None => self.tabs[target] = Some(Tab::new(session)),
+            };
+            self.tabs[tab] = Some(TerminalTab::new(id));
         }
-        self.current_tab = target;
+
+        self.current_tab = Some(tab);
         self.wheel_remainder = 0.0;
-        self.resize_tab();
-        self.update_ime_cursor_area();
-        self.request_redraw();
+        self.resize_tab(tab, cx);
+        //self.update_ime_cursor_area();
+        cx.notify();
         true
     }
 
-    pub fn live_detached_sessions(&self) -> Vec<SessionId> {
-        self.detached_sessions
-            .iter()
-            .copied()
-            .filter(|id| self.session_manager.session(*id).is_some())
-            .collect()
-    }
-
-    fn rename_session(&mut self, session: SessionId, name: &str) -> bool {
-        let Some(session) = self.session_manager.session_mut(session) else {
+    pub fn next_tab(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(curr) = self.current_tab else {
             return false;
         };
-        session.rename(name.to_string());
-        self.request_redraw();
+        self.switch_tab(curr + 1, cx)
+    }
+
+    pub fn prev_tab(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(curr) = self.current_tab else {
+            return false;
+        };
+        self.switch_tab(curr.saturating_sub(1), cx)
+    }
+
+    pub fn move_session(
+        &mut self,
+        from: Option<usize>,
+        to: usize,
+        session: SessionId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(from) = from.or(self.current_tab) else {
+            return false;
+        };
+        if !move_session_between_tabs(&mut self.tabs, from, to, session) {
+            return false;
+        }
+        self.current_tab = Some(to);
+        self.wheel_remainder = 0.0;
+        self.resize_tab(from, cx);
+        self.resize_tab(to, cx);
+        cx.notify();
         true
     }
 
-    fn rename_active(&mut self, name: &str) {
-        let Some(session) = self.active_session() else {
+    fn switch_to_previous_live_tab_or_stay(&mut self, closed_tab: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = (0..self.tabs.len())
+            .map(|offset| (closed_tab + self.tabs.len() - 1 - offset) % self.tabs.len())
+            .find(|&tab| self.tabs[tab].is_some())
+        {
+            self.current_tab = Some(tab);
+            self.wheel_remainder = 0.0;
+            self.resize_tab(tab, cx);
+            return;
+        }
+
+        self.current_tab = Some(closed_tab.min(self.tabs.len().saturating_sub(1)));
+    }
+
+    pub fn resize_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        let terminal = self.terminal.read(cx);
+        let Some(tab) = self.tabs[index].as_ref() else {
             return;
         };
-        self.rename_session(session, name);
-    }
-
-    fn open_status_prompt(&mut self) {
-        self.status_bar_hidden = false;
-        self.status_bar.open(Mode::Command);
-        self.resize_tab();
-        self.request_redraw();
-    }
-
-    fn open_rename_prompt(&mut self) {
-        self.status_bar_hidden = false;
-        let name = self
-            .active_session()
-            .and_then(|id| self.session_manager.session(id))
-            .map(TerminalSession::title)
-            .unwrap_or_default()
-            .to_owned();
-        self.status_bar.open_rename(name);
-        self.resize_tab();
-        self.request_redraw();
-    }
-
-    fn open_lua_prompt(&mut self) {
-        self.status_bar_hidden = false;
-        self.status_bar.open(Mode::Lua);
-        self.resize_tab();
-        self.request_redraw();
-    }
-
-    fn tab_digit_index(code: KeyCode) -> Option<usize> {
-        match code {
-            KeyCode::Digit1 => Some(0),
-            KeyCode::Digit2 => Some(1),
-            KeyCode::Digit3 => Some(2),
-            KeyCode::Digit4 => Some(3),
-            KeyCode::Digit5 => Some(4),
-            KeyCode::Digit6 => Some(5),
-            KeyCode::Digit7 => Some(6),
-            KeyCode::Digit8 => Some(7),
-            KeyCode::Digit9 => Some(8),
-            _ => None,
+        for (session_id, geometry) in tab.layout(PaneGeometry {
+            x: 0,
+            y: 0,
+            cols: terminal.cols,
+            rows: terminal.rows,
+        }) {
+            self.session_manager.resize_session(
+                session_id,
+                geometry.rows.max(1),
+                geometry.cols.max(1),
+            );
         }
     }
 
-    fn terminal_rows(&self) -> u16 {
-        if self.rows > Self::STATUS_BAR_ROWS && !self.status_bar_hidden {
-            self.rows - Self::STATUS_BAR_ROWS
-        } else {
-            self.rows
+    pub fn resize_active_pane(
+        &mut self,
+        direction: SplitDirection,
+        delta_first: i16,
+        cx: &mut Context<Self>,
+    ) {
+        let (rows, cols) = {
+            let terminal = self.terminal.read(cx);
+            (terminal.rows, terminal.cols)
+        };
+        let area = PaneGeometry {
+            x: 0,
+            y: 0,
+            cols,
+            rows,
+        };
+        let Some(current_tab) = self.current_tab else {
+            return;
+        };
+        let Some(tab) = self.tabs[current_tab].as_mut() else {
+            return;
+        };
+        if !tab.resize_active_split(area, direction, delta_first) {
+            return;
         }
+        self.wheel_remainder = 0.0;
+        self.resize_tab(current_tab, cx);
     }
 
-    fn tab_program_name(&self, tab_index: usize) -> &str {
-        self.tabs[tab_index]
+    fn tab_layouts(&self, rows: u16, cols: u16) -> Vec<(SessionId, PaneGeometry)> {
+        let Some(current_tab) = self.current_tab else {
+            return vec![];
+        };
+        self.tabs[current_tab]
             .as_ref()
-            .and_then(Tab::active_session)
-            .and_then(|session_id| self.session_manager.session(session_id))
-            .map_or("shell", |session| session.title())
-    }
-
-    fn status_tabs(&self) -> Option<Vec<StatusTab>> {
-        if self.status_bar_hidden {
-            return None;
-        }
-
-        Some(
-            self.tabs
-                .iter()
-                .enumerate()
-                .filter_map(|(index, tab)| {
-                    tab.as_ref().map(|_| StatusTab {
-                        label: format!("[{}] {}", index + 1, self.tab_program_name(index)),
-                        is_active: index == self.current_tab,
-                    })
+            .map(|tab| {
+                tab.layout(PaneGeometry {
+                    x: 0,
+                    y: 0,
+                    cols,
+                    rows,
                 })
-                .collect(),
-        )
+            })
+            .unwrap_or_default()
     }
 
-    fn handle_ime_event(&mut self, event: Ime) {
-        match event {
-            Ime::Enabled => {
-                self.ime_enabled = true;
-                self.update_ime_cursor_area();
-            }
-            Ime::Preedit(text, _) => {
-                self.ime_preedit = (!text.is_empty()).then_some(text);
-                self.update_ime_cursor_area();
-                self.request_redraw();
-            }
-            Ime::Commit(text) => {
-                self.ime_preedit = None;
-                let Some(active_session) = self.active_session() else {
-                    return;
-                };
-                let reset_scrollback = self
-                    .session_manager
-                    .session_mut(active_session)
-                    .is_some_and(TerminalSession::reset_scrollback);
-                self.session_manager.send_text(active_session, &text);
-                if reset_scrollback {
-                    self.request_redraw();
-                }
-                self.update_ime_cursor_area();
-            }
-            Ime::Disabled => {
-                self.ime_enabled = false;
-                self.ime_preedit = None;
-                self.request_redraw();
-            }
-        }
+    pub fn tab_dividers(&self, rows: u16, cols: u16) -> Vec<Divider> {
+        let Some(current_tab) = self.current_tab else {
+            return vec![];
+        };
+        self.tabs[current_tab]
+            .as_ref()
+            .map(|tab| {
+                tab.dividers(PaneGeometry {
+                    x: 0,
+                    y: 0,
+                    cols,
+                    rows,
+                })
+            })
+            .unwrap_or_default()
     }
 
-    fn update_ime_cursor_area(&self) {
-        if !self.ime_enabled {
+    pub fn active_session(&self) -> Option<SessionId> {
+        self.tabs[self.current_tab?]
+            .as_ref()
+            .and_then(TerminalTab::active_session)
+    }
+
+    pub fn set_active_session(&mut self, id: SessionId) {
+        let Some(tab) = self.current_tab else {
             return;
+        };
+        let Some(tab) = self.tabs[tab].as_mut() else {
+            return;
+        };
+        if tab.set_active_session(id) {
+            self.wheel_remainder = 0.0;
         }
-        let Some(window) = self.window.as_ref() else {
-            return;
-        };
-        let Some(active_session) = self.active_session() else {
-            return;
-        };
-        let Some(session) = self.session_manager.session(active_session) else {
-            return;
-        };
-        let Some((_, geometry)) = self
-            .tab_layouts()
-            .into_iter()
-            .find(|(session_id, _)| *session_id == active_session)
-        else {
-            return;
-        };
+    }
+}
 
-        let (row, col) = session.vt.screen().cursor_position();
-        let cell_width = self.font_size / 2.0;
-        let x = cell_width * (f32::from(geometry.x) + f32::from(col));
-        let y = self.line_height * (f32::from(geometry.y) + f32::from(row));
+/// Keep the existing owner until the destination has accepted the session.
+fn attach_session_to_tabs(
+    tabs: &mut [Option<TerminalTab>],
+    detached_sessions: &mut Vec<SessionId>,
+    session: SessionId,
+    target: usize,
+) -> bool {
+    let Some(destination) = tabs.get_mut(target) else {
+        return false;
+    };
+    if let Some(tab) = destination {
+        let placed = if tab.sessions().contains(&session) {
+            tab.set_active_session(session)
+        } else {
+            tab.split_active(SplitDirection::Vertical, session)
+        };
+        if !placed {
+            return false;
+        }
+    } else {
+        *destination = Some(TerminalTab::new(session));
+    }
+    for (index, tab) in tabs.iter_mut().enumerate() {
+        if index == target {
+            continue;
+        }
+        let Some(state) = tab.as_mut() else {
+            continue;
+        };
+        if state.remove_session(session) && state.is_empty() {
+            *tab = None;
+        }
+    }
+    detached_sessions.retain(|detached| *detached != session);
+    true
+}
 
-        window.set_ime_cursor_area(
-            PhysicalPosition::new(x as i32, y as i32),
-            PhysicalSize::new(cell_width.ceil() as u32, self.line_height.ceil() as u32),
+#[cfg(test)]
+mod session_attachment_tests {
+    use super::{SessionId, SplitDirection, TerminalTab, attach_session_to_tabs};
+
+    fn session(id: u64) -> SessionId {
+        id.to_string().parse().unwrap()
+    }
+
+    #[test]
+    fn attaching_a_detached_session_to_an_empty_tab_reuses_its_id() {
+        let id = session(4);
+        let mut tabs = [None, None];
+        let mut detached = vec![id];
+
+        assert!(attach_session_to_tabs(&mut tabs, &mut detached, id, 1));
+        assert!(tabs[0].is_none());
+        assert_eq!(tabs[1].as_ref().unwrap().sessions(), [id]);
+        assert_eq!(tabs[1].as_ref().unwrap().active_session(), Some(id));
+        assert!(detached.is_empty());
+    }
+
+    #[test]
+    fn attaching_to_an_occupied_tab_preserves_panes_and_focuses_the_session() {
+        let first = session(1);
+        let second = session(2);
+        let detached_id = session(3);
+        let mut destination = TerminalTab::new(first);
+        destination.split_active(SplitDirection::Horizontal, second);
+        let mut tabs = [Some(destination)];
+        let mut detached = vec![detached_id];
+
+        assert!(attach_session_to_tabs(
+            &mut tabs,
+            &mut detached,
+            detached_id,
+            0
+        ));
+        assert_eq!(
+            tabs[0].as_ref().unwrap().sessions(),
+            [first, second, detached_id]
+        );
+        assert_eq!(
+            tabs[0].as_ref().unwrap().active_session(),
+            Some(detached_id)
+        );
+        assert!(detached.is_empty());
+    }
+
+    #[test]
+    fn attaching_an_existing_session_moves_it_once_and_preserves_other_panes() {
+        let id = session(1);
+        let remaining = session(2);
+        let destination_id = session(3);
+        let mut source = TerminalTab::new(id);
+        source.split_active(SplitDirection::Vertical, remaining);
+        let mut tabs = [Some(source), Some(TerminalTab::new(destination_id))];
+        let mut detached = vec![];
+
+        assert!(attach_session_to_tabs(&mut tabs, &mut detached, id, 1));
+        assert_eq!(tabs[0].as_ref().unwrap().sessions(), [remaining]);
+        assert_eq!(tabs[1].as_ref().unwrap().sessions(), [destination_id, id]);
+        assert!(attach_session_to_tabs(&mut tabs, &mut detached, id, 1));
+        assert_eq!(tabs[1].as_ref().unwrap().sessions(), [destination_id, id]);
+        assert_eq!(tabs[1].as_ref().unwrap().active_session(), Some(id));
+        assert!(attach_session_to_tabs(
+            &mut tabs,
+            &mut detached,
+            remaining,
+            1
+        ));
+        assert!(tabs[0].is_none());
+        assert_eq!(
+            tabs[1].as_ref().unwrap().sessions(),
+            [destination_id, id, remaining]
         );
     }
 
-    fn ime_preedit(&self) -> Option<ImePreedit> {
-        let text = self.ime_preedit.as_ref()?;
-        let active_session = self.active_session()?;
-        let session = self.session_manager.session(active_session)?;
-        let (_, geometry) = self
-            .tab_layouts()
-            .into_iter()
-            .find(|(session_id, _)| *session_id == active_session)?;
-        let (row, col) = session.vt.screen().cursor_position();
+    #[test]
+    fn an_invalid_target_or_failed_placement_preserves_session_ownership() {
+        let attached = session(1);
+        let detached_id = session(2);
+        let mut unusable_destination = TerminalTab::new(session(3));
+        unusable_destination.remove_session(session(3));
+        let mut tabs = [Some(TerminalTab::new(attached)), Some(unusable_destination)];
+        let mut detached = vec![detached_id];
 
-        Some(ImePreedit {
-            text: text.clone(),
-            geometry,
-            row,
-            col,
-        })
-    }
-
-    pub fn open_session_in_dir(&mut self, path: &Path) {
-        let next_free = self.tabs.iter().position(|tab| tab.is_none());
-        if let Some(free) = next_free {
-            let id = match self.session_manager.create_session(
-                self.terminal_rows().max(1),
-                self.cols.max(1),
-                Some(path),
-            ) {
-                Ok(id) => id,
-                Err(error) => {
-                    error!(error = ?error, "failed to create session in dir");
-                    return;
-                }
-            };
-            self.tabs[free] = Some(Tab::new(id));
-            self.current_tab = free;
-            self.wheel_remainder = 0.0;
-            self.resize_tab();
-            self.update_ime_cursor_area();
-            self.request_redraw();
-            return;
-        }
-        if self.tabs[self.current_tab].is_some() {
-            let id = match self.session_manager.create_session(
-                self.terminal_rows().max(1),
-                self.cols.max(1),
-                Some(path),
-            ) {
-                Ok(id) => id,
-                Err(error) => {
-                    error!(error = ?error, "failed to create session in dir");
-                    return;
-                }
-            };
-            let Some(tab) = &mut self.tabs[self.current_tab] else {
-                return;
-            };
-            tab.split_active(SplitDirection::Horizontal, id);
-            self.request_redraw();
-        }
-    }
-
-    pub fn create_remote_session(&mut self, session: &SshConnection) {
-        let next_free = self.tabs.iter().position(|tab| tab.is_none());
-        if let Some(free) = next_free {
-            let id = match self.session_manager.create_remote_session(
-                self.terminal_rows().max(1),
-                self.cols.max(1),
-                session,
-            ) {
-                Ok(id) => id,
-                Err(error) => {
-                    error!(error = ?error, "failed to create tab session");
-                    return;
-                }
-            };
-            self.tabs[free] = Some(Tab::new(id));
-            self.current_tab = free;
-            self.wheel_remainder = 0.0;
-            self.resize_tab();
-            self.update_ime_cursor_area();
-            self.request_redraw();
-            return;
-        }
-        if self.tabs[self.current_tab].is_some() {
-            let id = match self.session_manager.create_remote_session(
-                self.terminal_rows().max(1),
-                self.cols.max(1),
-                session,
-            ) {
-                Ok(id) => id,
-                Err(error) => {
-                    error!(error = ?error, "failed to create tab session");
-                    return;
-                }
-            };
-
-            let Some(tab) = &mut self.tabs[self.current_tab] else {
-                return;
-            };
-
-            tab.split_active(SplitDirection::Horizontal, id);
-            self.request_redraw();
-        }
+        assert!(!attach_session_to_tabs(
+            &mut tabs,
+            &mut detached,
+            detached_id,
+            2
+        ));
+        assert!(!attach_session_to_tabs(
+            &mut tabs,
+            &mut detached,
+            detached_id,
+            1
+        ));
+        assert!(!attach_session_to_tabs(
+            &mut tabs,
+            &mut detached,
+            attached,
+            1
+        ));
+        assert_eq!(tabs[0].as_ref().unwrap().sessions(), [attached]);
+        assert_eq!(tabs[0].as_ref().unwrap().active_session(), Some(attached));
+        assert!(tabs[1].as_ref().unwrap().is_empty());
+        assert_eq!(detached, [detached_id]);
     }
 }
 
-pub trait ResultExt {
-    type OK;
+#[derive(Action, Clone, PartialEq)]
+#[action(no_json)]
+struct SwitchTab(usize);
 
-    #[track_caller]
-    fn log(self) -> Self;
-    #[track_caller]
-    fn into_log(self)
-    where
-        Self: Sized,
-    {
-        _ = self.log();
-    }
-    #[track_caller]
-    fn log_assert(self) -> Self::OK;
+#[derive(Action, Clone, PartialEq)]
+#[action(no_json)]
+struct ExecKeybind(LuaFunction);
+
+unsafe impl Send for ExecKeybind {}
+
+#[derive(Action, Clone, PartialEq)]
+#[action(no_json)]
+struct PushError {
+    string: SharedString,
+    autohide: bool,
 }
 
-impl<T, E> ResultExt for std::result::Result<T, E>
-where
-    E: Display,
-{
-    type OK = T;
-
-    #[track_caller]
-    fn log(self) -> Self {
-        if let Err(error) = &self {
-            let caller = Location::caller();
-
-            tracing::error!(
-                error = %error,
-                caller.file = caller.file(),
-                caller.line = caller.line(),
-                caller.column = caller.column(),
-                "Result contained an error"
-            );
+impl PushError {
+    fn new(v: impl ToString) -> Self {
+        Self {
+            string: v.to_string().into(),
+            autohide: false,
         }
+    }
 
+    #[allow(dead_code)]
+    fn autohide(mut self, autohide: bool) -> Self {
+        self.autohide = autohide;
         self
     }
+}
 
-    #[track_caller]
-    fn log_assert(self) -> Self::OK {
-        match self.log() {
-            Ok(value) => value,
-            Err(error) => {
-                panic!("ResultExt::log_assert failed: {error}");
+#[derive(Action, Clone, PartialEq)]
+#[action(no_json)]
+struct PushWarning {
+    string: SharedString,
+    autohide: bool,
+}
+
+impl PushWarning {
+    #[allow(dead_code)]
+    fn new(v: impl ToString) -> Self {
+        Self {
+            string: v.to_string().into(),
+            autohide: true,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn autohide(mut self, autohide: bool) -> Self {
+        self.autohide = autohide;
+        self
+    }
+}
+
+#[derive(Action, Clone, PartialEq)]
+#[action(no_json)]
+struct PushInfo {
+    string: SharedString,
+}
+
+impl PushInfo {
+    #[allow(dead_code)]
+    fn new(v: impl ToString) -> Self {
+        Self {
+            string: v.to_string().into(),
+        }
+    }
+}
+
+#[derive(Action, Clone, PartialEq)]
+#[action(no_json)]
+struct PushLuaPrint {
+    string: SharedString,
+}
+
+impl PushLuaPrint {
+    fn new(v: impl ToString) -> Self {
+        Self {
+            string: v.to_string().into(),
+        }
+    }
+}
+
+pub trait PyTheme {
+    fn theme(&self) -> &Theme;
+}
+
+impl PyTheme for App {
+    #[inline(always)]
+    fn theme(&self) -> &Theme {
+        Theme::global(self)
+    }
+}
+
+impl Global for Theme {}
+
+#[derive(serde::Serialize)]
+pub struct Theme {
+    // Base layers
+    pub background: Rgba,
+    pub surface: Rgba,
+    pub surface_elevated: Rgba,
+
+    // Text
+    pub text: Rgba,
+    pub text_muted: Rgba,
+    pub text_disabled: Rgba,
+
+    // Tabs / list items
+    pub selected: Rgba,
+    pub unselected: Rgba,
+    pub hovered: Rgba,
+    pub selected_border: Rgba,
+    pub unselected_border: Rgba,
+
+    // Accent
+    pub accent: Rgba,
+    pub accent_muted: Rgba,
+
+    // Terminal-specific
+    pub cursor: Rgba,
+    pub cursor_text: Rgba,
+    pub selection: Rgba,
+    pub search_match: Rgba,
+    pub search_match_active: Rgba,
+    pub scrollbar: Rgba,
+    pub scrollbar_hover: Rgba,
+    pub split_divider: Rgba,
+    pub split_divider_active: Rgba,
+
+    // Semantic status
+    pub success: Rgba,
+    pub warning: Rgba,
+    pub error: Rgba,
+    pub info: Rgba,
+
+    // Overlays / popups
+    pub overlay_backdrop: Rgba,
+    pub tooltip_background: Rgba,
+    pub border: Rgba,
+    pub focus_ring: Rgba,
+}
+
+impl Theme {
+    pub fn init(cx: &mut App) {
+        cx.set_global(Theme::new());
+    }
+
+    pub fn apply_component_theme(window: &mut Window, cx: &mut App) {
+        gpui_component::Theme::change(ThemeMode::Dark, Some(window), cx);
+        let selection = rgb_to_hsla(Self::global(cx).selection);
+        gpui_component::Theme::global_mut(cx).selection = selection;
+    }
+
+    #[allow(clippy::eq_op)]
+    fn new() -> Self {
+        Self {
+            // Base layers (kept your background)
+            background: Rgba::new(24.0 / 255.0, 24.0 / 255.0, 24.0 / 255.0, 1.0),
+            surface: Rgba::new(32.0 / 255.0, 32.0 / 255.0, 32.0 / 255.0, 1.0),
+            surface_elevated: Rgba::new(42.0 / 255.0, 42.0 / 255.0, 42.0 / 255.0, 1.0),
+
+            // Text
+            text: Rgba::new(220.0 / 255.0, 220.0 / 255.0, 220.0 / 255.0, 1.0),
+            text_muted: Rgba::new(160.0 / 255.0, 160.0 / 255.0, 160.0 / 255.0, 1.0),
+            text_disabled: Rgba::new(90.0 / 255.0, 90.0 / 255.0, 90.0 / 255.0, 1.0),
+
+            // Tabs / list items
+            selected: Rgba::new(44.0 / 255.0, 44.0 / 255.0, 44.0 / 255.0, 1.0),
+            unselected: Rgba::new(28.0 / 255.0, 28.0 / 255.0, 28.0 / 255.0, 1.0),
+            hovered: Rgba::new(36.0 / 255.0, 36.0 / 255.0, 36.0 / 255.0, 1.0),
+            selected_border: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 1.0),
+            unselected_border: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
+
+            // Accent (one hue, used everywhere emphasis is needed)
+            accent: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 1.0),
+            accent_muted: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 0.25),
+
+            // Terminal-specific
+            cursor: Rgba::new(220.0 / 255.0, 220.0 / 255.0, 220.0 / 255.0, 1.0),
+            cursor_text: Rgba::new(24.0 / 255.0, 24.0 / 255.0, 24.0 / 255.0, 1.0),
+            selection: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 0.3),
+            search_match: Rgba::new(224.0 / 255.0, 175.0 / 255.0, 104.0 / 255.0, 0.4),
+            search_match_active: Rgba::new(224.0 / 255.0, 175.0 / 255.0, 104.0 / 255.0, 0.8),
+            scrollbar: Rgba::new(255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0, 0.12),
+            scrollbar_hover: Rgba::new(255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0, 0.25),
+            split_divider: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
+            split_divider_active: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 1.0),
+
+            // Semantic status (bell, exit codes, warnings, etc.)
+            success: Rgba::new(158.0 / 255.0, 206.0 / 255.0, 106.0 / 255.0, 1.0),
+            warning: Rgba::new(224.0 / 255.0, 175.0 / 255.0, 104.0 / 255.0, 1.0),
+            error: Rgba::new(247.0 / 255.0, 118.0 / 255.0, 142.0 / 255.0, 1.0),
+            info: Rgba::new(125.0 / 255.0, 207.0 / 255.0, 255.0 / 255.0, 1.0),
+
+            // Overlays / popups
+            overlay_backdrop: Rgba::new(0.0, 0.0, 0.0, 0.5),
+            tooltip_background: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
+            border: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
+            focus_ring: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 1.0),
+        }
+    }
+}
+
+#[cfg(test)]
+mod theme_readability_tests {
+    use super::Theme;
+    use gpui::Rgba;
+
+    fn luminance(color: Rgba) -> f32 {
+        let channel = |v: f32| {
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color.red) + 0.7152 * channel(color.green) + 0.0722 * channel(color.blue)
+    }
+
+    #[test]
+    fn supporting_text_and_search_matches_remain_readable_on_ui_surfaces() {
+        let theme = Theme::new();
+        for background in [
+            theme.background,
+            theme.surface,
+            theme.surface_elevated,
+            theme.selected,
+            theme.hovered,
+        ] {
+            for foreground in [
+                theme.text,
+                theme.text_muted,
+                theme.accent,
+                theme.search_match,
+                theme.search_match_active,
+            ] {
+                // Search match tokens are rendered as opaque text, with an underline.
+                let contrast = (luminance(foreground) + 0.05) / (luminance(background) + 0.05);
+                assert!(contrast >= 4.5, "text contrast {contrast} is below 4.5:1");
             }
         }
     }

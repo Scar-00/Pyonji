@@ -1,3 +1,18 @@
+---@alias Os
+---| 'windows'
+---| 'linux'
+---| 'macos'
+---| 'unknown'
+
+---@return Os
+function Os()
+    local current_os = os.getenv("OS") or "";
+    if string.match(current_os, "Windows") then
+        return 'windows';
+    end
+    return 'unknown';
+end
+
 local function replace_root(dir)
     local active = py.active_session;
     local main = py:create_session(dir, 1);
@@ -52,7 +67,7 @@ function PY(current)
         main = py:create_session("C:/dev/learning/pyonji", next_tab)
     end
     py:rename(main, "nvim-py");
-    py:write_to(main, "nvim .\r");
+    py:write(main, "nvim .\r");
 end
 
 local function open(path)
@@ -60,8 +75,9 @@ local function open(path)
     if tab == nil then
         return;
     end
-    py:create_session(path, tab);
+    local session = py:create_session(path, tab);
     py:switch_tab(tab);
+    return session;
 end
 
 py:register("open", open);
@@ -77,18 +93,8 @@ py:config({
             ip = "192.168.178.20",
         }
     },
+    status_height = 0.75,
 });
-
---[[Workspaces = {};
-
-local function create_workspace(name)
-    local workspace = { tabs = py.sessions };
-    for _, tab in pairs(py.sessions) do
-        for _, session in tab do
-            py:detach(session);
-        end
-    end
-end]]--
 
 function NextFreeTab()
     local tab_count = #py.sessions;
@@ -98,17 +104,30 @@ function NextFreeTab()
     return nil;
 end
 
----@alias Os
----| 'windows'
----| 'linux'
----| 'macos'
----| 'unknown'
-
----@return Os
-function Os()
-    local current_os = os.getenv("OS") or "";
-    if string.match(current_os, "Windows") then
-        return 'windows';
+py:bind('<ctrl-b> p', py.open_palette());
+py:bind('<ctrl-b> l', py.open_lua());
+py:bind('<ctrl-b> r', py.open_rename());
+py:bind('<ctrl-b> f', py.open_sessions());
+py:bind('<ctrl-b> o', function ()
+    local session = open("/home/ahri/dev/core/");
+    if session ~= nil then
+        py:write(session, "nvim core.h\r");
     end
-    return 'unknown';
+end);
+
+for i = 1, 9 do
+    py:bind('<ctrl-b> ' .. i, py.switch_tab(i - 1));
 end
+
+py:config({
+    editor = "nvim",
+});
+
+py:bind('<alt-shift> q', function()
+    py:close(py.active_session);
+end)
+
+py:bind('<ctrl-b> v', py.split('v'));
+py:bind('<ctrl-b> h', py.split('h'));
+
+py:bind('<ctrl-b> d', py.detach());

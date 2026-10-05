@@ -28,26 +28,13 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-fn srgb_channel_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        return c / 12.92;
-    }
-    return pow((c + 0.055) / 1.055, 2.4);
-}
-
-fn to_linear(srgba: vec4<u32>) -> vec4<f32> {
-    let c = vec4<f32>(srgba) / 255.0;
-    return vec4<f32>(
-        srgb_channel_to_linear(c.r),
-        srgb_channel_to_linear(c.g),
-        srgb_channel_to_linear(c.b),
-        c.a,
-    );
-}
-
+// NOTE: GPUI composites in pass-through sRGB (native swapchains are
+// Bgra8Unorm, atlas textures are Unorm, no shader in gpui_wgpu converts):
+// vertex colors are already sRGB-encoded bytes, so just normalize them.
+// Converting to linear here would render everything darker than authored.
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return to_linear(in.color);
+    return vec4<f32>(in.color) / 255.0;
 }
 ";
 
@@ -193,13 +180,7 @@ impl BackgroundRenderer {
             pos: [x + w, y + h],
             color,
         });
-        self.indices.extend_from_slice(&[
-            idx,
-            idx + 1,
-            idx + 2,
-            idx + 1,
-            idx + 2,
-            idx + 3,
-        ]);
+        self.indices
+            .extend_from_slice(&[idx, idx + 1, idx + 2, idx + 1, idx + 2, idx + 3]);
     }
 }

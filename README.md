@@ -1,115 +1,263 @@
- Pyonji
+# Pyonji
 
-A GPU-accelerated terminal emulator written in Rust with Lua configuration, SSH support, and an in-app command palette.
+A terminal emulator whose grid is drawn on the GPU, configured from Lua.
 
-## Features
+## What it does
 
-- GPU-accelerated rendering via wgpu (Vulkan)
-- Multi-tab support (up to 9 tabs) with split panes
-- VT100/xterm terminal emulation with 2000-line scrollback
-- 256-color + true color (24-bit) ANSI support (Catppuccin-inspired palette)
-- Multiple cursor styles (Bar, Block, Underline)
-- Pane splitting (horizontal/vertical) with mouse drag resize
-- Overlay/HUD system with fuzzy-search command palette
-- SSH remote session management
-- Self-update from GitHub releases
-- In-app directory picker for opening sessions in a chosen folder
-- Lua-based configuration with hot-reloading
-- IME support with preedit rendering
-- Multiple bundled fonts (Iosevka, NotoSansMonoCJK, Nerd Font icons)
+- **GPU-drawn grid.** One wgpu render pass per frame, with three pipelines:
+  the window background, the terminal grid, and the pane dividers. Glyphs and
+  cell backgrounds are both submitted as GPU primitives rather than composited
+  on the CPU. The backend is whatever wgpu selects for the platform — it is not
+  pinned to Vulkan.
+- **Terminal emulation** via [vt100](https://github.com/doy/vt100-rust), with
+  2000 lines of scrollback.
+- **Tabs and split panes.** Up to 9 tabs, each holding a tree of splits
+  (horizontal or vertical).
+- **Colour.** A fixed 16-colour palette, the standard xterm 6×6×6 cube and
+  grayscale ramp for 256-colour, and 24-bit truecolor passed straight through.
+  The 16 base colours are not configurable.
+- **Cursor shape** follows the terminal's own `DECSCUSR` sequence — bar, block
+  or underline — so applications that set it are honoured.
+- **IME preedit** and clipboard paste on <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd>.
+- **SSH sessions** over libssh2, declared in the config.
+- **Overlays** for the command palette, the session list, a directory picker,
+  and the release screen.
+- **A command palette**, over one command table: everything
+  Pyonji can do, one entry per configured SSH host, and one per callback the
+  config registers.
+- **A status bar** that doubles as a prompt: tab chips, a session rename field,
+  and a `>` Lua line with LSP completion.
+- **Self-update** from GitHub releases, showing which build matches the
+  machine it is running on.
+- **Lua configuration**, reloaded from disk when it changes and written on
+  first run if missing.
+- **Bundled fonts** — nothing to install. Iosevka Term across nine weights,
+  Iosevka, Noto Sans Mono CJK, Nerd Fonts for icons, and Noto Emoji for
+  monochrome emoji in the terminal foreground colour.
 
-## Requirements
+There is no image protocol (sixel, iTerm inline images) and no session
+multiplexer.
 
-- Rust 1.85+ (Edition 2024)
-- Windows (uses `cmd.exe` by default)
+## Building
 
-Fonts are bundled — no manual font installation required.
+### Prerequisites
 
-## Installation
+- Rust 1.95 or newer, as required by GPUI.
+- Git and the platform's C/C++ build tools for native dependencies.
+
+Cargo fetches [the GPUI fork](https://github.com/Scar-00/gpui-ce-fork)
+and [the component fork](https://github.com/Scar-00/gpui-component-fork)
+directly from GitHub. No sibling checkouts are required. The GPUI revision
+is pinned in `Cargo.toml`, including the patches used by the component crates.
+
+On Debian/Ubuntu, install the native development libraries used by GPUI:
 
 ```bash
-cargo build --release
+sudo apt-get install libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-randr0-dev libxcb-xinput-dev libegl1-mesa-dev libgles2-mesa-dev libglib2.0-dev libfontconfig-dev libssl-dev
 ```
 
-Run in portable mode from the project directory, or install:
+### Build
+
+```bash
+cargo build --locked --release
+```
+
+Run it in place, reading `./init.lua`:
+
+```bash
+cargo run --release
+```
+
+Build with the `install` feature for a machine-wide install. The config then
+lives in the platform config directory (`%LOCALAPPDATA%\pyonji\init.lua` on
+Windows) instead of the working directory:
 
 ```bash
 cargo build --release --features install
 ```
 
-## Usage
+### Passing a starting directory
 
 ```bash
-cargo run --release [path]
+cargo run --release -- ~/dev/project
 ```
 
-Pass an optional path to start a session in a specific directory.
+The single optional positional argument is the directory the first session
+opens in. Without it, `default_cwd` from the config is used, falling back to
+the process working directory.
 
-### Tabs & Panes
+### Releases
 
-Press `Ctrl+B` then release, followed by:
+Pushing a `v*` tag builds three binaries and attaches them to a GitHub
+release, which is where the in-app updater looks:
 
-| Key | Action |
-|-----|--------|
-| `1`–`9` | Switch to / create tab |
-| `K` | Next tab |
-| `J` | Previous tab |
-| `H` | Split pane horizontally |
-| `V` | Split pane vertically |
-| `W` | Focus next pane |
-| `R` | Reload config |
-| `S` | Toggle status bar |
-| `P` | Open command palette |
+| Target | Feature |
+|---|---|
+| `x86_64-unknown-linux-gnu` | — |
+| `x86_64-pc-windows-msvc` | `install` |
+| `aarch64-apple-darwin` | — |
 
-Hold `Ctrl+B` and press **Arrow Keys** to resize the active pane.
+Pull requests are built and linted with `clippy -D warnings`.
 
-### Overlay
+## Configuration
 
-| Shortcut | Overlay |
-|----------|---------|
-| `Ctrl+Shift+F` or `Ctrl+B` `P` | Command palette (fuzzy search) |
-| `Ctrl+Shift+S` | Sessions list |
-| `Escape` | Close current overlay |
+The config is a Lua file executed on load, not a table to return. It is
+re-executed whenever it changes on disk.
 
-Within an overlay, use **Arrow Keys** to navigate, **Enter** to confirm, and **Tab** for auto-complete (command palette).
-
-### Mouse
-
-- Left click a pane to focus it
-- Drag dividers to resize splits
-- Scroll wheel for scrollback / alternate screen scrolling
-
-### Configuration
-
-Create an `init.lua` file in the project directory (or `%LOCALAPPDATA%/pyonji/` with the `install` feature):
+By default it is `./init.lua`; with the `install` feature it is
+`<config dir>/pyonji/init.lua`. A commented starter file is written on first
+run.
 
 ```lua
-return {
-  font_family = "Iosevka Term",
-  font_size = 24,
-  line_height = 28/24,
-  fullscreen = false,
-  default_cwd = "C:\\Users\\me\\projects",
-  ssh_sessions = {
-    { name = "server", user_name = "root", ip = "192.168.1.100" }
-  },
-  open_palette = "<ctrl>-p",
-}
+py:config({
+    font_family = "Iosevka",
+    font_size = 24,
+    line_height = 1.1,      -- a multiple of font_size
+    fullscreen = false,
+    default_cwd = nil,
+    editor = "nvim",        -- typed into a session when the opener picks a file
+    ssh_sessions = {
+        { name = "server", user_name = "root", ip = "192.168.1.100" },
+    },
+})
 ```
 
-Config changes are applied automatically at runtime.
+`resources/default.lua` is meant to be the annotated reference for the `py`
+object. Treat it as a draft: it lists several methods that are not implemented
+(see below).
 
-## Tech Stack
+### Keybindings
 
-- [wgpu](https://wgpu.rs/) — GPU rendering (Vulkan)
-- [winit](https://github.com/rust-windowing/winit) — Window management
-- [vt100](https://github.com/doy/vt100-rust) — Terminal emulation
-- [portable-pty](https://github.com/wez/wezterm) — PTY handling
-- [ratatui](https://ratatui.rs/) — Overlay UI framework
-- [mlua](https://github.com/khvzak/mlua) — Lua config integration
-- [swash](https://github.com/BrianSharpe/swash) — Font shaping
-- [nucleo-matcher](https://github.com/helix-editor/nucleo) — Fuzzy matching
+Open Commands with **Ctrl+Shift+P**. Use
+**Ctrl+Shift+C** to copy selected terminal text and **Ctrl+Shift+V** to paste.
+Drag to select output; hold **Shift** to select locally in mouse-enabled apps.
+Selection is scoped to that pane and
+clears when its output changes or it is resized. Scrollback can be selected,
+and scrolling during a drag extends the selection into history.
+
+Keys are bound from Lua and can be remapped:
+
+```lua
+py:bind('<ctrl-b> f', py.open_sessions())
+py:bind('<ctrl-b> r', py.open_rename())
+py:bind('<ctrl-b> 1', py.switch_tab(0))   -- first tab
+py:bind('<ctrl-b> v', py.split('v'))
+```
+
+`py:bind` takes a binding string and a callback. A method called with `py:`
+returns its value; called as `py.method` it returns the callback to bind. The
+`(modifiers, key, callback)` form works too, and is the same binding written
+out:
+
+```lua
+py:bind({ "ctrl", "shift" }, "F", py.open_sessions())   -- '<ctrl-shift> F'
+```
+
+A binding whose modifiers are followed by another word is a *sequence*, not a
+chord: `'<ctrl-b> f'` waits for <kbd>Ctrl</kbd>+<kbd>B</kbd> and then for
+<kbd>F</kbd>, like a prefix key. `<ctrl-shift>F` is the chord.
+
+`py.open_palette()` binds as the Commands action. Other callbacks run through Lua.
+
+Inside an overlay, <kbd>↑</kbd><kbd>↓</kbd> move, <kbd>Enter</kbd> confirms
+and <kbd>Esc</kbd> closes — with two deliberate exceptions: on the release
+screen <kbd>Esc</kbd> clears the version filter first, and on the palette it
+clears arguments first, then the command filter. Both close on the press that finds
+nothing left to peel.
+
+### Commands
+
+Commands uses one command table.
+
+The **palette** (`py:open_palette()`) is a command line with the matching
+commands listed under it. <kbd>Tab</kbd> completes the word being typed, and
+pressing it again offers the next-best match. The list is fuzzy-matched on the
+name, the summary and the placeholders, and grouped by where each command came
+from.
+
+For a prefix sequence, bind Commands with:
+
+```lua
+py:bind('<ctrl-b> p', py.open_palette())
+```
+
+The built-in commands are `switch`, `next-tab`, `prev-tab`, `close`,
+`move-to`, `split-h`, `split-v`, `focus-next-pane`, `detach`, `detached`, `rename`, `ssh`,
+`open-in`, `sessions`, `releases`, `commands`, `lua` and `reload-config`. Tabs
+are written 1-based, the way the status bar counts them; sessions by the bare
+number the status bar shows.
+
+`py:register` puts a callback in the same table, so it is reachable from both
+surfaces. The argument names are read off the Lua function and show up as
+placeholders:
+
+```lua
+py:register("open", function (path, tab)
+    local id = py:create_session(path, tab);
+    py:write(id, "nvim .\r");
+end);
+```
+
+### Opening things
+
+| Call | Opens |
+|---|---|
+| `py:open_palette()` | command palette |
+| `py:open_sessions()` | session list |
+| `py:open_detached()` | detached sessions and attachment destination |
+| `py:open_opener()` | directory picker |
+| `py:open_releases()` | release screen and updater |
+| `py:open_rename()` | rename the focused session |
+| `py:open_lua()` | `>` prompt in the status bar |
+
+The detached session view is available through `detached` in the command
+palette, or a configured binding:
+
+```lua
+py:bind('<ctrl-b> d', py.open_detached())
+```
+
+Search by name or session number and choose with <kbd>↑</kbd>/<kbd>↓</kbd>.
+Press <kbd>Enter</kbd> to attach to the current tab, or
+<kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>9</kbd> to attach directly to that tab.
+An occupied tab gains a split; an empty tab uses the existing session
+without starting another process. <kbd>Esc</kbd> clears a search first,
+then closes the view. The general session list also puts detached sessions
+first, while **Switch** focuses sessions already in tabs.
+
+## Not implemented
+
+`resources/default.lua` annotates four methods that `config.rs` never
+registers, so calling them from a config errors: `toggle_fullscreen`,
+`toggle_decorations`, `toggle_status_bar` and `quit`. It also documents a
+`status_height` config field that nothing reads.
+
+The Lua prompt keeps no history. Its line lives inside the prompt's own view
+rather than on the bar, which is also why <kbd>↑</kbd> and <kbd>↓</kbd> there
+move the language server's suggestions instead of walking what came before.
+
+`resources/main.ts` was the palette's first prototype, in TypeScript for a
+`gpui-shell` host that is not part of the build. The palette in
+`src/ui/overlay/palette.rs` replaces it; the prototype is gone.
+
+## Tech stack
+
+- [wgpu](https://wgpu.rs/) — GPU rasterisation
+- [gpui-ce](https://github.com/Scar-00/gpui-ce-fork) — windowing, input, and the
+  UI toolkit the overlays are built from
+- [gpui-component](https://github.com/gpui-ce/gpui-component) — dialogs,
+  inputs, buttons, scrollbars, and the theme
+- [vt100](https://github.com/doy/vt100-rust) — terminal emulation
+- [portable-pty](https://github.com/wezterm/wezterm) — local PTYs
+- [ssh2](https://github.com/alexcrichton/ssh2-rs) — SSH
+- [swash](https://github.com/BrianSharpe/swash) — font shaping and rasterising
+- [mlua](https://github.com/mlua-rs/mlua) — Lua, vendored build
+- [self_update](https://github.com/jaemk/self_update) — the updater
+- [async-lsp](https://github.com/oxidecomputer/async-lsp) — completion in the
+  Lua prompt
 
 ## License
 
-MIT
+No license file has been added to this repository yet. The bundled Noto Emoji
+font is licensed under the SIL Open Font License 1.1; its license and source
+are in `resources/fonts/NotoEmoji-OFL.txt` and `resources/fonts/NotoEmoji-README.md`.

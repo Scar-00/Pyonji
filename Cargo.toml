@@ -1,43 +1,38 @@
 [package]
 name = "pyonji"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
+rust-version = "1.95"
 
 [features]
 install = []
 
 [dependencies]
 anyhow = "1.0"
-bumpalo = { version = "3.20.2", features = ["collections"] }
-bytemuck = { version = "1.16", features = ["derive"] }
+async-channel = "2.5.0"
+bytemuck = { version = "1.25.2", features = ["derive"] }
 cansi = "2.2.1"
-etagere = "0.2.15"
-swash = "0.2.6"
-pollster = "0.4"
-portable-pty = "0.8"
+etagere = "0.3.0"
+swash = "0.2.10"
+portable-pty = "0.9.0"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-core = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "chrono"] }
 vt100 = "0.16.2"
-wgpu = { version = "29.0.4", default-features = false, features = ["wgsl", "vulkan"] }
-winit = "0.30"
+wgpu = "29.0.3"
 unicode-segmentation = "1.12"
 ahash = "0.8.12"
-fontdb = "0.23.0"
+fontdb = "0.24.0"
 image = "0.25.10"
 clap = { version = "4.6.0", features = ["derive"] }
-vswhom = "0.1.0"
-clipboard = "0.5.0"
 dirs = "6.0.0"
-mlua = { version = "0.12.0", features = ["anyhow", "lua55", "macros", "mlua_derive", "send", "userdata-wrappers", "vendored"] }
+mlua = { version = "0.12.1", features = ["anyhow", "lua55", "macros", "mlua_derive", "async", "userdata-wrappers", "vendored"] }
 serde = { version = "1.0.228", features = ["derive"] }
 notify = "8.2.0"
 derive_more = { version = "2.1.1", features = ["deref", "deref_mut"] }
 git-version = "0.3.9"
 const_format = "0.2.36"
 nucleo-matcher = "0.3.1"
-ratatui = { version =  "0.30.2", features = ["unstable-backend-writer"] }
-ratatui-textarea = { version = "0.9.2" }
-crossterm = { version = "0.29.0", default-features = false, features = ["derive-more", "bracketed-paste", "events"] }
 unicode-width = "0.2.2"
 self_update = { git = "https://github.com/jaemk/self_update", features = ["async"], rev = "63cbf45751b440cbfe008d80ee9ed0f1b4f56112" }
 reqwest = { version = "0.13.4", features = ["json"] }
@@ -50,11 +45,53 @@ async-compat = "0.2.5"
 serde_json = "1.0.150"
 tempfile = "3.27.0"
 self-replace = "1.5.0"
-ratatui-explorer = { version = "0.3.0", default-features = false }
 ssh2 = "0.9.6"
 mio = { version = "1.2.2", features = ["net", "os-poll"] }
-smallvec = "1.15.2"
+smallvec = "1.16.1"
 path-absolutize = "4.0.1"
+gpui = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e", features = ["custom-gpu"], package = "gpui-ce" }
+gpui_platform = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e", features = ["custom-gpu"], package = "gpui_ce_platform" }
+gpui_tokio = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e", package = "gpui_ce_tokio" }
+gpui_wgpu = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e", features = ["custom-gpu"], package = "gpui_ce_wgpu" }
+gpui_ce_components = { git = "https://github.com/Scar-00/gpui-component-fork", features = ["inspector"] }
+gpui_ce_components_base = { git = "https://github.com/Scar-00/gpui-component-fork", features = ["inspector"] }
+gpui_ce_components_assets = { git = "https://github.com/Scar-00/gpui-component-fork" }
+gpui_ce_components_macros = { git = "https://github.com/Scar-00/gpui-component-fork" }
+gpui_ce_components_shell = { git = "https://github.com/Scar-00/gpui-component-fork" }
+rust-embed = "8.11.0"
+chrono = "0.4.45"
+async-lsp = { version = "0.2.4", features = ["async-io"] }
+tower = "0.5.3"
+
+[dev-dependencies]
+#gpui = { git = "https://github.com/gpui-ce/gpui-ce", features = ["test-support"], package = "gpui-ce" }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.30"
+
+[profile.dev.package]
+gpui-ce = { opt-level = 3 }
+gpui_ce_components = { opt-level = 3 }
+
+# Use the same GPUI fork for the component crates' upstream dependencies
+# too, so custom GPU handles and UI elements share the same GPUI types.
+[patch."https://github.com/gpui-ce/gpui-ce"]
+gpui-ce = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_apple = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_collections = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_derive_refineable = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_linux = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_macos = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_macros = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_media = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_platform = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_refineable = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_render = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_scheduler = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_shared_string = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_sum_tree = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_tokio = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_util = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_web = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_wgpu = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui_ce_windows = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
