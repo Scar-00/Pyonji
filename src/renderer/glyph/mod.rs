@@ -212,6 +212,7 @@ impl TerminalRenderer {
         include_bytes!("../../../resources/fonts/JetBrainsMonoNerdFontMono-Regular.ttf");
     const EMOJI_FONT: &[u8] = include_bytes!("../../../resources/fonts/NotoEmoji.ttf");
     const DEFAULT_BUFFER_SIZE: u64 = (1024 * 16) * 32;
+    const MAX_ATLAS_DIMENSION: u32 = 2048;
 
     fn load_glyph(&mut self, variant: FontVariant, id: u16) -> Option<Image> {
         let font = match variant {
@@ -424,16 +425,21 @@ impl TerminalRenderer {
         format: TextureFormat,
     ) -> Self {
         use fontdb::{Database, Family, Query, Stretch, Weight};
-        let tex_limits = device.limits().max_texture_dimension_2d;
+        // GPU limits describe supported dimensions, not a useful atlas size.
+        // Bound allocations and full-atlas uploads when reloading the config.
+        let atlas_dimension = device
+            .limits()
+            .max_texture_dimension_2d
+            .min(Self::MAX_ATLAS_DIMENSION);
 
         let glyph_atlas_allocator = BucketedAtlasAllocator::new(etagere::size2(
-            tex_limits.cast_signed(),
-            tex_limits.cast_signed(),
+            atlas_dimension.cast_signed(),
+            atlas_dimension.cast_signed(),
         ));
 
         let image_atlas_allocator = AtlasAllocator::new(etagere::size2(
-            tex_limits.cast_signed(),
-            tex_limits.cast_signed(),
+            atlas_dimension.cast_signed(),
+            atlas_dimension.cast_signed(),
         ));
 
         let shader = device.create_shader_module(ShaderModuleDescriptor {
@@ -444,8 +450,8 @@ impl TerminalRenderer {
         let glyph_texture = device.create_texture(&TextureDescriptor {
             label: Some("font-atlas-texture"),
             size: Extent3d {
-                width: tex_limits,
-                height: tex_limits,
+                width: atlas_dimension,
+                height: atlas_dimension,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -472,8 +478,8 @@ impl TerminalRenderer {
         let image_texture = device.create_texture(&TextureDescriptor {
             label: Some("font-atlas-texture"),
             size: Extent3d {
-                width: tex_limits,
-                height: tex_limits,
+                width: atlas_dimension,
+                height: atlas_dimension,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -673,11 +679,12 @@ impl TerminalRenderer {
             emoji_font,
             glyph_atlas: glyph_atlas_allocator,
             image_atlas: image_atlas_allocator,
-            atlas_size: [tex_limits as f32, tex_limits as f32],
+            atlas_size: [atlas_dimension as f32, atlas_dimension as f32],
         }
     }
 
-    pub fn evict_glyphs(&mut self, queue: &Queue) {
+    pub fn evict_glyphs(&mut self) {
+        // New glyph uploads overwrite reused regions before they are rendered.
         self.glyph_atlas.clear();
         self.image_atlas.clear();
         self.normal_glyph_map.clear();
@@ -685,9 +692,6 @@ impl TerminalRenderer {
         self.ime_glyph_map.clear();
         self.icon_glyph_map.clear();
         self.emoji_glyph_map.clear();
-        Self::clear_texture(&self.image_atlas_texture, queue);
-        Self::clear_texture(&self.glyph_atlas_texture, queue);
-        queue.submit([]);
     }
 
     pub fn set_font_size(&mut self, font_size: f32) {
@@ -742,26 +746,6 @@ impl TerminalRenderer {
                     .context("failed to load from memory")
             }
         }
-    }
-
-    fn clear_texture(texture: &Texture, queue: &Queue) {
-        let size = texture.size();
-        let empty_data = vec![0u8; (size.width as usize * 4) * size.height as usize];
-        queue.write_texture(
-            TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: Origin3d { x: 0, y: 0, z: 0 },
-                aspect: TextureAspect::All,
-            },
-            &empty_data,
-            TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(size.width * 4),
-                rows_per_image: Some(size.height),
-            },
-            size,
-        );
     }
 
     fn finalize(&mut self, device: &Device, queue: &Queue) {

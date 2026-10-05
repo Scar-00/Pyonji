@@ -122,7 +122,7 @@ impl Renderer {
     }
 
     pub fn evict_glyphs(&mut self) {
-        self.terminal_renderer.evict_glyphs(&self.queue);
+        self.terminal_renderer.evict_glyphs();
     }
 
     pub fn set_font_metrics(&mut self, font_size: f32, line_height: f32) {
