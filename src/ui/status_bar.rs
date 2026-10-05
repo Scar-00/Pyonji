@@ -508,7 +508,7 @@ impl RenderOnce for RenameView {
             state
         });
 
-        h_flex().w_full().child(Input::new(&input_state))
+        h_flex().w_full().child(super::text_input(&input_state, cx))
     }
 }
 
@@ -770,7 +770,7 @@ impl RenderOnce for LuaView {
             h_flex()
                 .w_full()
                 .items_center()
-                .child(Input::new(&input_state)),
+                .child(super::text_input(&input_state, cx)),
         )
     }
 }
