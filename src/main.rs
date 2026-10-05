@@ -111,7 +111,7 @@ fn main() {
 
             let window_options = Pyonji::window_options(cx);
             cx.open_window(window_options, |window, cx| {
-                gpui_component::Theme::change(ThemeMode::Dark, Some(window), cx);
+                Theme::apply_component_theme(window, cx);
 
                 window
                     .spawn(cx, async move |cx| {
@@ -1673,6 +1673,12 @@ pub struct Theme {
 impl Theme {
     pub fn init(cx: &mut App) {
         cx.set_global(Theme::new());
+    }
+
+    pub fn apply_component_theme(window: &mut Window, cx: &mut App) {
+        gpui_component::Theme::change(ThemeMode::Dark, Some(window), cx);
+        let selection = rgb_to_hsla(Self::global(cx).selection);
+        gpui_component::Theme::global_mut(cx).selection = selection;
     }
 
     #[allow(clippy::eq_op)]

@@ -6,7 +6,6 @@ use crate::{EnterLuaRepl, EnterRename, ExecKeybind, OpenPalette, Pyonji};
 use anyhow::{Context as _, Result, anyhow};
 use async_channel::Sender;
 use gpui::{App, Context, Entity, EntityId, KeyBinding, WeakEntity, Window};
-use gpui_component::ThemeMode;
 use mlua::{FromLua, prelude::*};
 use notify::RecursiveMode;
 use path_absolutize::*;
@@ -617,7 +616,7 @@ pub fn load(this: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>) ->
     cx.clear_key_bindings();
     Pyonji::init(cx);
     gpui_component::init(cx);
-    gpui_component::Theme::change(ThemeMode::Dark, Some(window), cx);
+    crate::Theme::apply_component_theme(window, cx);
     this.ssh_sessions.clear();
     this.registered_callbacks.clear();
 
