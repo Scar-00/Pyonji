@@ -3,10 +3,10 @@ use crate::terminal::{SessionId, SplitDirection};
 use crate::ui::OverlayScreen;
 use crate::util::UnsafeRefMut;
 use crate::{EnterLuaRepl, EnterRename, ExecKeybind, OpenPalette, Pyonji};
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{anyhow, Context as _, Result};
 use async_channel::Sender;
 use gpui::{App, Context, Entity, EntityId, KeyBinding, WeakEntity, Window};
-use mlua::{FromLua, prelude::*};
+use mlua::{prelude::*, FromLua};
 use notify::RecursiveMode;
 use path_absolutize::*;
 use std::fmt::Debug;
@@ -598,6 +598,9 @@ pub fn watch(tx: Sender<PtyEvent>) {
                 if matches!(event.kind, EventKind::Modify(_)) {
                     tx.force_send(PtyEvent::ConfigChanged)
                         .expect("event tx closed");
+                }
+                if matches!(event.kind, EventKind::Remove(_)) {
+                    watcher.watch(&path.absolutize()?, RecursiveMode::Recursive)?;
                 }
             }
         };

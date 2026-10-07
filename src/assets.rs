@@ -44,10 +44,10 @@ impl AssetSource for GlobalAssets {
     }
 }
 
-icon_named!(PyonjiAsset, "assets/icons", [Copy]);
+icon_named!(PyonjiAsset, "resources/assets/icons", [Copy]);
 
 #[derive(rust_embed::RustEmbed, Default)]
-#[folder = "assets/"]
+#[folder = "resources/assets"]
 #[include = "icons/**/*.svg"]
 pub struct PyonjiAssetsSource;
 

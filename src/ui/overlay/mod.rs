@@ -117,6 +117,19 @@ impl Overlay {
                 (None, Some(height)) => dialog.h(height),
                 (None, None) => dialog.h_4_5(),
             };
+            if matches!(screen, OverlayScreen::Releases) {
+                let releases = this.releases.clone();
+                // The release panes own their scrolling. Dialog children are
+                // otherwise wrapped in an auto-height scroll area.
+                return dialog.content(move |content, _, _| {
+                    content
+                        .size_full()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .p_1()
+                        .child(releases.clone())
+                });
+            }
             dialog.child(div().size_full().p_1().child(match screen {
                 OverlayScreen::Palette => this.palette.clone().into_any_element(),
                 OverlayScreen::Sessions => this.sessions.clone().into_any_element(),

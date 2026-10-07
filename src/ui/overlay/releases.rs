@@ -694,19 +694,26 @@ impl ReleasesView {
     ) -> impl IntoElement {
         let theme = cx.theme();
 
-        v_flex()
-            .id("releases-rail")
-            .role(gpui::accesskit::Role::ListBox)
-            .aria_label("Release versions")
+        div()
+            .relative()
+            .min_h_0()
             .when(compact, |rail| rail.w_full().h(px(ROW * 2.0)).border_b_1())
             .when(!compact, |rail| rail.w(px(RAIL)).border_r_1())
             .when(!compact, |rail| rail.flex_shrink_0())
             .when(compact, |rail| rail.flex_shrink_1().min_h_0())
             .border_color(theme.border)
-            .overflow_y_scroll()
-            .track_scroll(&self.rail_scroll)
+            .overflow_hidden()
+            .child(
+                v_flex()
+                    .id("releases-rail")
+                    .role(gpui::accesskit::Role::ListBox)
+                    .aria_label("Release versions")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.rail_scroll)
+                    .children(entries.iter().map(|e| self.render_version(e, cx))),
+            )
             .scrollbar(&self.rail_scroll, ScrollbarAxis::Vertical)
-            .children(entries.iter().map(|e| self.render_version(e, cx)))
     }
 
     fn render_version(&self, entry: &Entry, cx: &Context<Self>) -> impl IntoElement {
@@ -887,6 +894,7 @@ impl ReleasesView {
             .when(!compact, |body| body.flex_row())
             .flex_1()
             .min_h_0()
+            .overflow_hidden()
             // `h_flex` centres children on the cross axis; the panes fill it.
             .items_stretch()
             .child(self.render_rail(entries, compact, cx))
@@ -917,61 +925,78 @@ impl ReleasesView {
                 .into_any_element();
         };
 
-        v_flex()
-            .id("releases-manifest")
+        // The scrollbar overlays the viewport; it must not scroll with its text.
+        div()
+            .relative()
             .min_h_0()
             .flex_1()
             .min_w_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.body_scroll)
-            .scrollbar(&self.body_scroll, ScrollbarAxis::Vertical)
+            .overflow_hidden()
             .child(
                 v_flex()
-                    .w_full()
-                    .gap_5()
-                    .px_3()
-                    .py_3()
+                    .id("releases-manifest")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.body_scroll)
                     .child(
                         v_flex()
-                            .gap_1()
+                            .w_full()
+                            .flex_shrink_0()
+                            .gap_5()
+                            .px_3()
+                            .py_3()
                             .child(
-                                div()
-                                    .font_family(mono(cx))
-                                    .text_size(px(30.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .letter_spacing(px(-0.5))
-                                    .line_height(relative(1.1))
-                                    .text_color(theme.text)
-                                    .child(entry.version.clone()),
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .font_family(mono(cx))
+                                            .text_size(px(30.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .letter_spacing(px(-0.5))
+                                            .line_height(relative(1.1))
+                                            .text_color(theme.text)
+                                            .child(entry.version.clone()),
+                                    )
+                                    .when_some(entry.title.clone(), |this, title| {
+                                        this.child(
+                                            div()
+                                                .text_size(px(15.0))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(theme.text)
+                                                .child(title),
+                                        )
+                                    }),
                             )
-                            .when_some(entry.title.clone(), |this, title| {
-                                this.child(
-                                    div()
-                                        .text_size(px(15.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(theme.text)
-                                        .child(title),
-                                )
-                            }),
-                    )
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_3()
-                            .font_family(mono(cx))
-                            .text_size(px(12.0))
-                            .child(div().text_color(theme.text_muted).child(entry.date.clone()))
-                            .child(rule(theme))
-                            .child(div().text_color(theme.text_muted).child(match entry.mine {
-                                Some(_) => {
-                                    format!("{} builds, 1 for this machine", entry.build_count())
-                                }
-                                None => format!("{} builds", entry.build_count()),
-                            })),
-                    )
-                    .child(self.render_builds(entry, compact, cx))
-                    .child(self.render_notes(entry, cx)),
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .font_family(mono(cx))
+                                    .text_size(px(12.0))
+                                    .child(
+                                        div()
+                                            .text_color(theme.text_muted)
+                                            .child(entry.date.clone()),
+                                    )
+                                    .child(rule(theme))
+                                    .child(div().text_color(theme.text_muted).child(
+                                        match entry.mine {
+                                            Some(_) => {
+                                                format!(
+                                                    "{} builds, 1 for this machine",
+                                                    entry.build_count()
+                                                )
+                                            }
+                                            None => format!("{} builds", entry.build_count()),
+                                        },
+                                    )),
+                            )
+                            .child(self.render_builds(entry, compact, cx))
+                            .child(self.render_notes(entry, cx)),
+                    ),
             )
+            .scrollbar(&self.body_scroll, ScrollbarAxis::Vertical)
             .into_any_element()
     }
 
@@ -1343,6 +1368,8 @@ impl Render for ReleasesView {
             .on_action(cx.listener(Self::on_confirm))
             .on_action(cx.listener(Self::on_cancel))
             .size_full()
+            .min_h_0()
+            .overflow_hidden()
             .child(
                 crate::ui::combo_box::editable_combo_box(
                     "release-search-results",
@@ -1354,6 +1381,7 @@ impl Render for ReleasesView {
                 )
                 .size_full()
                 .min_h_0()
+                .overflow_hidden()
                 .child(self.render_header(compact, window, cx))
                 .child(self.render_body(&entries, compact, cx))
                 .child(self.render_footer(selected, window, cx)),

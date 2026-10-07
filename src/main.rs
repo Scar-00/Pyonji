@@ -154,9 +154,6 @@ struct Pyonji {
     status_bar: Entity<StatusBar>,
     overlay: Entity<Overlay>,
 
-    //icon
-    icon: Arc<Image>,
-
     //jobs
     _event_loop_task: Task<()>,
     _subscriptions: SmallVec<[Subscription; 4]>,
@@ -264,8 +261,6 @@ impl Pyonji {
             terminal: cx.new(|cx| Terminal::new(py.clone(), cx)),
             status_bar: Self::setup_status_bar(window, cx),
             overlay: cx.new(|cx| Overlay::new(py.clone(), window, cx)),
-
-            icon: Arc::new(Image::from_bytes(ImageFormat::Ico, Self::ICON.to_vec())),
 
             _event_loop_task: Self::spawn_event_loop(rx, window, cx),
             _subscriptions: smallvec![],
@@ -663,15 +658,15 @@ impl Pyonji {
             .child(self.status_bar.clone())
     }
 
-    fn render_titlebar(&self) -> Option<TitleBar> {
+    fn render_titlebar() -> Option<TitleBar> {
         cfg_select! {
             windows => {
-                let icon = div()
+                let icon = h_flex()
+                    .justify_center()
                     .text_color(gpui::white())
-                    .size(TITLE_BAR_HEIGHT)
-                    .p_1()
-                    .child(img(self.icon.clone()))
-                    .debug_pink();
+                    .h(TITLE_BAR_HEIGHT)
+                    .w_12()
+                    .child(Icon::new(PyonjiAsset::Icon).size_full());
 
                 let titlebar = TitleBar::new()
                     .child(
@@ -705,7 +700,7 @@ impl Render for Pyonji {
             .on_action(cx.listener(Self::on_info))
             .on_action(cx.listener(Self::on_lua_print))
             .on_action(cx.listener(Self::on_exec))
-            .children(Self::render_titlebar(self))
+            .children(Self::render_titlebar())
             .child(Self::render_main(self, window, cx))
             .children(Root::render_sheet_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
