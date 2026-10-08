@@ -1,10 +1,13 @@
-use crate::Pyonji;
 use crate::renderer::{Pane as RendererPane, *};
 use crate::terminal::{Divider, PaneGeometry, PanePathStep, SessionId, SplitDirection};
+use crate::Pyonji;
 
 use gpui::*;
-use gpui_base::ElementExt as _;
+use gpui_base::ElementExt;
 use gpui_wgpu::{WgpuContextHandle, WgpuRenderTarget};
+
+mod input;
+use input::TerminalInput;
 
 pub struct Terminal {
     pyonji: WeakEntity<Pyonji>,
@@ -19,7 +22,8 @@ pub struct Terminal {
     pub rows: u16,
     pub cols: u16,
 
-    ime_preedit: Option<String>,
+    input: TerminalInput,
+    input_session: Option<SessionId>,
     pub resize_mode_held: bool,
     pub divider_drag: Option<DividerDrag>,
 }
@@ -40,7 +44,8 @@ impl Terminal {
             rows: 20,
             cols: 80,
 
-            ime_preedit: None,
+            input: TerminalInput::default(),
+            input_session: None,
             resize_mode_held: false,
             divider_drag: None,
         }
@@ -52,6 +57,11 @@ impl Terminal {
             f32::from(position.x - bounds.origin.x),
             f32::from(position.y - bounds.origin.y),
         )
+    }
+
+    pub fn clear_ime(&mut self, cx: &mut Context<Self>) {
+        self.input.clear();
+        cx.notify();
     }
 
     pub fn cell_metrics(&self, font_size: f32, line_height: f32) -> Option<(f32, f32)> {
@@ -147,6 +157,17 @@ impl Terminal {
             self.bounds = bounds;
             cx.notify();
         }
+    }
+
+    fn on_paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pyonji) = self.pyonji.upgrade() else {
+            return;
+        };
+        window.handle_input(
+            &pyonji.read(cx).focus_handle,
+            ElementInputHandler::new(bounds, cx.entity()),
+            cx,
+        );
     }
 
     fn clear_gpu_resources(&mut self) {
@@ -245,6 +266,11 @@ impl Terminal {
             return;
         };
         let pyonji = pyonji.read(cx);
+        let active = pyonji.active_session();
+        if self.input_session != active {
+            self.input.clear();
+            self.input_session = active;
+        }
         let Some(target) = self.target.as_ref() else {
             println!("target is none");
             return;
@@ -282,7 +308,7 @@ impl Terminal {
     }
 
     fn ime_preedit(&self, pyonji: &Pyonji) -> Option<ImePreedit> {
-        let text = self.ime_preedit.clone()?;
+        let text = self.input.preedit.clone()?;
         let active_session = pyonji.active_session()?;
         let session = pyonji.session_manager.session(active_session)?;
         let (_, geometry) = pyonji
@@ -305,33 +331,19 @@ impl Render for Terminal {
         container_query(cx.processor(|this, size: Size<Pixels>, window, cx| {
             this.sync_surface(size, window, cx);
             this.paint(cx);
-            let py = this.pyonji.upgrade();
-            let terminal_label = py.as_ref().map(|py| {
-                let py = py.read(cx);
-                py.active_session().and_then(|id| py.session_manager.session(id))
-                    .map(|session| format!("Terminal: {}", session.title()))
-                    .unwrap_or_else(|| "Terminal".to_string())
-            }).unwrap_or_else(|| "Terminal".to_string());
-            let terminal_text = py.as_ref().and_then(|py| {
-                let py = py.read(cx);
-                py.active_session().and_then(|id| py.session_manager.session(id))
-                    .map(|session| session.vt.screen().contents())
-            }).unwrap_or_default();
             div()
                 .on_prepaint(cx.processor(Self::on_prepaint))
+                .on_paint(cx.processor(Self::on_paint))
                 .id("terminal-output")
-                .role(accesskit::Role::Terminal)
-                .aria_label(terminal_label)
-                .aria_value(terminal_text)
-                .aria_description("Drag to select output. Shift-drag overrides application mouse input. Control Shift C copies the selection.")
+                .role(Role::Terminal)
                 .size_full()
+                .relative()
                 .children(this.target.as_ref().map(|target| {
                     target
                         .surface()
                         .object_fit(gpui::ObjectFit::Fill)
                         .size_full()
                 }))
-            //.debug_red()
         }))
         .size_full()
     }
@@ -375,3 +387,18 @@ pub struct DividerDrag {
     pub path: Vec<PanePathStep>,
     pub direction: SplitDirection,
 }
+
+trait PyElementExt: ElementExt {
+    fn on_paint(self, f: impl Fn(Bounds<Pixels>, &mut Window, &mut App) + 'static) -> Self {
+        self.child(
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, cx| f(bounds, window, cx),
+            )
+            .absolute()
+            .size_full(),
+        )
+    }
+}
+
+impl<T: ElementExt> PyElementExt for T {}

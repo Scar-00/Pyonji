@@ -421,7 +421,7 @@ impl RenderOnce for SessionView {
             .id("status-sessions-list")
             .flex_1()
             .min_w_0()
-            .role(accesskit::Role::TabList)
+            .role(Role::TabList)
             .aria_label("Terminal tabs")
             .gap_3()
             .overflow_x_scroll()
@@ -434,7 +434,7 @@ impl RenderOnce for SessionView {
                 Some(
                     h_flex()
                         .id(("sessions-label", i))
-                        .role(accesskit::Role::Tab)
+                        .role(Role::Tab)
                         .tab_index(0)
                         .focus_visible(|style| style.text_color(theme.accent))
                         .aria_selected(selected)

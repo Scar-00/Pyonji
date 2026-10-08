@@ -662,6 +662,11 @@ impl TerminalSession {
     /// Returns `true` when the keystroke was consumed and should not
     /// propagate further (caller should `prevent_default` + `stop_propagation`).
     pub fn handle_key_down(&mut self, event: &KeyDownEvent) -> bool {
+        // Printable input belongs to the platform text handler. In particular,
+        // AltGr must not become a Ctrl shortcut or an Alt-prefixed byte sequence.
+        if uses_text_input(event) {
+            return false;
+        }
         let mods = &event.keystroke.modifiers;
         let key = event.keystroke.key.as_str();
 
@@ -1002,10 +1007,54 @@ impl TerminalSession {
     }
 }
 
+fn uses_text_input(event: &KeyDownEvent) -> bool {
+    let mods = &event.keystroke.modifiers;
+    event.prefer_character_input
+        || (!mods.control
+            && !mods.alt
+            && !mods.platform
+            && !mods.function
+            && (event
+                .keystroke
+                .key_char
+                .as_deref()
+                .is_some_and(|text| !text.is_empty() && !text.chars().any(char::is_control))
+                || event.keystroke.key == "space"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::Modifiers;
+
+    #[test]
+    fn printable_keys_use_platform_input_while_terminal_keys_keep_their_encoding() {
+        let event = |key: &str, held| KeyDownEvent {
+            keystroke: gpui::Keystroke::parse(key).unwrap().with_simulated_ime(),
+            is_held: held,
+            prefer_character_input: false,
+        };
+        for key in ["i", "m", "e", "shift-a", "space"] {
+            assert!(uses_text_input(&event(key, false)), "{key}");
+            assert!(uses_text_input(&event(key, true)), "repeat {key}");
+        }
+        for key in [
+            "enter",
+            "tab",
+            "backspace",
+            "escape",
+            "up",
+            "ctrl-c",
+            "alt-x",
+            "shift-tab",
+        ] {
+            assert!(!uses_text_input(&event(key, false)), "{key}");
+        }
+        let mut altgr = event("ctrl-alt-q", false);
+        altgr.keystroke.key_char = Some("@".into());
+        altgr.prefer_character_input = true;
+        assert!(uses_text_input(&altgr));
+    }
 
     fn session(id: u64) -> SessionId {
         id.to_string().parse().unwrap()

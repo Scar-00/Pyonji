@@ -39,9 +39,8 @@ use clap::Parser;
 use gpui::{prelude::*, *};
 use gpui_base::*;
 use gpui_component::{
-    Icon, Root, ThemeMode, WindowExt,
+    Icon, Root, ThemeMode, TitleBar, WindowExt,
     notification::{Notification, NotificationType},
-    TitleBar,
 };
 use gpui_component_assets as gassets;
 use mlua::prelude::*;
@@ -230,15 +229,19 @@ impl Pyonji {
         window.focus(&focus_handle, cx);
         cx.on_blur(&focus_handle, window, |this, _, cx| {
             this.selection_drag = None;
-            this.terminal
-                .update(cx, |terminal, _| terminal.divider_drag = None);
+            this.terminal.update(cx, |terminal, cx| {
+                terminal.divider_drag = None;
+                terminal.clear_ime(cx);
+            });
         })
         .detach();
         cx.observe_window_activation(window, |this, window, cx| {
             if !window.is_window_active() {
                 this.selection_drag = None;
-                this.terminal
-                    .update(cx, |terminal, _| terminal.divider_drag = None);
+                this.terminal.update(cx, |terminal, cx| {
+                    terminal.divider_drag = None;
+                    terminal.clear_ime(cx);
+                });
             }
         })
         .detach();
@@ -1218,7 +1221,6 @@ impl Pyonji {
         self.current_tab = Some(tab);
         self.wheel_remainder = 0.0;
         self.resize_tab(tab, cx);
-        //self.update_ime_cursor_area();
         cx.notify();
         true
     }
