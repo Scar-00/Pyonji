@@ -195,56 +195,16 @@ impl Pyonji {
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cli = Cli::parse();
-        let lua = unsafe { Lua::unsafe_new() };
-        _ = config::install_inspect(&lua);
-        for (name, source) in config::LUA_MODULES {
-            let function = lua.load(*source).into_function().unwrap();
-            let package: LuaTable = lua.globals().get("package").unwrap();
-            let preload: LuaTable = package.get("preload").unwrap();
-            preload.set(*name, function.clone()).unwrap();
-            function.call::<()>(()).unwrap();
-        }
+
         let (tx, rx) = async_channel::unbounded();
-        {
-            let tx = tx.clone();
-            if let Ok(print) = lua.create_function(move |lua, args: mlua::MultiValue| {
-                let tostring: mlua::Function = lua.globals().get("tostring")?;
-                let mut parts = Vec::new();
-                for value in args {
-                    let text: String = tostring.call(value)?;
-                    parts.push(text);
-                }
-                _ = tx.try_send(Event::LuaPrint(parts.join("\t")));
-                Ok(())
-            }) {
-                _ = lua.globals().set("print", print);
-            }
-        }
+
+        let lua = Self::setup_lua(tx.clone());
 
         Self::init(cx);
 
         config::watch(tx.clone());
 
-        let focus_handle = cx.focus_handle();
-        window.focus(&focus_handle, cx);
-        cx.on_blur(&focus_handle, window, |this, _, cx| {
-            this.selection_drag = None;
-            this.terminal.update(cx, |terminal, cx| {
-                terminal.divider_drag = None;
-                terminal.clear_ime(cx);
-            });
-        })
-        .detach();
-        cx.observe_window_activation(window, |this, window, cx| {
-            if !window.is_window_active() {
-                this.selection_drag = None;
-                this.terminal.update(cx, |terminal, cx| {
-                    terminal.divider_drag = None;
-                    terminal.clear_ime(cx);
-                });
-            }
-        })
-        .detach();
+        let focus_handle = Self::setup_focus_with_observers(window, cx);
 
         let py = cx.weak_entity();
         Self::spawn_inital_session(window, cx);
@@ -310,6 +270,57 @@ impl Pyonji {
         )
         .detach();
         bar
+    }
+
+    fn setup_focus_with_observers(window: &mut Window, cx: &mut Context<Self>) -> FocusHandle {
+        let focus_handle = cx.focus_handle();
+        window.focus(&focus_handle, cx);
+        cx.on_blur(&focus_handle, window, |this, _, cx| {
+            this.selection_drag = None;
+            this.terminal.update(cx, |terminal, cx| {
+                terminal.divider_drag = None;
+                terminal.clear_ime(cx);
+            });
+        })
+        .detach();
+        cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.selection_drag = None;
+                this.terminal.update(cx, |terminal, cx| {
+                    terminal.divider_drag = None;
+                    terminal.clear_ime(cx);
+                });
+            }
+        })
+        .detach();
+        focus_handle
+    }
+
+    fn setup_lua(tx: Sender<Event>) -> Lua {
+        let lua = unsafe { Lua::unsafe_new() };
+        _ = config::install_inspect(&lua);
+        for (name, source) in config::LUA_MODULES {
+            let function = lua.load(*source).into_function().unwrap();
+            let package: LuaTable = lua.globals().get("package").unwrap();
+            let preload: LuaTable = package.get("preload").unwrap();
+            preload.set(*name, function.clone()).unwrap();
+            function.call::<()>(()).unwrap();
+        }
+        {
+            if let Ok(print) = lua.create_function(move |lua, args: mlua::MultiValue| {
+                let tostring: mlua::Function = lua.globals().get("tostring")?;
+                let mut parts = Vec::new();
+                for value in args {
+                    let text: String = tostring.call(value)?;
+                    parts.push(text);
+                }
+                _ = tx.try_send(Event::LuaPrint(parts.join("\t")));
+                Ok(())
+            }) {
+                _ = lua.globals().set("print", print);
+            }
+        }
+        lua
     }
 
     fn spawn_event_loop(
