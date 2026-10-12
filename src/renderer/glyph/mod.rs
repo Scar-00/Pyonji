@@ -203,8 +203,8 @@ pub struct TerminalRenderer {
 }
 
 impl TerminalRenderer {
-    const NORMAL_FONT: &[u8] = include_bytes!("../../../resources/fonts/SGr-IosevkaTerm-Light.ttc");
-    const BOLD_FONT: &[u8] =
+    pub(crate) const NORMAL_FONT: &[u8] = include_bytes!("../../../resources/fonts/SGr-IosevkaTerm-Light.ttc");
+    pub(crate) const BOLD_FONT: &[u8] =
         include_bytes!("../../../resources/fonts/SGr-IosevkaTerm-SemiBold.ttc");
     const IME_FONT: &[u8] =
         include_bytes!("../../../resources/fonts/NotoSansMonoCJKkr-Regular.otf");

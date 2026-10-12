@@ -2,7 +2,10 @@
 
 use std::{collections::HashMap, io::Write as _, path::Path};
 
-use crate::{Next, Prev, PushError, PyTheme as _, Pyonji, Submit};
+use crate::{
+    Next, Prev, PushError, PyTheme as _, Pyonji, Submit,
+    ui::{hint, mono},
+};
 use anyhow::Context as _;
 use async_compat::CompatExt;
 use gpui::{prelude::FluentBuilder as _, *};
@@ -138,6 +141,18 @@ fn describe(triple: &str) -> String {
     } else {
         format!("{platform} {cpu}")
     }
+}
+
+/// Whether dotted version `a` comes before `b`. Parts that are not numbers
+/// count as zero, so an odd tag reads as old rather than failing.
+fn is_older(a: &str, b: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> {
+        v.trim_start_matches('v')
+            .split(['.', '-'])
+            .map(|part| part.parse().unwrap_or(0))
+            .collect()
+    };
+    parts(a) < parts(b)
 }
 
 fn bare_url(url: &str) -> &str {
@@ -445,11 +460,13 @@ impl ReleasesView {
         if entries.is_empty() {
             return;
         }
-        let len = entries.len() as isize;
+        // Stop at the ends, as the palette does: a list that wraps lands on a
+        // release nobody was looking at, one keypress away from installing it.
+        let last = entries.len() as isize - 1;
         let at = entries
             .iter()
             .position(|e| Some(e.ix) == self.selected)
-            .map(|at| (at as isize + delta).rem_euclid(len))
+            .map(|at| (at as isize + delta).clamp(0, last))
             .unwrap_or(0);
         self.select(Some(entries[at as usize].ix), cx);
     }
@@ -585,7 +602,7 @@ impl ReleasesView {
         let releases = self.releases.as_ref()?;
         let newest = releases.first()?;
         if newest.version() == RUNNING {
-            return Some(("the newest release".to_string(), theme.success));
+            return Some(("up to date".to_string(), theme.success));
         }
         Some(if releases.iter().any(|r| r.version() == RUNNING) {
             (format!("v{} is available", newest.version()), theme.warning)
@@ -1210,7 +1227,15 @@ impl ReleasesView {
                     .primary()
                     .small()
                     .rounded(ButtonRounded::None)
+                    // Name what the press does to this binary: the same
+                    // version again, or a step back, is not an "install".
                     .label(match entry {
+                        Some(e) if e.installable() && e.version == RUNNING => {
+                            format!("Reinstall v{}", e.version)
+                        }
+                        Some(e) if e.installable() && is_older(&e.version, RUNNING) => {
+                            format!("Downgrade to v{}", e.version)
+                        }
                         Some(e) if e.installable() => format!("Install v{}", e.version),
                         Some(e) => format!("No build for v{}", e.version),
                         None => "Install".to_string(),
@@ -1223,32 +1248,11 @@ impl ReleasesView {
     }
 
     fn render_hints(&self, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-
-        let hint = |keys: &'static str, what: &'static str| {
-            h_flex()
-                .items_center()
-                .gap_1p5()
-                .child(
-                    div()
-                        .font_family(mono(cx))
-                        .text_size(px(11.0))
-                        .text_color(theme.text)
-                        .child(keys),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme.text_muted)
-                        .child(what),
-                )
-        };
-
         h_flex()
             .flex_shrink_0()
             .gap_4()
-            .child(hint("↑↓", "choose"))
-            .child(hint("⏎", "install"))
+            .child(hint("↑↓", "choose", cx))
+            .child(hint("⏎", "install", cx))
             .child(hint(
                 "esc",
                 if self.search_input.read(cx).value().is_empty() {
@@ -1256,6 +1260,7 @@ impl ReleasesView {
                 } else {
                     "clear filter"
                 },
+                cx,
             ))
     }
 
@@ -1391,12 +1396,6 @@ impl Render for ReleasesView {
 
 // ------------------------------------------------------------------ helpers
 
-fn mono(cx: &App) -> SharedString {
-    gpui_component::ActiveTheme::theme(cx)
-        .mono_font_family
-        .clone()
-}
-
 /// A border or fill that should show nothing still needs a colour.
 fn none() -> Rgba {
     rgba(0x00000000)
@@ -1415,4 +1414,18 @@ struct AssetResult {
     browser_download_url: String,
     #[serde(flatten)]
     _rest: HashMap<String, serde_json::Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_older;
+
+    #[test]
+    fn versions_compare_by_number_not_by_text() {
+        assert!(is_older("0.3.0", "0.4.0"));
+        assert!(is_older("0.9.0", "0.10.0"));
+        assert!(is_older("v1.2", "1.2.1"));
+        assert!(!is_older("0.4.0", "0.4.0"));
+        assert!(!is_older("0.5.0", "0.4.0"));
+    }
 }

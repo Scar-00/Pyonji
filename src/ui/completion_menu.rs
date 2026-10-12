@@ -1,5 +1,6 @@
 //! Compact Lua suggestions with a separate reading area for the selected item.
 
+use super::hint;
 use super::signature_help::SignaturePopover;
 use crate::PyTheme as _;
 use async_lsp::lsp_types::SignatureHelp;
@@ -405,10 +406,10 @@ impl RenderOnce for CompletionMenu {
                                                 .border_t_1()
                                                 .border_color(theme.border)
                                                 .when(!compact, |footer| {
-                                                    footer.child(hint("↑ ↓", "select", cx))
+                                                    footer.child(hint("↑↓", "choose", cx))
                                                 })
-                                                .child(hint("Tab", "insert", cx))
-                                                .child(hint("Esc", "dismiss", cx)),
+                                                .child(hint("tab", "insert", cx))
+                                                .child(hint("esc", "dismiss", cx)),
                                         ),
                                 )
                                 .when(show_details, |popovers| popovers.child(details)),
@@ -439,15 +440,6 @@ fn match_prefix(label: &str, fragment: &str) -> Option<std::ops::Range<usize>> {
         .nth(fragment.chars().count())
         .map_or(label.len(), |(index, _)| index);
     (label[..end].to_lowercase() == fragment.to_lowercase()).then_some(0..end)
-}
-
-fn hint(key: &'static str, action: &'static str, cx: &App) -> impl IntoElement + use<> {
-    h_flex()
-        .items_center()
-        .gap_1p5()
-        .text_size(px(11.0))
-        .child(div().text_color(cx.theme().text).child(key))
-        .child(div().text_color(cx.theme().text_muted).child(action))
 }
 
 fn kind_label(kind: Option<Kind>) -> (&'static str, &'static str) {

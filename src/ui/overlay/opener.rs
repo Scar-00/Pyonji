@@ -5,21 +5,26 @@ use std::{
 };
 
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, ScrollHandle, Window,
-    actions, div, prelude::*,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, ScrollHandle,
+    SharedString, Window, actions, div, prelude::*, px,
 };
+use gpui_base::{h_flex, v_flex};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{
-    Sizable,
-    button::{Button, ButtonVariants},
+    Icon, IconName, Sizable,
+    button::{Button, ButtonRounded, ButtonVariants},
 };
 
-use crate::{Next, Prev, PyTheme, Submit};
+use crate::{
+    Next, Prev, PyTheme, Submit,
+    ui::{hint, mono},
+};
 
 // Two extra actions this component needs on top of Next/Prev/Submit.
 actions!(file_opener, [Parent, Cancel]);
 
 const CONTEXT: &str = "FileOpener";
+const ROW_HEIGHT: f32 = 34.0;
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -236,7 +241,7 @@ impl FileOpener {
             return;
         }
         let next = match self.selected.and_then(|s| vis.iter().position(|&i| i == s)) {
-            Some(pos) => vis[(pos + 1) % vis.len()],
+            Some(pos) => vis[(pos + 1).min(vis.len() - 1)],
             None => vis[0],
         };
         self.select(Some(next), cx);
@@ -248,7 +253,7 @@ impl FileOpener {
             return;
         }
         let prev = match self.selected.and_then(|s| vis.iter().position(|&i| i == s)) {
-            Some(pos) => vis[(pos + vis.len() - 1) % vis.len()],
+            Some(pos) => vis[pos.saturating_sub(1)],
             None => vis[vis.len() - 1],
         };
         self.select(Some(prev), cx);
@@ -293,74 +298,136 @@ impl FileOpener {
 
     // ----------------------------------------------------------------- render
 
-    fn render_breadcrumb(&self, cx: &Context<Self>) -> impl IntoElement {
-        let t = cx.theme();
+    /// The directory as a row of places to jump back to. A drive or share
+    /// prefix and the root after it are one place, `C:\`, not two.
+    fn crumbs(&self) -> Vec<(String, PathBuf)> {
+        use std::path::Component;
         let mut acc = PathBuf::new();
-        let parts: Vec<(String, PathBuf)> = self
-            .cwd
-            .components()
-            .map(|c| {
-                acc.push(c);
-                let label = match c {
-                    std::path::Component::RootDir => "/".to_string(),
-                    other => other.as_os_str().to_string_lossy().to_string(),
-                };
-                (label, acc.clone())
-            })
-            .collect();
-
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .flex_wrap()
-            .gap_1()
-            .text_xs()
-            .text_color(t.text_muted)
-            .children(
-                parts
-                    .into_iter()
-                    .enumerate()
-                    .flat_map(|(i, (label, path))| {
-                        let is_root = label == "/";
-                        let crumb = div()
-                            .id(("crumb", i))
-                            .role(gpui::accesskit::Role::Button)
-                            .tab_index(0)
-                            .focus_visible(|style| style.text_color(t.accent))
-                            .aria_label(format!("Go to {}", path.display()))
-                            .px_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(t.hovered).text_color(t.text))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.set_input_path(&path, window, cx);
-                            }))
-                            .child(label);
-                        let sep =
-                            (!is_root && i > 0).then(|| div().text_color(t.text_muted).child("/"));
-                        sep.into_iter()
-                            .map(IntoElement::into_any_element)
-                            .chain(std::iter::once(crumb.into_any_element()))
-                    }),
-            )
+        let mut parts: Vec<(String, PathBuf)> = Vec::new();
+        for component in self.cwd.components() {
+            acc.push(component);
+            match component {
+                Component::RootDir if parts.len() == 1 => {
+                    let (label, path) = &mut parts[0];
+                    label.push(std::path::MAIN_SEPARATOR);
+                    *path = acc.clone();
+                }
+                Component::RootDir => {
+                    parts.push((std::path::MAIN_SEPARATOR.to_string(), acc.clone()))
+                }
+                other => parts.push((other.as_os_str().to_string_lossy().to_string(), acc.clone())),
+            }
+        }
+        parts
     }
 
+    fn render_breadcrumb(&self, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.theme();
+        let parts = self.crumbs();
+        let last = parts.len().saturating_sub(1);
+
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .flex_wrap()
+            .gap_0p5()
+            .font_family(mono(cx))
+            .text_size(px(12.))
+            .text_color(t.text_muted)
+            .children(parts.into_iter().enumerate().flat_map(|(i, (label, path))| {
+                // The root crumb ends in its own separator; every later crumb
+                // after the second needs one drawn in front of it.
+                let sep = (i > 1).then(|| {
+                    div()
+                        .text_color(t.text_disabled)
+                        .child(std::path::MAIN_SEPARATOR.to_string())
+                });
+                let crumb = div()
+                    .id(("crumb", i))
+                    .role(gpui::accesskit::Role::Button)
+                    .tab_index(0)
+                    .focus_visible(|style| style.text_color(t.accent))
+                    .aria_label(format!("Go to {}", path.display()))
+                    .px_1()
+                    .cursor_pointer()
+                    .when(i == last, |crumb| crumb.text_color(t.text))
+                    .hover(|s| s.bg(t.hovered).text_color(t.text))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_input_path(&path, window, cx);
+                    }))
+                    .child(label);
+                sep.into_iter()
+                    .map(IntoElement::into_any_element)
+                    .chain(std::iter::once(crumb.into_any_element()))
+            }))
+    }
+
+    fn render_hidden_toggle(&self, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.theme();
+        h_flex()
+            .id("toggle-hidden")
+            .role(gpui::accesskit::Role::CheckBox)
+            .tab_index(0)
+            .focus_visible(|style| style.text_color(t.accent))
+            .aria_label("Show hidden files")
+            .aria_toggled(if self.show_hidden {
+                gpui::accesskit::Toggled::True
+            } else {
+                gpui::accesskit::Toggled::False
+            })
+            .flex_shrink_0()
+            .items_center()
+            .gap_1p5()
+            .text_size(px(11.))
+            .cursor_pointer()
+            .text_color(if self.show_hidden {
+                t.text
+            } else {
+                t.text_muted
+            })
+            .hover(|s| s.text_color(t.text))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_hidden(cx)))
+            // A square that fills, the same mark the release rail uses for the
+            // running build: on or off, nothing in between.
+            .child(
+                div()
+                    .size(px(7.))
+                    .border_1()
+                    .border_color(if self.show_hidden {
+                        t.accent
+                    } else {
+                        t.text_muted
+                    })
+                    .when(self.show_hidden, |mark| mark.bg(t.accent)),
+            )
+            .child("Hidden files")
+    }
+
+    /// The path line, ruled like the session search: the rule lights while
+    /// the line has focus.
     fn render_input(&self, window: &mut Window, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.theme();
         let focused = self.path_input.read(cx).focus_handle(cx).is_focused(window);
-        div()
+        h_flex()
             .w_full()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .border_1()
-            .bg(gpui::rgba(0))
+            .h(px(36.))
+            .items_center()
+            .gap_2()
+            .border_b_1()
             .border_color(if focused { t.focus_ring } else { t.border })
+            .font_family(mono(cx))
+            .text_size(px(14.))
             .text_color(t.text)
-            .text_sm()
+            .child(
+                Icon::new(IconName::FolderOpen)
+                    .size_4()
+                    .flex_shrink_0()
+                    .text_color(t.text_muted),
+            )
             .child(
                 Input::new(&self.path_input)
+                    .flex_1()
                     .appearance(false)
                     .bordered(false)
                     .role(gpui_base::RoleOverride::Presentational),
@@ -371,7 +438,7 @@ impl FileOpener {
         let t = cx.theme();
         let selected = self.selected == Some(ix);
 
-        div()
+        h_flex()
             .id(("entry", ix))
             .aria_label(format!(
                 "{} {}",
@@ -382,21 +449,21 @@ impl FileOpener {
             .aria_selected(selected)
             .when(selected, |row| row.aria_active_descendant())
             .w_full()
-            .flex()
-            .flex_row()
+            .h(px(ROW_HEIGHT))
+            .flex_shrink_0()
             .items_center()
-            .gap_2()
-            .px_2()
-            .py_1()
-            .rounded_sm()
+            .gap_3()
+            .px_4()
             .cursor_pointer()
+            // A rule and a raised fill, so selection cannot be mistaken for
+            // hover; the same mark as every other list.
             .border_l_2()
             .border_color(if selected {
                 t.selected_border
             } else {
                 gpui::rgba(0)
             })
-            .bg(if selected { t.selected } else { gpui::rgba(0) })
+            .when(selected, |d| d.bg(t.surface_elevated))
             .when(!selected, |d| d.hover(|s| s.bg(t.hovered)))
             .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
                 if ev.click_count() >= 2 {
@@ -405,34 +472,80 @@ impl FileOpener {
                     this.select(Some(ix), cx);
                 }
             }))
-            // icon
             .child(
-                div()
-                    .w_4()
-                    .text_xs()
-                    .text_color(if e.is_dir { t.accent } else { t.text_muted })
-                    .child(if e.is_dir { "▸" } else { "·" }),
+                Icon::new(if e.is_dir {
+                    IconName::Folder
+                } else {
+                    IconName::File
+                })
+                .size_4()
+                .flex_shrink_0()
+                .text_color(if e.is_dir && selected {
+                    t.accent
+                } else {
+                    t.text_muted
+                }),
             )
-            // name
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .truncate()
-                    .text_sm()
-                    .text_color(t.text)
-                    .when(e.is_dir, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                    .font_family(mono(cx))
+                    .text_size(px(13.))
+                    .text_color(if selected || e.is_dir {
+                        t.text
+                    } else {
+                        t.text_muted
+                    })
                     .child(if e.is_dir {
                         format!("{}/", e.name)
                     } else {
                         e.name.clone()
                     }),
             )
-            // size
-            .child(div().text_xs().text_color(t.text_muted).child(if e.is_dir {
-                String::new()
-            } else {
-                human_size(e.size)
-            }))
+            .when(!e.is_dir, |row| {
+                row.child(
+                    div()
+                        .flex_shrink_0()
+                        .font_family(mono(cx))
+                        .text_size(px(11.))
+                        .text_color(t.text_muted)
+                        .child(human_size(e.size)),
+                )
+            })
+    }
+
+    /// A message where the list would be: what happened, then what to do.
+    fn render_message(
+        &self,
+        heading: impl Into<SharedString>,
+        detail: impl Into<SharedString>,
+        heading_color: gpui::Rgba,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let t = cx.theme();
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .px_6()
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .text_color(heading_color)
+                    .child(heading.into()),
+            )
+            .child(
+                div()
+                    .max_w(px(440.))
+                    .text_size(px(12.))
+                    .text_color(t.text_muted)
+                    .child(detail.into()),
+            )
+            .into_any_element()
     }
 
     fn render_list(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -446,35 +559,37 @@ impl FileOpener {
                 .justify_center()
                 .text_sm()
                 .text_color(t.text_muted)
-                .child("Loading…")
+                .child("Reading directory…")
                 .into_any_element();
         };
 
         if let Some(err) = &self.listing.error {
-            return div()
-                .flex_1()
-                .p_3()
-                .text_sm()
-                .text_color(t.error)
-                .child(err.clone())
-                .into_any_element();
+            return self.render_message(
+                "Can't read this directory.",
+                format!("{err}. Choose another place from the path above, or press alt ↑."),
+                t.error,
+                cx,
+            );
         }
 
         let vis = self.visible(cx);
         if vis.is_empty() {
-            return div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(t.text_muted)
-                .child(if entries.is_empty() {
-                    "Empty directory"
-                } else {
-                    "No matches"
-                })
-                .into_any_element();
+            let (_, fragment) = self.parse_input(cx);
+            return if entries.is_empty() || fragment.is_empty() {
+                self.render_message(
+                    "This directory is empty.",
+                    "Press ⏎ to open a session here.",
+                    t.text,
+                    cx,
+                )
+            } else {
+                self.render_message(
+                    format!("Nothing here matches \u{201c}{fragment}\u{201d}."),
+                    "Keep typing a path, or press ⏎ to open it if it exists.",
+                    t.text,
+                    cx,
+                )
+            };
         }
 
         div()
@@ -485,8 +600,7 @@ impl FileOpener {
             .min_h_0()
             .flex()
             .flex_col()
-            .gap_px()
-            .p_1()
+            .py_1()
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
             .children(
@@ -499,60 +613,47 @@ impl FileOpener {
     fn render_footer(&self, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.theme();
         let count = self.visible(cx).len();
-        div()
-            .flex()
-            .flex_row()
+        // Enter browses into a selected directory; with nothing selected it
+        // opens the directory on the line. Say which, before it happens.
+        let enter = match self
+            .selected
+            .and_then(|ix| self.listing.entries.as_ref()?.get(ix))
+        {
+            Some(entry) if entry.is_dir => "browse",
+            Some(_) => "open file",
+            None => "open here",
+        };
+        h_flex()
+            .min_h(px(40.))
+            .py_2()
             .flex_wrap()
-            .gap_2()
             .flex_shrink_0()
-            .justify_between()
             .items_center()
-            .px_3()
-            .py_1p5()
+            .gap_4()
+            .px_4()
             .border_t_1()
             .border_color(t.border)
-            .text_xs()
-            .text_color(t.text_muted)
-            .child(format!("{count} item{}", if count == 1 { "" } else { "s" }))
-            .child(
-                Button::new("open-directory")
-                    .ghost()
-                    .small()
-                    .label("Open directory")
-                    .on_click(cx.listener(|this, _, _, cx| this.open_directory(cx))),
-            )
             .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .gap_3()
-                    .child(
-                        div()
-                            .id("toggle-hidden")
-                            .role(gpui::accesskit::Role::CheckBox)
-                            .tab_index(0)
-                            .focus_visible(|style| style.text_color(t.accent).underline())
-                            .aria_label("Show hidden files")
-                            .aria_toggled(if self.show_hidden {
-                                gpui::accesskit::Toggled::True
-                            } else {
-                                gpui::accesskit::Toggled::False
-                            })
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(t.text))
-                            .text_color(if self.show_hidden {
-                                t.accent
-                            } else {
-                                t.text_muted
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_hidden(cx)))
-                            .child("hidden"),
-                    )
-                    .child("↑↓ navigate")
-                    .child("⏎ open")
-                    .child("⌥↑ parent")
-                    .child("esc cancel"),
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.))
+                    .text_color(t.text_muted)
+                    .child(format!("{count} item{}", if count == 1 { "" } else { "s" })),
+            )
+            .child(hint("↑↓", "choose", cx))
+            .child(hint("⏎", enter, cx))
+            .child(hint("alt ↑", "parent", cx))
+            .child(hint("esc", "close", cx))
+            .child(
+                Button::new("open-directory")
+                    .primary()
+                    .small()
+                    .rounded(ButtonRounded::None)
+                    .label("Open here")
+                    .tooltip("Start a session in this directory")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_directory(cx))),
             )
     }
 }
@@ -566,7 +667,6 @@ impl Focusable for FileOpener {
 
 impl Render for FileOpener {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = cx.theme();
         div()
             .id("file-opener")
             .key_context(CONTEXT)
@@ -581,7 +681,6 @@ impl Render for FileOpener {
             .flex()
             .flex_col()
             .bg(gpui::rgba(0))
-            .rounded_lg()
             .overflow_hidden()
             .child(
                 crate::ui::combo_box::editable_combo_box(
@@ -595,15 +694,19 @@ impl Render for FileOpener {
                 .size_full()
                 .min_h_0()
                 .child(
-                    div()
-                        .flex()
-                        .flex_col()
+                    v_flex()
                         .flex_shrink_0()
                         .gap_2()
-                        .p_3()
-                        .border_b_1()
-                        .border_color(t.border)
-                        .child(self.render_breadcrumb(cx))
+                        .px_4()
+                        .pt_3()
+                        .pb_2()
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_3()
+                                .child(self.render_breadcrumb(cx))
+                                .child(self.render_hidden_toggle(cx)),
+                        )
                         .child(self.render_input(window, cx)),
                 )
                 .child(self.render_list(cx))

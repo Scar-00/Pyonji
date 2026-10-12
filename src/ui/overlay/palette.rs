@@ -21,6 +21,7 @@ use gpui_component::{
 use crate::{
     Next, Prev, PyTheme as _, Pyonji, Submit,
     commands::{self, Origin},
+    ui::{hint, mono},
     util,
 };
 
@@ -668,11 +669,10 @@ impl PaletteView {
                     .text_color(theme.text_muted)
                     .child(usage),
             )
-            .child(hint(cx, "\u{2191}\u{2193}", "choose"))
-            .child(hint(cx, "\u{23ce}", "run"))
-            .child(hint(cx, "tab", "complete"))
+            .child(hint("\u{2191}\u{2193}", "choose", cx))
+            .child(hint("\u{23ce}", "run", cx))
+            .child(hint("tab", "complete", cx))
             .child(hint(
-                cx,
                 "esc",
                 if !commands::query_args(&self.line(cx)).is_empty() {
                     "clear arguments"
@@ -681,6 +681,7 @@ impl PaletteView {
                 } else {
                     "close"
                 },
+                cx,
             ))
     }
 }
@@ -757,33 +758,6 @@ fn marked(name: &str, marks: &[Range<usize>], mark: Rgba, text: Rgba) -> impl In
         spans.push(div().text_color(text).child(name[at..].to_string()));
     }
     h_flex().children(spans)
-}
-
-fn hint(cx: &Context<PaletteView>, keys: &'static str, what: &'static str) -> impl IntoElement {
-    let theme = cx.theme();
-    h_flex()
-        .flex_shrink_0()
-        .items_center()
-        .gap_1p5()
-        .child(
-            div()
-                .font_family(mono(cx))
-                .text_size(px(11.0))
-                .text_color(theme.text)
-                .child(keys),
-        )
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(theme.text_muted)
-                .child(what),
-        )
-}
-
-fn mono(cx: &App) -> SharedString {
-    gpui_component::ActiveTheme::theme(cx)
-        .mono_font_family
-        .clone()
 }
 
 /// A border or fill that should show nothing still needs a colour.

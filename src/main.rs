@@ -107,6 +107,8 @@ fn main() {
             gpui_component::init(cx);
             gpui_tokio::init(cx);
             Theme::init(cx);
+            Theme::register_fonts(cx);
+            Theme::keep_component_overrides(cx);
 
             let window_options = Pyonji::window_options(cx);
             cx.open_window(window_options, |window, cx| {
@@ -457,7 +459,9 @@ impl Pyonji {
 
         let note = Notification::new()
             .icon(lua_icon(cx))
-            .bg(cx.theme().surface)
+            .bg(cx.theme().surface.opacity(0.15))
+            .shadow(crate::ui::surface_shadow())
+            .backdrop_blur(px(24.0))
             .title("Lua")
             .autohide(true)
             .placement(Anchor::TopRight)
@@ -1683,10 +1687,77 @@ impl Theme {
         cx.set_global(Theme::new());
     }
 
+    /// The face the terminal grid is drawn in, as GPUI's text system knows it.
+    pub const MONO_FONT: &str = "Iosevka Term";
+
+    /// Hand the terminal's embedded faces to GPUI as well, so the chrome's
+    /// monospaced text is the grid's own face rather than whatever the
+    /// platform's default mono happens to be. The bytes are already in the
+    /// binary for the renderer; this borrows them.
+    pub fn register_fonts(cx: &mut App) {
+        use renderer::TerminalRenderer;
+        if let Err(error) = cx.text_system().add_fonts(vec![
+            TerminalRenderer::NORMAL_FONT.into(),
+            TerminalRenderer::BOLD_FONT.into(),
+        ]) {
+            tracing::error!(%error, "failed to register the UI's monospaced font");
+        }
+    }
+
     pub fn apply_component_theme(window: &mut Window, cx: &mut App) {
         gpui_component::Theme::change(ThemeMode::Dark, Some(window), cx);
-        let selection = rgb_to_hsla(Self::global(cx).selection);
-        gpui_component::Theme::global_mut(cx).selection = selection;
+        Self::apply_component_overrides(cx);
+    }
+
+    /// The kit re-runs `Theme::change` on its own, when the system appearance
+    /// is synced, and that restores its stock colours. Re-apply Pyonji's after
+    /// every change to the kit's theme. Idempotent, so the write it makes does
+    /// not trigger another round.
+    pub fn keep_component_overrides(cx: &mut App) {
+        cx.observe_global::<gpui_component::Theme>(Self::apply_component_overrides)
+            .detach();
+    }
+
+    fn apply_component_overrides(cx: &mut App) {
+        let theme = Self::global(cx);
+        let selection = rgb_to_hsla(theme.selection);
+        let accent = rgb_to_hsla(theme.accent);
+        let on_accent = rgb_to_hsla(theme.background);
+        let current = gpui_component::Theme::global(cx);
+        if current.tokens.button_primary.color == accent
+            && current.mono_font_family.as_ref() == Self::MONO_FONT
+            && current.selection == selection
+        {
+            return;
+        }
+        let component = gpui_component::Theme::global_mut(cx);
+        component.selection = selection;
+        component.mono_font_family = Self::MONO_FONT.into();
+        // Primary buttons speak in the one accent, like every other mark of
+        // "this is the live thing", instead of the kit's stock white.
+        // The kit paints from `tokens` and reads the colour fields elsewhere,
+        // so both copies are set.
+        let hover = accent.opacity(0.88);
+        let active = accent.opacity(0.76);
+        component.primary = accent;
+        component.primary_hover = hover;
+        component.primary_active = active;
+        component.primary_foreground = on_accent;
+        component.button_primary = accent;
+        component.button_primary_hover = hover;
+        component.button_primary_active = active;
+        component.button_primary_foreground = on_accent;
+        component.ring = accent;
+        let tokens = &mut component.tokens;
+        tokens.primary = accent.into();
+        tokens.primary_hover = hover.into();
+        tokens.primary_active = active.into();
+        tokens.primary_foreground = on_accent.into();
+        tokens.button_primary = accent.into();
+        tokens.button_primary_hover = hover.into();
+        tokens.button_primary_active = active.into();
+        tokens.button_primary_foreground = on_accent.into();
+        tokens.ring = accent.into();
     }
 
     #[allow(clippy::eq_op)]

@@ -3,7 +3,11 @@
 use std::ops::Range;
 
 use crate::{
-    Next, Prev, PyTheme as _, Pyonji, Submit, assets::PyonjiAsset, terminal::SessionId, util,
+    Next, Prev, PyTheme as _, Pyonji, Submit,
+    assets::PyonjiAsset,
+    terminal::SessionId,
+    ui::{hint, mono},
+    util,
 };
 use gpui::{prelude::*, *};
 use gpui_base::{Button, actions::Cancel, h_flex, v_flex};
@@ -342,8 +346,11 @@ impl SessionsView {
                             .min_w_0()
                             .gap_1()
                             .child(
+                                // The title is whatever the terminal set it
+                                // to, so it reads in the terminal's face.
                                 div()
                                     .truncate()
+                                    .font_family(mono(cx))
                                     .text_size(px(14.))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
@@ -456,59 +463,53 @@ impl SessionsView {
         let attach = entry.is_some_and(|entry| entry.tab.is_none());
         let py = util::read!(self.pyonji, cx);
         let destination = entry.and_then(|entry| entry.tab.or(py.current_tab));
-        v_flex()
+        // What enter will do, in the slot the palette uses for a command's
+        // usage, so both screens answer "what happens now" in the same place.
+        let (status, color) = match (self.error, destination) {
+            (Some(error), _) => (error.to_string(), theme.error),
+            (None, Some(tab)) => (
+                format!(
+                    "{} tab {}",
+                    if attach { "Attach to" } else { "Switch to" },
+                    tab + 1
+                ),
+                theme.text_muted,
+            ),
+            (None, None) => ("Nothing selected".to_string(), theme.text_muted),
+        };
+        h_flex()
+            .min_h(px(40.))
+            .py_2()
+            .flex_wrap()
             .flex_shrink_0()
-            .gap_2()
+            .items_center()
+            .gap_4()
             .px_4()
-            .py_3()
             .border_t_1()
             .border_color(theme.border)
-            .when_some(self.error, |this, error| {
-                this.child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(theme.error)
-                        .child(error),
-                )
-            })
-            .when_some(destination, |this, tab| {
-                this.child(
-                    h_flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_4()
-                        .child(hint(
-                            "Enter",
-                            format!(
-                                "{} to tab {}",
-                                if attach { "Attach" } else { "Switch" },
-                                tab + 1
-                            ),
-                            theme,
-                        ))
-                        .when(attach, |this| {
-                            this.child(hint("Alt 1–9", "Attach to tab", theme))
-                        }),
-                )
-            })
             .child(
-                h_flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_4()
-                    .when(entry.is_some(), |this| {
-                        this.child(hint("↑↓", "Choose", theme))
-                    })
-                    .child(hint(
-                        "Esc",
-                        if self.search_input.read(cx).value().is_empty() {
-                            "Close"
-                        } else {
-                            "Clear search"
-                        },
-                        theme,
-                    )),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.))
+                    .text_color(color)
+                    .child(status),
             )
+            .when(entry.is_some(), |this| this.child(hint("↑↓", "choose", cx)))
+            .when(destination.is_some(), |this| {
+                this.child(hint("⏎", if attach { "attach" } else { "switch" }, cx))
+            })
+            .when(attach, |this| this.child(hint("alt 1–9", "attach to tab", cx)))
+            .child(hint(
+                "esc",
+                if self.search_input.read(cx).value().is_empty() {
+                    "close"
+                } else {
+                    "clear search"
+                },
+                cx,
+            ))
     }
 
     fn on_attach_to_tab(
@@ -528,12 +529,6 @@ impl SessionsView {
 impl Render for SessionsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let all = self.entries(cx);
-        let py = util::read!(self.pyonji, cx);
-        let font: SharedString = py
-            .font_family
-            .clone()
-            .unwrap_or_else(|| "Iosevka".into())
-            .into();
         let total = all.len();
         let entries = self.visible(cx);
         if !self
@@ -552,7 +547,6 @@ impl Render for SessionsView {
             .tab_group()
             .track_focus(&self.focus_handle)
             .size_full()
-            .font_family(font)
             .overflow_hidden()
             .rounded_lg()
             .bg(rgba(0))
@@ -583,17 +577,4 @@ impl Focusable for SessionsView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
-}
-
-fn hint(
-    keys: &'static str,
-    label: impl Into<SharedString>,
-    theme: &crate::Theme,
-) -> impl IntoElement {
-    h_flex()
-        .items_center()
-        .gap_2()
-        .text_size(px(11.))
-        .child(div().text_color(theme.text).child(keys))
-        .child(div().text_color(theme.text_muted).child(label.into()))
 }

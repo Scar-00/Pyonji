@@ -329,6 +329,10 @@ impl Render for StatusBar {
             .py_0p5()
             .bg(theme.surface)
             .text_color(theme.text)
+            // The bar sits on the grid's edge and is half a command line;
+            // it reads in the grid's own face.
+            .font_family(super::mono(cx))
+            .text_size(px(16.0))
             .items_center()
             .backdrop_blur(px(16.0))
             .map(|this| match &self.mode {
@@ -427,8 +431,7 @@ impl RenderOnce for SessionView {
             .overflow_x_scroll()
             .children(py.tabs.iter().enumerate().filter_map(move |(i, tab)| {
                 let id = tab.as_ref().and_then(|tab| tab.active_session())?;
-                let title = py.session_manager.session(id)?.title();
-                let label = format!("[{}] - {title}", i + 1);
+                let title = py.session_manager.session(id)?.title().to_string();
                 let selected = py.current_tab == Some(i);
                 let pyonji = pyonji.clone();
                 Some(
@@ -438,22 +441,33 @@ impl RenderOnce for SessionView {
                         .tab_index(0)
                         .focus_visible(|style| style.text_color(theme.accent))
                         .aria_selected(selected)
-                        .aria_label(label.clone())
+                        .aria_label(format!("Tab {}: {title}", i + 1))
                         .items_center()
                         .justify_center()
-                        .px_1()
+                        .gap_1p5()
+                        .px_2()
+                        // Selection changes colour and the rule, never the
+                        // weight: a bolder label is a wider one, and the
+                        // chips to its right would shuffle on every switch.
+                        .border_b_2()
                         .map(|this| {
                             if selected {
-                                this.bg(theme.selected)
-                                    .font_bold()
-                                    .border_b_2()
-                                    .border_color(theme.accent)
+                                this.bg(theme.selected).border_color(theme.accent)
                             } else {
-                                this.bg(theme.unselected).pb_0p5()
+                                this.border_color(theme.accent.opacity(0.0))
+                                    .text_color(theme.text_muted)
+                                    .hover(|style| style.bg(theme.hovered).text_color(theme.text))
                             }
                         })
-                        .child(label)
-                        .hover(|style| style.cursor_pointer())
+                        // The number is the key that reaches the tab; on the
+                        // live tab it carries the accent with the rule.
+                        .child(
+                            div()
+                                .when(selected, |number| number.text_color(theme.accent))
+                                .child((i + 1).to_string()),
+                        )
+                        .child(title)
+                        .cursor_pointer()
                         .on_click(move |_, window, cx| {
                             Self::on_click(pyonji.clone(), i, window, cx);
                         }),
@@ -508,8 +522,23 @@ impl RenderOnce for RenameView {
             state
         });
 
-        h_flex().w_full().child(super::text_input(&input_state, cx))
+        h_flex()
+            .w_full()
+            .items_center()
+            .child(prompt(format!("rename {}", session), cx))
+            .child(super::text_input(&input_state, cx))
     }
+}
+
+/// What the bar is asking for, in the accent, where a shell puts its prompt.
+/// Without it a bare field on the bar looks like the tab list went missing.
+fn prompt(text: impl Into<SharedString>, cx: &App) -> Div {
+    div()
+        .flex_shrink_0()
+        .pl_1()
+        .pr_2()
+        .text_color(cx.theme().accent)
+        .child(text.into())
 }
 
 #[derive(IntoElement)]
@@ -604,7 +633,7 @@ impl RenderOnce for LuaView {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let py = self.pyonji.clone();
         let input_state = window.use_state(cx, |window, cx| {
-            let state = InputState::new(window, cx).placeholder("Lua repl");
+            let state = InputState::new(window, cx).placeholder("py:split('v')");
             cx.on_focus_out(&state.focus_handle(cx), window, {
                 let py = py.clone();
                 move |this, _, window, cx| {
@@ -770,6 +799,7 @@ impl RenderOnce for LuaView {
             h_flex()
                 .w_full()
                 .items_center()
+                .child(prompt(">", cx))
                 .child(super::text_input(&input_state, cx)),
         )
     }
