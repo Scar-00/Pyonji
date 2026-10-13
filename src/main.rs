@@ -22,6 +22,7 @@ mod ui;
 mod util;
 
 use assets::{GlobalAssets, PyonjiAsset, PyonjiAssetsSource};
+#[cfg(windows)]
 use gpui_component::TITLE_BAR_HEIGHT;
 use pty::Event;
 use terminal::{Tab as TerminalTab, *};
@@ -173,6 +174,8 @@ struct Pyonji {
 }
 
 impl Pyonji {
+    /// Drawn in Pyonji's own title bar, which only Windows has.
+    #[cfg(windows)]
     const TITLE: &str = cfg_select! {
         feature = "install" => "Pyonji",
         _ => {
