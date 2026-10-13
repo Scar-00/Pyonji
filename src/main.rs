@@ -164,7 +164,7 @@ struct Pyonji {
     /// The installed family the grid and the chrome's monospaced text are
     /// drawn in, resolved from `font_family` on every config load. `None`
     /// until the first load, so the renderer never starts on a stand-in.
-    text_family: Option<String>,
+    text_family: Option<config::TextFamily>,
     font_size: f32,
     line_height: f32,
     default_cwd: Option<PathBuf>,

@@ -169,6 +169,8 @@ impl LuaUserData for LuaProxy {
                     .set_font_metrics(this.py.font_size, this.py.font_size * this.py.line_height);
                 renderer.evict_glyphs();
             });
+            // From the REPL or a keybinding, nothing reloads the file after.
+            apply_font_family(&mut this.py, &mut this.cx.as_ctx());
             Ok(())
         });
         methods.add_method_mut("bind", |lua, this, args: LuaMultiValue| {
@@ -634,18 +636,35 @@ fn load_file(this: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>) -
     })
 }
 
+/// The installed family the grid is drawn in, and the configured name it was
+/// resolved from.
+pub struct TextFamily {
+    configured: Option<String>,
+    pub installed: String,
+}
+
+/// Resolves `font_family` and hands the result to the renderer and the UI's
+/// monospaced text. Skipped while `font_family` is unchanged, so a missing
+/// family is reported once rather than on every call.
 fn apply_font_family(this: &mut Pyonji, cx: &mut Context<Pyonji>) {
-    let family = crate::renderer::resolve_family(this.font_family.as_deref());
-    if this.text_family.as_ref() == Some(&family) {
+    if this
+        .text_family
+        .as_ref()
+        .is_some_and(|family| family.configured == this.font_family)
+    {
         return;
     }
+    let installed = crate::renderer::resolve_family(this.font_family.as_deref());
     this.terminal.update(cx, |terminal, _| {
         if let Some(renderer) = terminal.renderer.as_mut() {
-            renderer.set_font_family(&family);
+            renderer.set_font_family(&installed);
         }
     });
-    crate::ui::Theme::set_mono_font(family.clone().into(), cx);
-    this.text_family = Some(family);
+    crate::ui::Theme::set_mono_font(installed.clone().into(), cx);
+    this.text_family = Some(TextFamily {
+        configured: this.font_family.clone(),
+        installed,
+    });
 }
 
 pub fn with_env<R>(

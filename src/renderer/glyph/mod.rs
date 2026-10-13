@@ -174,6 +174,8 @@ pub struct Glyph {
 
 pub struct TerminalRenderer {
     font_size: f32,
+    /// One column's width in pixels; see [`TerminalRenderer::measure_cell_width`].
+    cell_width: f32,
     /// The installed family the normal and bold faces come from, so
     /// reloading an unchanged config doesn't load them again.
     font_family: String,
@@ -359,9 +361,9 @@ impl TerminalRenderer {
 
     fn font_size_for_variant(&self, variant: FontVariant) -> f32 {
         if variant == FontVariant::Emoji {
-            // Two terminal cells span font_size pixels. Noto Emoji's advance
-            // is wider than one em, so fit its outlines to that width.
-            self.emoji_font.size_for_width(self.font_size)
+            // Noto Emoji's advance is wider than one em, so fit its outlines
+            // to the two terminal cells an emoji spans.
+            self.emoji_font.size_for_width(2.0 * self.cell_width)
         } else {
             self.font_size
         }
@@ -622,6 +624,7 @@ impl TerminalRenderer {
 
         Self {
             font_size,
+            cell_width: Self::measure_cell_width(&normal_font, font_size),
             font_family: font_family.to_owned(),
 
             _shader: shader,
@@ -665,6 +668,24 @@ impl TerminalRenderer {
 
     pub fn set_font_size(&mut self, font_size: f32) {
         self.font_size = font_size;
+        self.cell_width = Self::measure_cell_width(&self.normal_font, font_size);
+    }
+
+    pub fn cell_width(&self) -> f32 {
+        self.cell_width
+    }
+
+    /// The regular face's advance at `font_size`, rounded so columns start on
+    /// whole pixels. Monospaced faces differ in width (Iosevka is half an em,
+    /// Cascadia Mono nearly 0.6), so a fixed fraction of the font size would
+    /// overlap or space out their glyphs.
+    fn measure_cell_width(font: &Font, font_size: f32) -> f32 {
+        let font = font.as_ref();
+        let advance = font
+            .glyph_metrics(&[])
+            .scale(font_size)
+            .advance_width(font.charmap().map('0'));
+        advance.round().max(1.0)
     }
 
     /// Draws the grid in an installed `font_family`, as resolved by
@@ -674,6 +695,7 @@ impl TerminalRenderer {
             return;
         }
         (self.normal_font, self.bold_font) = Self::text_faces(font_family);
+        self.cell_width = Self::measure_cell_width(&self.normal_font, self.font_size);
         self.font_family = font_family.to_owned();
         self.evict_glyphs();
     }
@@ -947,6 +969,14 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cells_are_as_wide_as_the_text_face_advance() {
+        // JetBrains Mono advances 600 of its 1000 units per em.
+        let font = Font::from_data(TerminalRenderer::ICON_FONT, 0).unwrap();
+        assert_eq!(TerminalRenderer::measure_cell_width(&font, 24.0), 14.0);
+        assert_eq!(TerminalRenderer::measure_cell_width(&font, 38.0), 23.0);
     }
 
     #[test]
