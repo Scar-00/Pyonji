@@ -306,7 +306,7 @@ impl RenderOnce for CompletionMenu {
                 v_flex()
                     .gap_2()
                     .flex_none()
-                    .mono()
+                    .mono(cx)
                     .text_size(px(13.0))
                     .text_color(theme.text)
                     .when_some(signature_help, |popovers, help| {

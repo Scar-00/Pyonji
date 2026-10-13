@@ -1,7 +1,7 @@
 mod background;
 mod glyph;
 pub use background::BackgroundRenderer;
-pub use glyph::TerminalRenderer;
+pub use glyph::{DEFAULT_FAMILIES, TerminalRenderer, prewarm_system_fonts, resolve_family};
 
 use anyhow::Result;
 use unicode_segmentation::UnicodeSegmentation;
@@ -95,7 +95,7 @@ impl Renderer {
         queue: Queue,
         device: Device,
         format: TextureFormat,
-        font_family: Option<&str>,
+        font_family: &str,
         font_size: f32,
         line_height: f32,
     ) -> Result<Self> {

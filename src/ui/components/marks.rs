@@ -15,7 +15,7 @@ pub fn hint(keys: impl Into<SharedString>, action: impl Into<SharedString>, cx: 
         .items_center()
         .gap_1p5()
         .text_size(px(11.0))
-        .child(div().mono().text_color(theme.text).child(keys.into()))
+        .child(div().mono(cx).text_color(theme.text).child(keys.into()))
         .child(div().text_color(theme.text_muted).child(action.into()))
 }
 
@@ -35,7 +35,7 @@ pub fn enter_mark(selected: bool, cx: &App) -> Div {
         .w(px(18.0))
         .flex_shrink_0()
         .justify_end()
-        .mono()
+        .mono(cx)
         .text_size(px(12.0))
         .text_color(if selected {
             cx.theme().accent

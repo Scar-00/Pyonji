@@ -31,9 +31,12 @@ A terminal emulator whose grid is drawn on the GPU, configured from Lua.
   machine it is running on.
 - **Lua configuration**, reloaded from disk when it changes and written on
   first run if missing.
-- **Bundled fonts** — nothing to install. Iosevka Term across nine weights,
-  Iosevka, Noto Sans Mono CJK, Nerd Fonts for icons, and Noto Emoji for
-  monochrome emoji in the terminal foreground colour.
+- **Fonts from the system.** The grid and the chrome's monospaced text use
+  the configured `font_family`, regular and bold, from the installed fonts.
+  Without one, the platform's monospace is used: Cascadia Mono or Consolas on
+  Windows, Menlo on macOS, DejaVu Sans Mono or Noto Sans Mono on Linux. CJK
+  falls back to an installed CJK family. Only Nerd Font icons and Noto Emoji,
+  for monochrome emoji in the terminal foreground colour, are bundled.
 
 There is no image protocol (sixel, iTerm inline images) and no session
 multiplexer.
@@ -110,7 +113,7 @@ run.
 
 ```lua
 py:config({
-    font_family = "Iosevka",
+    font_family = "Iosevka", -- an installed family; nil for the platform's monospace
     font_size = 24,
     line_height = 1.1,      -- a multiple of font_size
     fullscreen = false,

@@ -8,8 +8,8 @@
 //! row agree on what the accent is.
 
 use gpui::{
-    App, ColorExt as _, FontWeight, Global, HighlightStyle, Pixels, ReadGlobal as _, Rgba, Window,
-    px, rgb, rgb_to_hsla,
+    App, ColorExt as _, FontWeight, Global, HighlightStyle, Pixels, ReadGlobal as _, Rgba,
+    SharedString, Window, px, rgb, rgb_to_hsla,
 };
 use gpui_component::ThemeMode;
 
@@ -84,6 +84,10 @@ pub struct Theme {
     pub tooltip_background: Rgba,
     pub border: Rgba,
     pub focus_ring: Rgba,
+
+    /// The family the terminal grid is drawn in, for the chrome's monospaced
+    /// text. Follows the config through [`Theme::set_mono_font`].
+    pub mono_font: SharedString,
 }
 
 impl Theme {
@@ -92,9 +96,6 @@ impl Theme {
 
     /// How far floating chrome blurs what is behind its [`Theme::glass`].
     pub const GLASS_BLUR: Pixels = px(24.0);
-
-    /// The face the terminal grid is drawn in, as GPUI's text system knows it.
-    pub const MONO_FONT: &str = "Iosevka Term";
 
     pub fn init(cx: &mut App) {
         cx.set_global(Theme::new());
@@ -109,18 +110,12 @@ impl Theme {
         }
     }
 
-    /// Hand the terminal's embedded faces to GPUI as well, so the chrome's
-    /// monospaced text is the grid's own face rather than whatever the
-    /// platform's default mono happens to be. The bytes are already in the
-    /// binary for the renderer; this borrows them.
-    pub fn register_fonts(cx: &mut App) {
-        use crate::renderer::TerminalRenderer;
-        if let Err(error) = cx.text_system().add_fonts(vec![
-            TerminalRenderer::NORMAL_FONT.into(),
-            TerminalRenderer::BOLD_FONT.into(),
-        ]) {
-            tracing::error!(%error, "failed to register the UI's monospaced font");
-        }
+    /// Draw the chrome's monospaced text in `family`, the grid's own family,
+    /// rather than whatever the platform's default mono happens to be.
+    pub fn set_mono_font(family: SharedString, cx: &mut App) {
+        cx.global_mut::<Self>().mono_font = family;
+        Self::apply_component_overrides(cx);
+        cx.refresh_windows();
     }
 
     pub fn apply_component_theme(window: &mut Window, cx: &mut App) {
@@ -142,16 +137,17 @@ impl Theme {
         let selection = rgb_to_hsla(theme.selection);
         let accent = rgb_to_hsla(theme.accent);
         let on_accent = rgb_to_hsla(theme.background);
+        let mono_font = theme.mono_font.clone();
         let current = gpui_component::Theme::global(cx);
         if current.tokens.button_primary.color == accent
-            && current.mono_font_family.as_ref() == Self::MONO_FONT
+            && current.mono_font_family == mono_font
             && current.selection == selection
         {
             return;
         }
         let component = gpui_component::Theme::global_mut(cx);
         component.selection = selection;
-        component.mono_font_family = Self::MONO_FONT.into();
+        component.mono_font_family = mono_font;
         // Primary buttons speak in the one accent, like every other mark of
         // "this is the live thing", instead of the kit's stock white.
         // The kit paints from `tokens` and reads the colour fields elsewhere,
@@ -227,6 +223,9 @@ impl Theme {
             tooltip_background: rgb(LINE),
             border: rgb(LINE),
             focus_ring: rgb(LILAC),
+
+            // Replaced by the installed family once the config has loaded.
+            mono_font: crate::renderer::DEFAULT_FAMILIES[0].into(),
         }
     }
 }

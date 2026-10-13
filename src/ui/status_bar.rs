@@ -332,7 +332,7 @@ impl Render for StatusBar {
             .text_color(theme.text)
             // The bar sits on the grid's edge and is half a command line;
             // it reads in the grid's own face.
-            .mono()
+            .mono(cx)
             .text_size(px(16.0))
             .items_center()
             .backdrop_blur(px(16.0))

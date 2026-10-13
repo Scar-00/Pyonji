@@ -167,9 +167,6 @@ impl LuaUserData for LuaProxy {
                 };
                 renderer
                     .set_font_metrics(this.py.font_size, this.py.font_size * this.py.line_height);
-                if let Some(font) = this.py.font_family.as_deref() {
-                    renderer.set_font_family(font);
-                }
                 renderer.evict_glyphs();
             });
             Ok(())
@@ -611,6 +608,13 @@ pub fn watch(tx: Sender<PtyEvent>) {
 }
 
 pub fn load(this: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>) -> Result<()> {
+    let result = load_file(this, window, cx);
+    // Even a config that failed to load leaves a family to draw in.
+    apply_font_family(this, cx);
+    result
+}
+
+fn load_file(this: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>) -> Result<()> {
     let path = util::config_path().context("failed to get config path")?;
 
     util::create_config_if_missing(&path)
@@ -628,6 +632,20 @@ pub fn load(this: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>) ->
         let chunk = lua.load(path);
         chunk.exec()
     })
+}
+
+fn apply_font_family(this: &mut Pyonji, cx: &mut Context<Pyonji>) {
+    let family = crate::renderer::resolve_family(this.font_family.as_deref());
+    if this.text_family.as_ref() == Some(&family) {
+        return;
+    }
+    this.terminal.update(cx, |terminal, _| {
+        if let Some(renderer) = terminal.renderer.as_mut() {
+            renderer.set_font_family(&family);
+        }
+    });
+    crate::ui::Theme::set_mono_font(family.clone().into(), cx);
+    this.text_family = Some(family);
 }
 
 pub fn with_env<R>(

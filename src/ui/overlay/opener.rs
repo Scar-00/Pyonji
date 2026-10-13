@@ -338,7 +338,7 @@ impl FileOpener {
             .items_center()
             .flex_wrap()
             .gap_0p5()
-            .mono()
+            .mono(cx)
             .text_size(px(12.))
             .text_color(t.text_muted)
             .children(
@@ -416,10 +416,10 @@ impl FileOpener {
     }
 
     /// The path line, ruled like the session search.
-    fn render_input(&self) -> impl IntoElement {
+    fn render_input(&self, cx: &App) -> impl IntoElement {
         SearchField::new(&self.path_input)
             .icon(IconName::FolderOpen)
-            .mono()
+            .mono(cx)
             .text_size(px(14.))
     }
 
@@ -470,7 +470,7 @@ impl FileOpener {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .mono()
+                    .mono(cx)
                     .text_size(px(13.))
                     .text_color(if selected || e.is_dir {
                         t.text
@@ -487,7 +487,7 @@ impl FileOpener {
                 row.child(
                     div()
                         .flex_shrink_0()
-                        .mono()
+                        .mono(cx)
                         .text_size(px(11.))
                         .text_color(t.text_muted)
                         .child(human_size(e.size)),
@@ -620,7 +620,7 @@ impl Render for FileOpener {
                                 .child(self.render_breadcrumb(cx))
                                 .child(self.render_hidden_toggle(cx)),
                         )
-                        .child(self.render_input()),
+                        .child(self.render_input(cx)),
                 )
                 .child(self.render_list(cx))
                 .child(self.render_footer(cx)),

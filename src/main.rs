@@ -76,6 +76,7 @@ struct Cli {
 }
 
 fn main() {
+    renderer::prewarm_system_fonts();
     cfg_select! {
         feature = "install" => {
             logging::init();
@@ -106,7 +107,6 @@ fn main() {
             gpui_component::init(cx);
             gpui_tokio::init(cx);
             Theme::init(cx);
-            Theme::register_fonts(cx);
             Theme::keep_component_overrides(cx);
 
             let window_options = Pyonji::window_options(cx);
@@ -160,6 +160,10 @@ struct Pyonji {
 
     //config
     font_family: Option<String>,
+    /// The installed family the grid and the chrome's monospaced text are
+    /// drawn in, resolved from `font_family` on every config load. `None`
+    /// until the first load, so the renderer never starts on a stand-in.
+    text_family: Option<String>,
     font_size: f32,
     line_height: f32,
     default_cwd: Option<PathBuf>,
@@ -230,6 +234,7 @@ impl Pyonji {
             _subscriptions: smallvec![],
 
             font_family: None,
+            text_family: None,
             font_size: 38.0,
             line_height: 1.1,
             default_cwd: None,

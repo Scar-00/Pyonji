@@ -637,7 +637,7 @@ impl ReleasesView {
                     .min_w_0()
                     .items_center()
                     .gap_3()
-                    .mono()
+                    .mono(cx)
                     .text_size(px(14.0))
                     .child(
                         div()
@@ -658,7 +658,7 @@ impl ReleasesView {
             .child(
                 SearchField::new(&self.search_input)
                     .boxed()
-                    .mono()
+                    .mono(cx)
                     .flex_1()
                     .min_w(px(120.0))
                     .max_w(px(240.0)),
@@ -744,7 +744,7 @@ impl ReleasesView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .mono()
+                    .mono(cx)
                     .text_size(px(22.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(if selected {
@@ -757,7 +757,7 @@ impl ReleasesView {
             .child(
                 div()
                     .flex_shrink_0()
-                    .mono()
+                    .mono(cx)
                     .text_size(px(11.0))
                     .text_color(theme.text_muted)
                     .child(entry.date.clone()),
@@ -880,7 +880,7 @@ impl ReleasesView {
                                     .gap_1()
                                     .child(
                                         div()
-                                            .mono()
+                                            .mono(cx)
                                             .text_size(px(30.0))
                                             .font_weight(FontWeight::MEDIUM)
                                             .letter_spacing(px(-0.5))
@@ -902,7 +902,7 @@ impl ReleasesView {
                                 h_flex()
                                     .items_center()
                                     .gap_3()
-                                    .mono()
+                                    .mono(cx)
                                     .text_size(px(12.0))
                                     .child(
                                         div()
@@ -963,7 +963,7 @@ impl ReleasesView {
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .mono()
+                        .mono(cx)
                         .text_size(px(12.0))
                         .text_color(theme.text_muted)
                         .child(build.triple.clone()),
@@ -1046,7 +1046,7 @@ impl ReleasesView {
                                 .min_w_0()
                                 .truncate()
                                 .text_right()
-                                .mono()
+                                .mono(cx)
                                 .text_size(px(11.0))
                                 .text_color(theme.text_muted)
                                 .child(bare_url(&url).to_string()),
@@ -1099,7 +1099,7 @@ impl ReleasesView {
                     .text_color(theme.text_muted)
                     .when(entry.is_some(), |this| {
                         this.child(div().child("Replaces "))
-                            .child(div().mono().truncate().child(self.binary.clone()))
+                            .child(div().mono(cx).truncate().child(self.binary.clone()))
                     })
                     .when(entry.is_none(), |this| this.child("Nothing selected"))
                     .when(roomy && entry.is_some(), |this| {
@@ -1111,7 +1111,7 @@ impl ReleasesView {
                             }))
                             .child(
                                 div()
-                                    .mono()
+                                    .mono(cx)
                                     .text_color(if installable {
                                         theme.text_muted
                                     } else {
@@ -1194,7 +1194,7 @@ impl ReleasesView {
                     )
                     .child(
                         div()
-                            .mono()
+                            .mono(cx)
                             .text_color(theme.text_muted)
                             .child(format!("{progress:.0}%")),
                     ),

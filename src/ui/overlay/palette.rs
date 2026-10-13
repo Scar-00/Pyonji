@@ -386,7 +386,7 @@ impl PaletteView {
                         h_flex()
                             .flex_1()
                             .min_w_0()
-                            .mono()
+                            .mono(cx)
                             .text_size(px(15.0))
                             .text_color(theme.text)
                             .child(
@@ -406,7 +406,7 @@ impl PaletteView {
                                 .flex_shrink_0()
                                 .items_center()
                                 .gap_1p5()
-                                .mono()
+                                .mono(cx)
                                 .text_size(px(11.0))
                                 .text_color(theme.text_muted)
                                 .child(format!("{shown}"))
@@ -424,7 +424,7 @@ impl PaletteView {
             .flex_shrink_0()
             .items_center()
             .pl_3()
-            .mono()
+            .mono(cx)
             .text_size(px(10.0))
             .text_color(theme.text_muted)
             .child(origin.label())
@@ -481,7 +481,7 @@ impl PaletteView {
                     .items_center()
                     .gap_2()
                     .pl_3()
-                    .mono()
+                    .mono(cx)
                     .text_size(px(14.0))
                     .child(
                         h_flex()
@@ -603,7 +603,7 @@ impl PaletteView {
                         )
                         .child(
                             div()
-                                .mono()
+                                .mono(cx)
                                 .text_size(px(13.0))
                                 .text_color(theme.accent)
                                 .child(suggestion),
@@ -621,7 +621,7 @@ impl PaletteView {
 
         panel_footer(cx)
             .px_3()
-            .child(footer_status(usage, theme.text_muted).mono())
+            .child(footer_status(usage, theme.text_muted).mono(cx))
             .child(hint("\u{2191}\u{2193}", "choose", cx))
             .child(hint("\u{23ce}", "run", cx))
             .child(hint("tab", "complete", cx))

@@ -33,8 +33,8 @@ pub trait PyStyled: Styled + Sized {
 
     /// The terminal grid's own face, for anything that is typed or read like
     /// a command line.
-    fn mono(self) -> Self {
-        self.font_family(Theme::MONO_FONT)
+    fn mono(self, cx: &App) -> Self {
+        self.font_family(cx.theme().mono_font.clone())
     }
 }
 

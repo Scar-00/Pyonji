@@ -228,7 +228,9 @@ impl Terminal {
             return;
         };
 
-        if self.renderer.is_none() {
+        if self.renderer.is_none()
+            && let Some(text_family) = pyonji.read(cx).text_family.as_deref()
+        {
             let pyonji = pyonji.read(cx);
             let queue = context.queue().clone();
             let device = context.device().clone();
@@ -236,7 +238,7 @@ impl Terminal {
                 queue,
                 device,
                 target.format(),
-                pyonji.font_family.as_deref(),
+                text_family,
                 pyonji.font_size,
                 pyonji.font_size * pyonji.line_height,
             )

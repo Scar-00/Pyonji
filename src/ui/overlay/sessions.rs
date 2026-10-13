@@ -307,7 +307,7 @@ impl SessionsView {
                                 // to, so it reads in the terminal's face.
                                 div()
                                     .truncate()
-                                    .mono()
+                                    .mono(cx)
                                     .text_size(px(14.))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)

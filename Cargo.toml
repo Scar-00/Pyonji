@@ -23,6 +23,7 @@ wgpu = "29.0.3"
 unicode-segmentation = "1.12"
 ahash = "0.8.12"
 fontdb = "0.24.0"
+memmap2 = "0.9.10"
 image = "0.25.10"
 clap = { version = "4.6.0", features = ["derive"] }
 dirs = "6.0.0"
@@ -65,6 +66,12 @@ tower = "0.5.3"
 
 [dev-dependencies]
 #gpui = { git = "https://github.com/gpui-ce/gpui-ce", features = ["test-support"], package = "gpui-ce" }
+
+# Without `static-dxc`, wgpu compiles shaders with FXC unless a dxcompiler.dll
+# happens to be on PATH. FXC takes 5+ seconds over GPUI's pipelines when the
+# window opens; DXC takes well under two.
+[target.'cfg(windows)'.dependencies]
+wgpu = { version = "29.0.3", features = ["static-dxc"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.30"
