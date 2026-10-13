@@ -67,7 +67,8 @@
 py = py or {};
 
 py:config({
-    font_family = "Iosevka",
+    -- An installed font family. Left out, the platform's monospace is used.
+    -- font_family = "Iosevka",
     font_size = 24,
     line_height = 1.1,
     fullscreen = false,

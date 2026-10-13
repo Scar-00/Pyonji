@@ -12,7 +12,8 @@ use sessions::SessionsView;
 use gpui::*;
 use gpui_component::{WindowExt, dialog::Dialog};
 
-use crate::{PushError, PyTheme, Pyonji, util};
+use crate::ui::components::PyStyled as _;
+use crate::{PushError, Pyonji, util};
 use std::path::{Path, PathBuf};
 
 struct SessionTarget {
@@ -104,13 +105,7 @@ impl Overlay {
         }
         let builder = cx.processor(move |this, dialog: Dialog, window, cx| {
             let (width, height) = Self::dialog_size(screen, window);
-            let dialog = dialog
-                .p_0()
-                .backdrop_blur(px(24.0))
-                .bg(cx.theme().surface.opacity(0.15))
-                .border_color(cx.theme().border)
-                .shadow(crate::ui::surface_shadow())
-                .close_button(false);
+            let dialog = dialog.p_0().floating(cx).close_button(false);
             let dialog = match (width, height) {
                 (Some(width), Some(height)) => dialog.w(width).h(height),
                 (Some(width), None) => dialog.w(width).h_4_5(),

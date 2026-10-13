@@ -1,6 +1,9 @@
-use std::{borrow::Cow, fs, mem, path::PathBuf};
+mod system;
 
-use anyhow::{Context, Result};
+pub use system::{DEFAULT_FAMILIES, prewarm as prewarm_system_fonts, resolve_family};
+
+use std::{borrow::Cow, mem, sync::Arc};
+
 use bytemuck::{Pod, Zeroable};
 use etagere::{AtlasAllocator, BucketedAtlasAllocator};
 use smallvec::SmallVec;
@@ -122,26 +125,25 @@ pub enum FontVariant {
     Emoji,
 }
 
+type FontData = Arc<dyn AsRef<[u8]> + Send + Sync>;
+
+/// A face's bytes, whether embedded, mapped from an installed file, or
+/// shared with fontdb. None of them are copied.
 pub struct Font {
-    data: Vec<u8>,
+    data: FontData,
     offset: u32,
     key: CacheKey,
 }
 
 impl Font {
-    fn from_file(path: PathBuf, index: usize) -> Option<Self> {
-        let content = fs::read(path).ok()?;
-        Self::from_data(&content, index)
+    fn from_data(data: impl AsRef<[u8]> + Send + Sync + 'static, index: usize) -> Option<Self> {
+        Self::from_shared(Arc::new(data), index)
     }
 
-    fn from_data(data: &[u8], index: usize) -> Option<Self> {
-        let font = FontRef::from_index(data, index)?;
+    fn from_shared(data: FontData, index: usize) -> Option<Self> {
+        let font = FontRef::from_index((*data).as_ref(), index)?;
         let (offset, key) = (font.offset, font.key);
-        Some(Self {
-            data: data.to_vec(),
-            offset,
-            key,
-        })
+        Some(Self { data, offset, key })
     }
 
     pub fn charmap(&self) -> Charmap<'_> {
@@ -150,7 +152,7 @@ impl Font {
 
     pub fn as_ref(&self) -> FontRef<'_> {
         FontRef {
-            data: &self.data,
+            data: (*self.data).as_ref(),
             offset: self.offset,
             key: self.key,
         }
@@ -172,7 +174,11 @@ pub struct Glyph {
 
 pub struct TerminalRenderer {
     font_size: f32,
-    font_db: fontdb::Database,
+    /// One column's width in pixels; see [`TerminalRenderer::measure_cell_width`].
+    cell_width: f32,
+    /// The installed family the normal and bold faces come from, so
+    /// reloading an unchanged config doesn't load them again.
+    font_family: String,
 
     _shader: ShaderModule,
     pipeline: RenderPipeline,
@@ -187,7 +193,8 @@ pub struct TerminalRenderer {
 
     normal_font: Font,
     bold_font: Font,
-    ime_font: Font,
+    /// `None` when no CJK family is installed.
+    ime_font: Option<Font>,
     icon_font: Font,
     emoji_font: Font,
     scale_context: ScaleContext,
@@ -203,12 +210,9 @@ pub struct TerminalRenderer {
 }
 
 impl TerminalRenderer {
-    const NORMAL_FONT: &[u8] = include_bytes!("../../../resources/fonts/SGr-IosevkaTerm-Light.ttc");
-    const BOLD_FONT: &[u8] =
-        include_bytes!("../../../resources/fonts/SGr-IosevkaTerm-SemiBold.ttc");
-    const IME_FONT: &[u8] =
-        include_bytes!("../../../resources/fonts/NotoSansMonoCJKkr-Regular.otf");
-    const ICON_FONT: &[u8] =
+    /// Nerd Font icons, which no platform ships. Also draws text when no
+    /// monospaced font is installed.
+    pub(crate) const ICON_FONT: &[u8] =
         include_bytes!("../../../resources/fonts/JetBrainsMonoNerdFontMono-Regular.ttf");
     const EMOJI_FONT: &[u8] = include_bytes!("../../../resources/fonts/NotoEmoji.ttf");
     const DEFAULT_BUFFER_SIZE: u64 = (1024 * 16) * 32;
@@ -218,7 +222,7 @@ impl TerminalRenderer {
         let font = match variant {
             FontVariant::Normal => &self.normal_font,
             FontVariant::Bold => &self.bold_font,
-            FontVariant::Ime => &self.ime_font,
+            FontVariant::Ime => self.ime_font.as_ref().unwrap_or(&self.normal_font),
             FontVariant::Icon => &self.icon_font,
             FontVariant::Emoji => &self.emoji_font,
         };
@@ -347,7 +351,9 @@ impl TerminalRenderer {
         match variant {
             FontVariant::Normal => &self.normal_font,
             FontVariant::Bold => &self.bold_font,
-            FontVariant::Ime => &self.ime_font,
+            // Without a CJK family, nothing is routed here: the normal face
+            // was already tried first.
+            FontVariant::Ime => self.ime_font.as_ref().unwrap_or(&self.normal_font),
             FontVariant::Icon => &self.icon_font,
             FontVariant::Emoji => &self.emoji_font,
         }
@@ -355,9 +361,9 @@ impl TerminalRenderer {
 
     fn font_size_for_variant(&self, variant: FontVariant) -> f32 {
         if variant == FontVariant::Emoji {
-            // Two terminal cells span font_size pixels. Noto Emoji's advance
-            // is wider than one em, so fit its outlines to that width.
-            self.emoji_font.size_for_width(self.font_size)
+            // Noto Emoji's advance is wider than one em, so fit its outlines
+            // to the two terminal cells an emoji spans.
+            self.emoji_font.size_for_width(2.0 * self.cell_width)
         } else {
             self.font_size
         }
@@ -393,7 +399,7 @@ impl TerminalRenderer {
             cluster,
             &[
                 (text_variant, self.font(text_variant)),
-                (FontVariant::Ime, &self.ime_font),
+                (FontVariant::Ime, self.font(FontVariant::Ime)),
                 (FontVariant::Icon, &self.icon_font),
                 (FontVariant::Emoji, &self.emoji_font),
             ],
@@ -420,11 +426,10 @@ impl TerminalRenderer {
 
     pub fn new(
         device: &Device,
-        font_family: Option<&str>,
+        font_family: &str,
         font_size: f32,
         format: TextureFormat,
     ) -> Self {
-        use fontdb::{Database, Family, Query, Stretch, Weight};
         // GPU limits describe supported dimensions, not a useful atlas size.
         // Bound allocations and full-atlas uploads when reloading the config.
         let atlas_dimension = device
@@ -613,47 +618,14 @@ impl TerminalRenderer {
             mapped_at_creation: false,
         });
 
-        let mut font_db = Database::new();
-        font_db.load_system_fonts();
-
-        let normal_font = Font::from_data(Self::NORMAL_FONT, 0).unwrap();
-        let bold_font = Font::from_data(Self::BOLD_FONT, 0).unwrap();
-        let ime_font = Font::from_data(Self::IME_FONT, 0).unwrap();
+        let (normal_font, bold_font) = Self::text_faces(font_family);
         let icon_font = Font::from_data(Self::ICON_FONT, 0).unwrap();
         let emoji_font = Font::from_data(Self::EMOJI_FONT, 0).unwrap();
 
-        let (normal_font, bold_font) = if let Some(font_family) = font_family {
-            let normal_font = Self::load_font(
-                &mut font_db,
-                &Query {
-                    families: &[Family::Name(font_family)],
-                    weight: Weight::NORMAL,
-                    stretch: Stretch::Expanded,
-                    ..Default::default()
-                },
-            )
-            .inspect_err(|e| tracing::error!(?e, "failed to load font {font_family}"))
-            .unwrap_or(normal_font);
-
-            let bold_font = Self::load_font(
-                &mut font_db,
-                &Query {
-                    families: &[Family::Name(font_family)],
-                    weight: Weight::BOLD,
-                    stretch: Stretch::Expanded,
-                    ..Default::default()
-                },
-            )
-            .inspect_err(|e| tracing::error!(?e, "failed to load font {font_family}"))
-            .unwrap_or(bold_font);
-            (normal_font, bold_font)
-        } else {
-            (normal_font, bold_font)
-        };
-
         Self {
             font_size,
-            font_db,
+            cell_width: Self::measure_cell_width(&normal_font, font_size),
+            font_family: font_family.to_owned(),
 
             _shader: shader,
             pipeline,
@@ -674,7 +646,7 @@ impl TerminalRenderer {
             shape_context: ShapeContext::new(),
             normal_font,
             bold_font,
-            ime_font,
+            ime_font: system::cjk_face(),
             icon_font,
             emoji_font,
             glyph_atlas: glyph_atlas_allocator,
@@ -696,56 +668,45 @@ impl TerminalRenderer {
 
     pub fn set_font_size(&mut self, font_size: f32) {
         self.font_size = font_size;
+        self.cell_width = Self::measure_cell_width(&self.normal_font, font_size);
     }
 
+    pub fn cell_width(&self) -> f32 {
+        self.cell_width
+    }
+
+    /// The regular face's advance at `font_size`, rounded so columns start on
+    /// whole pixels. Monospaced faces differ in width (Iosevka is half an em,
+    /// Cascadia Mono nearly 0.6), so a fixed fraction of the font size would
+    /// overlap or space out their glyphs.
+    fn measure_cell_width(font: &Font, font_size: f32) -> f32 {
+        let font = font.as_ref();
+        let advance = font
+            .glyph_metrics(&[])
+            .scale(font_size)
+            .advance_width(font.charmap().map('0'));
+        advance.round().max(1.0)
+    }
+
+    /// Draws the grid in an installed `font_family`, as resolved by
+    /// [`resolve_family`].
     pub fn set_font_family(&mut self, font_family: &str) {
-        use fontdb::{Family, Query, Stretch, Weight};
-        if let Ok(normal_font) = Self::load_font(
-            &mut self.font_db,
-            &Query {
-                families: &[Family::Name(font_family)],
-                weight: Weight::NORMAL,
-                stretch: Stretch::Expanded,
-                ..Default::default()
-            },
-        )
-        .inspect_err(|e| tracing::error!(?e, "failed to load font {font_family}"))
-        {
-            self.normal_font = normal_font;
+        if self.font_family == font_family {
+            return;
         }
-
-        if let Ok(bold_font) = Self::load_font(
-            &mut self.font_db,
-            &Query {
-                families: &[Family::Name(font_family)],
-                weight: Weight::BOLD,
-                stretch: Stretch::Expanded,
-                ..Default::default()
-            },
-        )
-        .inspect_err(|e| tracing::error!(?e, "failed to load font {font_family}"))
-        {
-            self.bold_font = bold_font;
-        }
+        (self.normal_font, self.bold_font) = Self::text_faces(font_family);
+        self.cell_width = Self::measure_cell_width(&self.normal_font, self.font_size);
+        self.font_family = font_family.to_owned();
+        self.evict_glyphs();
     }
 
-    fn load_font(font_db: &mut fontdb::Database, query: &fontdb::Query<'_>) -> Result<Font> {
-        use fontdb::Source as FontSource;
-        let id = font_db.query(query).context("font query failed")?;
-        let (source, index) = font_db
-            .face_source(id)
-            .context("failed to find face source")?;
-        match source {
-            FontSource::File(path) => {
-                Font::from_file(path, index as usize).context("failed to load font from file")
-            }
-            FontSource::Binary(data) => Font::from_data(data.as_ref().as_ref(), index as usize)
-                .context("failed to load from memory"),
-            FontSource::SharedFile(_, data) => {
-                Font::from_data(data.as_ref().as_ref(), index as usize)
-                    .context("failed to load from memory")
-            }
-        }
+    /// The regular and bold faces of `font_family`, or the bundled icon
+    /// font's when it can't be loaded.
+    fn text_faces(font_family: &str) -> (Font, Font) {
+        system::text_faces(font_family).unwrap_or_else(|| {
+            let bundled = || Font::from_data(Self::ICON_FONT, 0).unwrap();
+            (bundled(), bundled())
+        })
     }
 
     fn finalize(&mut self, device: &Device, queue: &Queue) {
@@ -936,7 +897,7 @@ impl TerminalRenderer {
         let font = match variant {
             FontVariant::Normal => &self.normal_font,
             FontVariant::Bold => &self.bold_font,
-            FontVariant::Ime => &self.ime_font,
+            FontVariant::Ime => self.ime_font.as_ref().unwrap_or(&self.normal_font),
             FontVariant::Icon => &self.icon_font,
             FontVariant::Emoji => &self.emoji_font,
         };
@@ -975,31 +936,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bundled_fallbacks_cover_emoji_and_preserve_text_and_icons() {
-        let normal = Font::from_data(TerminalRenderer::NORMAL_FONT, 0).unwrap();
-        let bold = Font::from_data(TerminalRenderer::BOLD_FONT, 0).unwrap();
-        let ime = Font::from_data(TerminalRenderer::IME_FONT, 0).unwrap();
+    fn bundled_fallbacks_cover_emoji_and_preserve_text() {
+        // The bundled icon face stands in for the installed text face, so the
+        // test doesn't depend on the fonts of the machine running it.
+        let text = Font::from_data(TerminalRenderer::ICON_FONT, 0).unwrap();
         let icon = Font::from_data(TerminalRenderer::ICON_FONT, 0).unwrap();
         let emoji = Font::from_data(TerminalRenderer::EMOJI_FONT, 0).unwrap();
 
         for text_variant in [FontVariant::Normal, FontVariant::Bold] {
             let fonts = [
-                (
-                    text_variant,
-                    if text_variant == FontVariant::Bold {
-                        &bold
-                    } else {
-                        &normal
-                    },
-                ),
-                (FontVariant::Ime, &ime),
+                (text_variant, &text),
+                // No CJK family installed: the text face is tried again.
+                (FontVariant::Ime, &text),
                 (FontVariant::Icon, &icon),
                 (FontVariant::Emoji, &emoji),
             ];
             for (cluster, expected) in [
                 ("A", text_variant),
-                ("한", FontVariant::Ime),
-                ("\u{f015}", FontVariant::Icon),
+                ("\u{f015}", text_variant),
+                // Covered by nothing: the icon face draws its missing glyph.
+                ("한", FontVariant::Icon),
                 ("📦", FontVariant::Emoji),
                 ("📦\u{fe0f}", FontVariant::Emoji),
                 ("👩\u{200d}💻", FontVariant::Emoji),
@@ -1013,6 +969,14 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cells_are_as_wide_as_the_text_face_advance() {
+        // JetBrains Mono advances 600 of its 1000 units per em.
+        let font = Font::from_data(TerminalRenderer::ICON_FONT, 0).unwrap();
+        assert_eq!(TerminalRenderer::measure_cell_width(&font, 24.0), 14.0);
+        assert_eq!(TerminalRenderer::measure_cell_width(&font, 38.0), 23.0);
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! Compact Lua suggestions with a separate reading area for the selected item.
 
+use super::components::{PyStyled as _, hint};
 use super::signature_help::SignaturePopover;
-use crate::PyTheme as _;
+use super::theme::{PyTheme as _, Theme};
 use async_lsp::lsp_types::SignatureHelp;
 use async_lsp::lsp_types::{CompletionItem, CompletionItemKind as Kind, Documentation, MarkupKind};
 use gpui::{prelude::*, *};
@@ -57,16 +58,8 @@ impl CompletionMenu {
     ) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let (symbol, kind) = kind_label(item.kind);
-        let highlights = match_prefix(&item.label, fragment).map(|range| {
-            (
-                range,
-                HighlightStyle {
-                    color: Some(rgb_to_hsla(theme.accent)),
-                    font_weight: Some(FontWeight::SEMIBOLD),
-                    ..Default::default()
-                },
-            )
-        });
+        let highlights =
+            match_prefix(&item.label, fragment).map(|range| (range, theme.match_highlight()));
         let deprecated = item.deprecated == Some(true)
             || item.tags.as_ref().is_some_and(|tags| {
                 tags.contains(&async_lsp::lsp_types::CompletionItemTag::DEPRECATED)
@@ -83,12 +76,13 @@ impl CompletionMenu {
             .gap_2()
             .pr_3()
             .border_l_2()
+            // Not `list_row`: these rows sit on glass.
             .border_color(if selected {
                 theme.accent
             } else {
-                theme.accent.opacity(0.0)
+                Theme::TRANSPARENT
             })
-            .when(selected, |row| row.bg(theme.accent.opacity(0.12)))
+            .when(selected, |row| row.bg(theme.glass_selected))
             .when(!selected, |row| row.hover(|style| style.bg(theme.hovered)))
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
@@ -167,13 +161,7 @@ impl CompletionMenu {
             .occlude()
             .w(width)
             .h(height)
-            .flex_none()
-            .overflow_hidden()
-            .rounded_md()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface.opacity(0.15))
-            .backdrop_blur(px(24.0))
+            .popover(cx)
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
@@ -258,9 +246,6 @@ impl RenderOnce for CompletionMenu {
             return div().into_any_element();
         }
         let theme = cx.theme();
-        let mono = gpui_component::ActiveTheme::theme(cx)
-            .mono_font_family
-            .clone();
         let available_width = (window.viewport_size().width - px(16.0)).max(px(0.0));
         // Keep both popovers inside the window. In narrow windows the list
         // takes priority; documentation stays to the right whenever it fits.
@@ -321,7 +306,7 @@ impl RenderOnce for CompletionMenu {
                 v_flex()
                     .gap_2()
                     .flex_none()
-                    .font_family(mono)
+                    .mono(cx)
                     .text_size(px(13.0))
                     .text_color(theme.text)
                     .when_some(signature_help, |popovers, help| {
@@ -339,13 +324,7 @@ impl RenderOnce for CompletionMenu {
                                         .aria_label("Lua suggestions")
                                         .occlude()
                                         .w(width)
-                                        .flex_none()
-                                        .overflow_hidden()
-                                        .rounded_md()
-                                        .border_1()
-                                        .border_color(theme.border)
-                                        .bg(theme.surface.opacity(0.15))
-                                        .backdrop_blur(px(24.0))
+                                        .popover(cx)
                                         .text_color(theme.text)
                                         .on_mouse_down(MouseButton::Left, |_, window, cx| {
                                             window.prevent_default();
@@ -405,10 +384,10 @@ impl RenderOnce for CompletionMenu {
                                                 .border_t_1()
                                                 .border_color(theme.border)
                                                 .when(!compact, |footer| {
-                                                    footer.child(hint("↑ ↓", "select", cx))
+                                                    footer.child(hint("↑↓", "choose", cx))
                                                 })
-                                                .child(hint("Tab", "insert", cx))
-                                                .child(hint("Esc", "dismiss", cx)),
+                                                .child(hint("tab", "insert", cx))
+                                                .child(hint("esc", "dismiss", cx)),
                                         ),
                                 )
                                 .when(show_details, |popovers| popovers.child(details)),
@@ -439,15 +418,6 @@ fn match_prefix(label: &str, fragment: &str) -> Option<std::ops::Range<usize>> {
         .nth(fragment.chars().count())
         .map_or(label.len(), |(index, _)| index);
     (label[..end].to_lowercase() == fragment.to_lowercase()).then_some(0..end)
-}
-
-fn hint(key: &'static str, action: &'static str, cx: &App) -> impl IntoElement + use<> {
-    h_flex()
-        .items_center()
-        .gap_1p5()
-        .text_size(px(11.0))
-        .child(div().text_color(cx.theme().text).child(key))
-        .child(div().text_color(cx.theme().text_muted).child(action))
 }
 
 fn kind_label(kind: Option<Kind>) -> (&'static str, &'static str) {

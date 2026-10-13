@@ -1,7 +1,7 @@
 mod background;
 mod glyph;
 pub use background::BackgroundRenderer;
-pub use glyph::TerminalRenderer;
+pub use glyph::{DEFAULT_FAMILIES, TerminalRenderer, prewarm_system_fonts, resolve_family};
 
 use anyhow::Result;
 use unicode_segmentation::UnicodeSegmentation;
@@ -95,7 +95,7 @@ impl Renderer {
         queue: Queue,
         device: Device,
         format: TextureFormat,
-        font_family: Option<&str>,
+        font_family: &str,
         font_size: f32,
         line_height: f32,
     ) -> Result<Self> {
@@ -135,6 +135,11 @@ impl Renderer {
         self.terminal_renderer.set_font_family(font_family);
     }
 
+    /// One column's width in pixels, measured from the grid's font.
+    pub fn cell_width(&self) -> f32 {
+        self.terminal_renderer.cell_width()
+    }
+
     pub fn render(
         &mut self,
         view: &TextureView,
@@ -149,8 +154,9 @@ impl Renderer {
         let divider_width = (divider_px / size[0].max(1) as f32) * 2.0;
         let divider_height = (divider_px / size[1].max(1) as f32) * 2.0;
 
+        let cell_width = self.cell_width();
         let [w, h] = [
-            self.font_size / size[0] as f32,
+            (cell_width * 2.0) / size[0] as f32,
             (self.line_height * 2.0) / size[1] as f32,
         ];
         //  TODO(K): paraellize this -- maybe this will allow proper line shaping without having a
@@ -182,7 +188,7 @@ impl Renderer {
                     } else {
                         Color::from(cell.bgcolor())
                     };
-                    let x = self.font_size / 2.0 * (f32::from(pane.geometry.x) + f32::from(col));
+                    let x = cell_width * (f32::from(pane.geometry.x) + f32::from(col));
                     let y = self.line_height * (f32::from(pane.geometry.y) + f32::from(row) + 1.0);
                     {
                         let [x, y] = self.ndc([x, y], size);
@@ -243,7 +249,7 @@ impl Renderer {
 
             if pane.is_active && !pane.screen.hide_cursor() && pane.screen.scrollback() == 0 {
                 let (row, col) = pane.screen.cursor_position();
-                let x = self.font_size / 2.0 * (f32::from(pane.geometry.x) + f32::from(col));
+                let x = cell_width * (f32::from(pane.geometry.x) + f32::from(col));
                 let y = self.line_height * (f32::from(pane.geometry.y) + f32::from(row) + 1.0);
                 let [x, y] = self.ndc([x, y], size);
                 let [w, h] = match pane.cursor_style {
@@ -252,11 +258,11 @@ impl Renderer {
                         (self.line_height * 2.0) / size[1] as f32,
                     ],
                     CursorState::Block => [
-                        (self.font_size) / size[0] as f32,
+                        (cell_width * 2.0) / size[0] as f32,
                         (self.line_height * 2.0) / size[1] as f32,
                     ],
                     CursorState::Underline => [
-                        (self.font_size) / size[0] as f32,
+                        (cell_width * 2.0) / size[0] as f32,
                         (self.line_height * 0.1) / size[1] as f32,
                     ],
                 };
@@ -272,7 +278,7 @@ impl Renderer {
         for divider in dividers {
             match divider.direction {
                 SplitDirection::Vertical => {
-                    let x = self.font_size / 2.0 * f32::from(divider.x);
+                    let x = cell_width * f32::from(divider.x);
                     let y = self.line_height * f32::from(divider.y + divider.rows);
                     let height = divider_height * f32::from(divider.rows.max(1)) * self.line_height;
                     let [x, y] = self.ndc([x, y], size);
@@ -280,10 +286,10 @@ impl Renderer {
                         .add_rect(x, y, divider_width, height, divider_color);
                 }
                 SplitDirection::Horizontal => {
-                    let x = self.font_size / 2.0 * f32::from(divider.x);
+                    let x = cell_width * f32::from(divider.x);
                     let y = self.line_height * f32::from(divider.y) + divider_px;
                     let width =
-                        divider_width * f32::from(divider.cols.max(1)) * (self.font_size / 2.0);
+                        divider_width * f32::from(divider.cols.max(1)) * cell_width;
                     let [x, y] = self.ndc([x, y], size);
                     self.divider_renderer
                         .add_rect(x, y, width, divider_height, divider_color);
@@ -326,11 +332,12 @@ impl Renderer {
     }
 
     fn draw_ime_preedit(&mut self, preedit: &ImePreedit, screen_size: [f32; 2]) {
+        let cell_width = self.cell_width();
         let size = [screen_size[0] as u32, screen_size[1] as u32];
-        let x = self.font_size / 2.0 * (f32::from(preedit.geometry.x) + f32::from(preedit.col));
+        let x = cell_width * (f32::from(preedit.geometry.x) + f32::from(preedit.col));
         let y = self.line_height * (f32::from(preedit.geometry.y) + f32::from(preedit.row) + 1.0);
         let width_cols = preedit.text.graphemes(true).count().max(1);
-        let width = ((self.font_size / 2.0) * width_cols as f32 / size[0].max(1) as f32) * 2.0;
+        let width = (cell_width * width_cols as f32 / size[0].max(1) as f32) * 2.0;
         let height = (self.line_height * 2.0) / size[1].max(1) as f32;
         let [bg_x, bg_y] = self.ndc([x, y], size);
 
@@ -338,7 +345,7 @@ impl Renderer {
             .add_rect(bg_x, bg_y, width, height, [129, 134, 153, 235]); //[0.22, 0.24, 0.32, 0.92]
 
         for (col, cluster) in preedit.text.graphemes(true).enumerate() {
-            let pos = [x + (self.font_size / 2.0) * col as f32, y];
+            let pos = [x + cell_width * col as f32, y];
             self.terminal_renderer.add_cluster(
                 &self.queue,
                 pos,

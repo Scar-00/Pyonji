@@ -2,7 +2,16 @@
 
 use std::{collections::HashMap, io::Write as _, path::Path};
 
-use crate::{Next, Prev, PushError, PyTheme as _, Pyonji, Submit};
+use crate::{
+    Next, Prev, PushError, Pyonji, Submit,
+    ui::{
+        PyTheme as _, Theme,
+        components::{
+            EmptyState, PyInteractive as _, PyStyled as _, SearchField, editable_combo_box, hint,
+            panel_footer, rule,
+        },
+    },
+};
 use anyhow::Context as _;
 use async_compat::CompatExt;
 use gpui::{prelude::FluentBuilder as _, *};
@@ -10,7 +19,7 @@ use gpui_base::{Disableable, ScrollbarAxis, actions::Cancel, h_flex, v_flex};
 use gpui_component::{
     Icon, IconName, Sizable, WindowExt,
     button::{Button, ButtonRounded, ButtonVariants},
-    input::{Input, InputEvent, InputState},
+    input::{InputEvent, InputState},
     progress::Progress,
     scroll::ScrollableElement,
     spinner::Spinner,
@@ -138,6 +147,18 @@ fn describe(triple: &str) -> String {
     } else {
         format!("{platform} {cpu}")
     }
+}
+
+/// Whether dotted version `a` comes before `b`. Parts that are not numbers
+/// count as zero, so an odd tag reads as old rather than failing.
+fn is_older(a: &str, b: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> {
+        v.trim_start_matches('v')
+            .split(['.', '-'])
+            .map(|part| part.parse().unwrap_or(0))
+            .collect()
+    };
+    parts(a) < parts(b)
 }
 
 fn bare_url(url: &str) -> &str {
@@ -445,11 +466,13 @@ impl ReleasesView {
         if entries.is_empty() {
             return;
         }
-        let len = entries.len() as isize;
+        // Stop at the ends, as the palette does: a list that wraps lands on a
+        // release nobody was looking at, one keypress away from installing it.
+        let last = entries.len() as isize - 1;
         let at = entries
             .iter()
             .position(|e| Some(e.ix) == self.selected)
-            .map(|at| (at as isize + delta).rem_euclid(len))
+            .map(|at| (at as isize + delta).clamp(0, last))
             .unwrap_or(0);
         self.select(Some(entries[at as usize].ix), cx);
     }
@@ -585,7 +608,7 @@ impl ReleasesView {
         let releases = self.releases.as_ref()?;
         let newest = releases.first()?;
         if newest.version() == RUNNING {
-            return Some(("the newest release".to_string(), theme.success));
+            return Some(("up to date".to_string(), theme.success));
         }
         Some(if releases.iter().any(|r| r.version() == RUNNING) {
             (format!("v{} is available", newest.version()), theme.warning)
@@ -596,18 +619,8 @@ impl ReleasesView {
 
     // ---------------------------------------------------------------- render
 
-    fn render_header(
-        &self,
-        compact: bool,
-        window: &Window,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
+    fn render_header(&self, compact: bool, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let filtering = self
-            .search_input
-            .read(cx)
-            .focus_handle(cx)
-            .is_focused(window);
 
         h_flex()
             .min_h(px(56.0))
@@ -624,7 +637,7 @@ impl ReleasesView {
                     .min_w_0()
                     .items_center()
                     .gap_3()
-                    .font_family(mono(cx))
+                    .mono(cx)
                     .text_size(px(14.0))
                     .child(
                         div()
@@ -636,42 +649,19 @@ impl ReleasesView {
                     .when_some(
                         (!compact).then(|| self.status(cx)).flatten(),
                         |this, (status, color)| {
-                            this.child(rule(theme))
+                            this.child(rule(cx))
                                 .child(div().min_w_0().truncate().text_color(color).child(status))
                         },
                     ),
             )
             .child(div().flex_1())
             .child(
-                // A ruled field to match the screen, lit only while focused so
-                // the caret is not the only focus cue.
-                h_flex()
+                SearchField::new(&self.search_input)
+                    .boxed()
+                    .mono(cx)
                     .flex_1()
                     .min_w(px(120.0))
-                    .max_w(px(240.0))
-                    .h(px(32.0))
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .font_family(mono(cx))
-                    .border_1()
-                    .border_color(if filtering {
-                        theme.focus_ring
-                    } else {
-                        theme.border
-                    })
-                    .child(
-                        Icon::new(IconName::Search)
-                            .small()
-                            .text_color(theme.text_muted),
-                    )
-                    .child(
-                        Input::new(&self.search_input)
-                            .role(gpui_base::RoleOverride::Presentational)
-                            .flex_1()
-                            .appearance(false)
-                            .bordered(false),
-                    ),
+                    .max_w(px(240.0)),
             )
             .child(
                 Button::new("reload")
@@ -735,17 +725,7 @@ impl ReleasesView {
             .gap_3()
             .pl_4()
             .pr_3()
-            // A rule and a raised fill, so selection cannot be mistaken for
-            // hover.
-            .border_l_2()
-            .border_color(if selected {
-                theme.selected_border
-            } else {
-                none()
-            })
-            .when(selected, |this| this.bg(theme.surface_elevated))
-            .when(!selected, |this| this.hover(|s| s.bg(theme.hovered)))
-            .cursor_pointer()
+            .list_row(selected, cx)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select(Some(ix), cx);
             }))
@@ -754,17 +734,17 @@ impl ReleasesView {
                 div()
                     .w(px(14.0))
                     .flex_shrink_0()
-                    .child(
-                        div()
-                            .size(px(6.0))
-                            .bg(if running { theme.accent } else { none() }),
-                    ),
+                    .child(div().size(px(6.0)).bg(if running {
+                        theme.accent
+                    } else {
+                        Theme::TRANSPARENT
+                    })),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .font_family(mono(cx))
+                    .mono(cx)
                     .text_size(px(22.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(if selected {
@@ -777,7 +757,7 @@ impl ReleasesView {
             .child(
                 div()
                     .flex_shrink_0()
-                    .font_family(mono(cx))
+                    .mono(cx)
                     .text_size(px(11.0))
                     .text_color(theme.text_muted)
                     .child(entry.date.clone()),
@@ -794,25 +774,8 @@ impl ReleasesView {
 
         if self.releases.is_none() {
             return match &self.fetch_error {
-                Some(reason) => v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .gap_3()
-                    .px_8()
-                    .child(
-                        div()
-                            .text_size(px(14.0))
-                            .text_color(theme.text)
-                            .child("Could not fetch releases from GitHub."),
-                    )
-                    .child(
-                        div()
-                            .max_w(px(440.0))
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted)
-                            .child(reason.clone()),
-                    )
+                Some(reason) => EmptyState::new("Could not fetch releases from GitHub.")
+                    .detail(reason.clone())
                     .child(
                         Button::new("retry")
                             .secondary()
@@ -824,18 +787,9 @@ impl ReleasesView {
                             })),
                     )
                     .into_any_element(),
-                None => v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .gap_3()
-                    .child(Spinner::new())
-                    .child(
-                        div()
-                            .text_size(px(14.0))
-                            .text_color(theme.text_muted)
-                            .child("Fetching releases from GitHub…"),
-                    )
+                None => EmptyState::new("Fetching releases from GitHub…")
+                    .muted(cx)
+                    .icon(Spinner::new())
                     .into_any_element(),
             };
         }
@@ -843,49 +797,34 @@ impl ReleasesView {
         if entries.is_empty() {
             let query = self.search_input.read(cx).value();
             let filtered = !query.is_empty();
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .child(
-                    Icon::new(IconName::Inbox)
-                        .size_8()
-                        .text_color(theme.text_muted),
-                )
-                .child(
+            return EmptyState::new(if filtered {
+                format!("No release matches \u{201c}{query}\u{201d}.")
+            } else {
+                "No releases yet.".to_string()
+            })
+            .muted(cx)
+            .icon(
+                Icon::new(IconName::Inbox)
+                    .size_8()
+                    .text_color(theme.text_muted),
+            )
+            .when(filtered, |this| {
+                this.child(
                     div()
-                        .text_size(px(14.0))
-                        .text_color(theme.text_muted)
-                        .child(if filtered {
-                            format!("No release matches \u{201c}{query}\u{201d}.")
-                        } else {
-                            "No releases yet.".to_string()
-                        }),
+                        .id("clear-filter")
+                        .role(gpui::accesskit::Role::Button)
+                        .tab_index(0)
+                        .aria_label("Clear release filter")
+                        .px_2()
+                        .py_1()
+                        .outlined(cx)
+                        .text_size(px(12.0))
+                        .text_color(theme.accent)
+                        .on_click(cx.listener(|this, _, window, cx| this.clear_filter(window, cx)))
+                        .child("Clear filter"),
                 )
-                .when(filtered, |this| {
-                    this.child(
-                        div()
-                            .id("clear-filter")
-                            .role(gpui::accesskit::Role::Button)
-                            .tab_index(0)
-                            .focus_visible(|style| style.border_color(theme.focus_ring))
-                            .aria_label("Clear release filter")
-                            .px_2()
-                            .py_1()
-                            .border_1()
-                            .border_color(theme.border)
-                            .text_size(px(12.0))
-                            .text_color(theme.accent)
-                            .cursor_pointer()
-                            .hover(|s| s.border_color(theme.accent))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.clear_filter(window, cx)),
-                            )
-                            .child("Clear filter"),
-                    )
-                })
-                .into_any_element();
+            })
+            .into_any_element();
         }
 
         div()
@@ -911,17 +850,8 @@ impl ReleasesView {
         let theme = cx.theme();
 
         let Some(entry) = entry else {
-            return v_flex()
-                .flex_1()
-                .min_w_0()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .text_size(px(14.0))
-                        .text_color(theme.text_muted)
-                        .child("No release selected."),
-                )
+            return EmptyState::new("No release selected.")
+                .muted(cx)
                 .into_any_element();
         };
 
@@ -950,7 +880,7 @@ impl ReleasesView {
                                     .gap_1()
                                     .child(
                                         div()
-                                            .font_family(mono(cx))
+                                            .mono(cx)
                                             .text_size(px(30.0))
                                             .font_weight(FontWeight::MEDIUM)
                                             .letter_spacing(px(-0.5))
@@ -972,14 +902,14 @@ impl ReleasesView {
                                 h_flex()
                                     .items_center()
                                     .gap_3()
-                                    .font_family(mono(cx))
+                                    .mono(cx)
                                     .text_size(px(12.0))
                                     .child(
                                         div()
                                             .text_color(theme.text_muted)
                                             .child(entry.date.clone()),
                                     )
-                                    .child(rule(theme))
+                                    .child(rule(cx))
                                     .child(div().text_color(theme.text_muted).child(
                                         match entry.mine {
                                             Some(_) => {
@@ -1015,7 +945,11 @@ impl ReleasesView {
                 // The same accent rule the rail uses for selection marks the
                 // build that works here.
                 .border_l_2()
-                .border_color(if mine { theme.selected_border } else { none() })
+                .border_color(if mine {
+                    theme.selected_border
+                } else {
+                    Theme::TRANSPARENT
+                })
                 .child(
                     div()
                         .when(!compact, |label| label.w(px(112.0)))
@@ -1029,7 +963,7 @@ impl ReleasesView {
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .font_family(mono(cx))
+                        .mono(cx)
                         .text_size(px(12.0))
                         .text_color(theme.text_muted)
                         .child(build.triple.clone()),
@@ -1087,7 +1021,6 @@ impl ReleasesView {
                         .id(("changelog", entry.ix))
                         .role(gpui::accesskit::Role::Link)
                         .tab_index(0)
-                        .focus_visible(|style| style.border_color(theme.focus_ring))
                         .aria_label("Read the changelog on GitHub")
                         .flex_wrap()
                         .w_full()
@@ -1095,11 +1028,8 @@ impl ReleasesView {
                         .gap_3()
                         .px_3()
                         .py_2()
-                        .border_1()
-                        .border_color(theme.border)
+                        .outlined(cx)
                         .text_size(px(12.0))
-                        .cursor_pointer()
-                        .hover(|s| s.border_color(theme.accent))
                         .on_click({
                             let url = url.clone();
                             move |_, _, cx: &mut App| cx.open_url(&url)
@@ -1116,7 +1046,7 @@ impl ReleasesView {
                                 .min_w_0()
                                 .truncate()
                                 .text_right()
-                                .font_family(mono(cx))
+                                .mono(cx)
                                 .text_size(px(11.0))
                                 .text_color(theme.text_muted)
                                 .child(bare_url(&url).to_string()),
@@ -1155,16 +1085,8 @@ impl ReleasesView {
         // Below this the footer's parts fight for room and all three truncate.
         let roomy = window.viewport_size().width >= px(900.);
 
-        h_flex()
+        panel_footer(cx)
             .min_h(px(56.0))
-            .py_2()
-            .flex_wrap()
-            .flex_shrink_0()
-            .items_center()
-            .gap_4()
-            .px_4()
-            .border_t_1()
-            .border_color(theme.border)
             .child(
                 // An install replaces the running binary; say so before the
                 // button is pressed.
@@ -1176,16 +1098,12 @@ impl ReleasesView {
                     .text_size(px(12.0))
                     .text_color(theme.text_muted)
                     .when(entry.is_some(), |this| {
-                        this.child(div().child("Replaces ")).child(
-                            div()
-                                .font_family(mono(cx))
-                                .truncate()
-                                .child(self.binary.clone()),
-                        )
+                        this.child(div().child("Replaces "))
+                            .child(div().mono(cx).truncate().child(self.binary.clone()))
                     })
                     .when(entry.is_none(), |this| this.child("Nothing selected"))
                     .when(roomy && entry.is_some(), |this| {
-                        this.child(rule(theme))
+                        this.child(rule(cx))
                             .child(div().child(if installable {
                                 "for"
                             } else {
@@ -1193,7 +1111,7 @@ impl ReleasesView {
                             }))
                             .child(
                                 div()
-                                    .font_family(mono(cx))
+                                    .mono(cx)
                                     .text_color(if installable {
                                         theme.text_muted
                                     } else {
@@ -1210,7 +1128,15 @@ impl ReleasesView {
                     .primary()
                     .small()
                     .rounded(ButtonRounded::None)
+                    // Name what the press does to this binary: the same
+                    // version again, or a step back, is not an "install".
                     .label(match entry {
+                        Some(e) if e.installable() && e.version == RUNNING => {
+                            format!("Reinstall v{}", e.version)
+                        }
+                        Some(e) if e.installable() && is_older(&e.version, RUNNING) => {
+                            format!("Downgrade to v{}", e.version)
+                        }
                         Some(e) if e.installable() => format!("Install v{}", e.version),
                         Some(e) => format!("No build for v{}", e.version),
                         None => "Install".to_string(),
@@ -1223,32 +1149,11 @@ impl ReleasesView {
     }
 
     fn render_hints(&self, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-
-        let hint = |keys: &'static str, what: &'static str| {
-            h_flex()
-                .items_center()
-                .gap_1p5()
-                .child(
-                    div()
-                        .font_family(mono(cx))
-                        .text_size(px(11.0))
-                        .text_color(theme.text)
-                        .child(keys),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme.text_muted)
-                        .child(what),
-                )
-        };
-
         h_flex()
             .flex_shrink_0()
             .gap_4()
-            .child(hint("↑↓", "choose"))
-            .child(hint("⏎", "install"))
+            .child(hint("↑↓", "choose", cx))
+            .child(hint("⏎", "install", cx))
             .child(hint(
                 "esc",
                 if self.search_input.read(cx).value().is_empty() {
@@ -1256,6 +1161,7 @@ impl ReleasesView {
                 } else {
                     "clear filter"
                 },
+                cx,
             ))
     }
 
@@ -1288,7 +1194,7 @@ impl ReleasesView {
                     )
                     .child(
                         div()
-                            .font_family(mono(cx))
+                            .mono(cx)
                             .text_color(theme.text_muted)
                             .child(format!("{progress:.0}%")),
                     ),
@@ -1308,16 +1214,9 @@ impl ReleasesView {
     ) -> impl IntoElement {
         let theme = cx.theme();
 
-        h_flex()
+        panel_footer(cx)
             .min_h(px(56.0))
-            .py_2()
-            .flex_wrap()
-            .flex_shrink_0()
-            .items_center()
             .gap_2()
-            .px_4()
-            .border_t_1()
-            .border_color(theme.border)
             .child(
                 div()
                     .flex_1()
@@ -1371,7 +1270,7 @@ impl Render for ReleasesView {
             .min_h_0()
             .overflow_hidden()
             .child(
-                crate::ui::combo_box::editable_combo_box(
+                editable_combo_box(
                     "release-search-results",
                     "Releases",
                     "Filter versions",
@@ -1382,7 +1281,7 @@ impl Render for ReleasesView {
                 .size_full()
                 .min_h_0()
                 .overflow_hidden()
-                .child(self.render_header(compact, window, cx))
+                .child(self.render_header(compact, cx))
                 .child(self.render_body(&entries, compact, cx))
                 .child(self.render_footer(selected, window, cx)),
             )
@@ -1391,28 +1290,23 @@ impl Render for ReleasesView {
 
 // ------------------------------------------------------------------ helpers
 
-fn mono(cx: &App) -> SharedString {
-    gpui_component::ActiveTheme::theme(cx)
-        .mono_font_family
-        .clone()
-}
-
-/// A border or fill that should show nothing still needs a colour.
-fn none() -> Rgba {
-    rgba(0x00000000)
-}
-
-fn rule(theme: &crate::Theme) -> impl IntoElement {
-    div()
-        .w(px(1.0))
-        .h(px(14.0))
-        .flex_shrink_0()
-        .bg(theme.border)
-}
-
 #[derive(Debug, serde::Deserialize)]
 struct AssetResult {
     browser_download_url: String,
     #[serde(flatten)]
     _rest: HashMap<String, serde_json::Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_older;
+
+    #[test]
+    fn versions_compare_by_number_not_by_text() {
+        assert!(is_older("0.3.0", "0.4.0"));
+        assert!(is_older("0.9.0", "0.10.0"));
+        assert!(is_older("v1.2", "1.2.1"));
+        assert!(!is_older("0.4.0", "0.4.0"));
+        assert!(!is_older("0.5.0", "0.4.0"));
+    }
 }

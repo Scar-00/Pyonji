@@ -64,9 +64,17 @@ impl Terminal {
         cx.notify();
     }
 
+    /// One column's width in device pixels: measured by the renderer from the
+    /// grid's font, or half the font size until the renderer exists.
+    fn cell_width(&self, font_size: f32) -> f32 {
+        self.renderer
+            .as_ref()
+            .map_or(font_size / 2.0, Renderer::cell_width)
+    }
+
     pub fn cell_metrics(&self, font_size: f32, line_height: f32) -> Option<(f32, f32)> {
         let scale = self.scale.max(f32::EPSILON);
-        let cell_width = (font_size / 2.0) / scale;
+        let cell_width = self.cell_width(font_size) / scale;
         let line_height = line_height / scale;
         (cell_width > 0.0 && line_height > 0.0).then_some((cell_width, line_height))
     }
@@ -228,7 +236,9 @@ impl Terminal {
             return;
         };
 
-        if self.renderer.is_none() {
+        if self.renderer.is_none()
+            && let Some(text_family) = pyonji.read(cx).text_family.as_ref()
+        {
             let pyonji = pyonji.read(cx);
             let queue = context.queue().clone();
             let device = context.device().clone();
@@ -236,7 +246,7 @@ impl Terminal {
                 queue,
                 device,
                 target.format(),
-                pyonji.font_family.as_deref(),
+                &text_family.installed,
                 pyonji.font_size,
                 pyonji.font_size * pyonji.line_height,
             )
@@ -244,7 +254,7 @@ impl Terminal {
         }
 
         let font_size = pyonji.read(cx).font_size;
-        let cols = ((target_size.width.0 as f32 / (font_size / 2.0)) as u16).max(1);
+        let cols = ((target_size.width.0 as f32 / self.cell_width(font_size)) as u16).max(1);
         let rows = ((target_size.height.0 as f32 / (font_size * pyonji.read(cx).line_height))
             as u16)
             .max(1);

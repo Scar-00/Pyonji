@@ -1,6 +1,7 @@
 //! Function arguments at the Lua prompt's current caret.
 
-use crate::PyTheme as _;
+use crate::ui::PyTheme as _;
+use crate::ui::components::PyStyled as _;
 use async_lsp::lsp_types::{Documentation, ParameterLabel, SignatureHelp, SignatureInformation};
 use gpui::{prelude::*, *};
 use gpui_base::{h_flex, v_flex};
@@ -97,13 +98,7 @@ impl RenderOnce for SignaturePopover {
             .occlude()
             .w(self.width)
             .max_h(max_height)
-            .flex_none()
-            .overflow_hidden()
-            .rounded_md()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface.opacity(0.15))
-            .backdrop_blur(px(24.0))
+            .popover(cx)
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
@@ -144,18 +139,9 @@ impl RenderOnce for SignaturePopover {
                     .pb_2()
                     .gap_1()
                     .child(div().text_color(theme.text).child(
-                        StyledText::new(signature.label.clone()).with_highlights(highlight.map(
-                            |range| {
-                                (
-                                    range,
-                                    HighlightStyle {
-                                        color: Some(rgb_to_hsla(theme.accent)),
-                                        font_weight: Some(FontWeight::SEMIBOLD),
-                                        ..Default::default()
-                                    },
-                                )
-                            },
-                        )),
+                        StyledText::new(signature.label.clone()).with_highlights(
+                            highlight.map(|range| (range, theme.match_highlight())),
+                        ),
                     ))
                     .when_some(documentation, |content, text| {
                         content.child(

@@ -9,7 +9,7 @@ use std::ops::Range;
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, FontWeight, KeyBinding, Rgba, ScrollStrategy,
-    SharedString, UniformListScrollHandle, WeakEntity, Window, actions, div, prelude::*, px, rgba,
+    SharedString, UniformListScrollHandle, WeakEntity, Window, actions, div, prelude::*, px,
     uniform_list,
 };
 use gpui_base::{actions::Cancel, h_flex, v_flex};
@@ -19,8 +19,15 @@ use gpui_component::{
 };
 
 use crate::{
-    Next, Prev, PyTheme as _, Pyonji, Submit,
+    Next, Prev, Pyonji, Submit,
     commands::{self, Origin},
+    ui::{
+        PyTheme as _, Theme,
+        components::{
+            EmptyState, PyInteractive as _, PyStyled as _, editable_combo_box, enter_mark,
+            footer_status, hint, panel_footer,
+        },
+    },
     util,
 };
 
@@ -31,7 +38,6 @@ const CONTEXT: &str = "CommandPalette";
 const ROW: f32 = 46.0;
 const SECTION: f32 = 46.0;
 const LINE: f32 = 52.0;
-const FOOTER: f32 = 40.0;
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -366,7 +372,7 @@ impl PaletteView {
                 div().w(px(2.0)).h_full().flex_shrink_0().bg(if naming {
                     theme.accent
                 } else {
-                    none()
+                    Theme::TRANSPARENT
                 }),
             )
             .child(
@@ -380,7 +386,7 @@ impl PaletteView {
                         h_flex()
                             .flex_1()
                             .min_w_0()
-                            .font_family(mono(cx))
+                            .mono(cx)
                             .text_size(px(15.0))
                             .text_color(theme.text)
                             .child(
@@ -400,7 +406,7 @@ impl PaletteView {
                                 .flex_shrink_0()
                                 .items_center()
                                 .gap_1p5()
-                                .font_family(mono(cx))
+                                .mono(cx)
                                 .text_size(px(11.0))
                                 .text_color(theme.text_muted)
                                 .child(format!("{shown}"))
@@ -418,7 +424,7 @@ impl PaletteView {
             .flex_shrink_0()
             .items_center()
             .pl_3()
-            .font_family(mono(cx))
+            .mono(cx)
             .text_size(px(10.0))
             .text_color(theme.text_muted)
             .child(origin.label())
@@ -451,17 +457,7 @@ impl PaletteView {
             .items_center()
             .gap_3()
             .pr_3()
-            // A rule and a raised fill, so selection cannot be mistaken for
-            // hover.
-            .border_l_2()
-            .border_color(if selected {
-                theme.selected_border
-            } else {
-                none()
-            })
-            .when(selected, |this| this.bg(theme.surface_elevated))
-            .when(!selected, |this| this.hover(|s| s.bg(theme.hovered)))
-            .cursor_pointer()
+            .list_row(selected, cx)
             .on_click({
                 let name = name.clone();
                 cx.listener(move |this, _, window, cx| {
@@ -485,7 +481,7 @@ impl PaletteView {
                     .items_center()
                     .gap_2()
                     .pl_3()
-                    .font_family(mono(cx))
+                    .mono(cx)
                     .text_size(px(14.0))
                     .child(
                         h_flex()
@@ -525,18 +521,7 @@ impl PaletteView {
                     .text_color(theme.text_muted)
                     .child(command.summary.clone()),
             )
-            // The gutter stays empty until a row is selected, so a mark in it
-            // means enter will do this.
-            .child(
-                h_flex()
-                    .w(px(18.0))
-                    .flex_shrink_0()
-                    .justify_end()
-                    .font_family(mono(cx))
-                    .text_size(px(12.0))
-                    .text_color(if selected { theme.accent } else { none() })
-                    .child("\u{23ce}"),
-            )
+            .child(enter_mark(selected, cx))
     }
 
     fn render_list(&self, matches: Vec<commands::Match>, cx: &Context<Self>) -> impl IntoElement {
@@ -592,19 +577,8 @@ impl PaletteView {
             format!("No command matches \u{201c}{name}\u{201d}.")
         };
 
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .items_center()
-            .justify_center()
-            .gap_4()
-            .px_8()
-            .child(
-                div()
-                    .text_size(px(14.0))
-                    .text_color(theme.text_muted)
-                    .child(heading),
-            )
+        EmptyState::new(heading)
+            .muted(cx)
             .when_some(suggestion.clone(), |this, suggestion| {
                 this.child(
                     h_flex()
@@ -614,10 +588,7 @@ impl PaletteView {
                         .px_2()
                         .py_1()
                         .rounded_sm()
-                        .border_1()
-                        .border_color(theme.border)
-                        .cursor_pointer()
-                        .hover(|s| s.border_color(theme.accent))
+                        .outlined(cx)
                         .on_click({
                             let suggestion = suggestion.clone();
                             cx.listener(move |this, _, window, cx| {
@@ -632,7 +603,7 @@ impl PaletteView {
                         )
                         .child(
                             div()
-                                .font_family(mono(cx))
+                                .mono(cx)
                                 .text_size(px(13.0))
                                 .text_color(theme.accent)
                                 .child(suggestion),
@@ -648,31 +619,13 @@ impl PaletteView {
             .map(|ix| matches[ix].command.usage())
             .unwrap_or_else(|| String::from("nothing selected"));
 
-        h_flex()
-            .min_h(px(FOOTER))
-            .py_2()
-            .flex_wrap()
-            .flex_shrink_0()
-            .items_center()
-            .gap_4()
+        panel_footer(cx)
             .px_3()
-            .border_t_1()
-            .border_color(theme.border)
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .font_family(mono(cx))
-                    .text_size(px(12.0))
-                    .text_color(theme.text_muted)
-                    .child(usage),
-            )
-            .child(hint(cx, "\u{2191}\u{2193}", "choose"))
-            .child(hint(cx, "\u{23ce}", "run"))
-            .child(hint(cx, "tab", "complete"))
+            .child(footer_status(usage, theme.text_muted).mono(cx))
+            .child(hint("\u{2191}\u{2193}", "choose", cx))
+            .child(hint("\u{23ce}", "run", cx))
+            .child(hint("tab", "complete", cx))
             .child(hint(
-                cx,
                 "esc",
                 if !commands::query_args(&self.line(cx)).is_empty() {
                     "clear arguments"
@@ -681,6 +634,7 @@ impl PaletteView {
                 } else {
                     "close"
                 },
+                cx,
             ))
     }
 }
@@ -708,7 +662,7 @@ impl Render for PaletteView {
             .size_full()
             .overflow_hidden()
             .child(
-                crate::ui::combo_box::editable_combo_box(
+                editable_combo_box(
                     "command-search-results",
                     "Commands",
                     "Run a command, or a few letters of one",
@@ -757,36 +711,4 @@ fn marked(name: &str, marks: &[Range<usize>], mark: Rgba, text: Rgba) -> impl In
         spans.push(div().text_color(text).child(name[at..].to_string()));
     }
     h_flex().children(spans)
-}
-
-fn hint(cx: &Context<PaletteView>, keys: &'static str, what: &'static str) -> impl IntoElement {
-    let theme = cx.theme();
-    h_flex()
-        .flex_shrink_0()
-        .items_center()
-        .gap_1p5()
-        .child(
-            div()
-                .font_family(mono(cx))
-                .text_size(px(11.0))
-                .text_color(theme.text)
-                .child(keys),
-        )
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(theme.text_muted)
-                .child(what),
-        )
-}
-
-fn mono(cx: &App) -> SharedString {
-    gpui_component::ActiveTheme::theme(cx)
-        .mono_font_family
-        .clone()
-}
-
-/// A border or fill that should show nothing still needs a colour.
-fn none() -> Rgba {
-    rgba(0x00000000)
 }

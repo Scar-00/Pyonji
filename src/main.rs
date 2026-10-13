@@ -22,6 +22,7 @@ mod ui;
 mod util;
 
 use assets::{GlobalAssets, PyonjiAsset, PyonjiAssetsSource};
+#[cfg(windows)]
 use gpui_component::TITLE_BAR_HEIGHT;
 use pty::Event;
 use terminal::{Tab as TerminalTab, *};
@@ -29,6 +30,8 @@ use tracing::Level;
 use tracing_subscriber::fmt::time;
 use ui::Overlay;
 use ui::Terminal;
+use ui::components::{status_icon, toast};
+use ui::{PyTheme as _, Theme};
 
 use std::path::Path;
 use std::{array, path::PathBuf, sync::Arc};
@@ -38,10 +41,7 @@ use async_channel::{Receiver, Sender};
 use clap::Parser;
 use gpui::{prelude::*, *};
 use gpui_base::*;
-use gpui_component::{
-    Icon, Root, ThemeMode, TitleBar, WindowExt,
-    notification::{Notification, NotificationType},
-};
+use gpui_component::{Icon, Root, TitleBar, WindowExt, notification::NotificationType};
 use gpui_component_assets as gassets;
 use mlua::prelude::*;
 use smallvec::{SmallVec, smallvec};
@@ -77,6 +77,7 @@ struct Cli {
 }
 
 fn main() {
+    renderer::prewarm_system_fonts();
     cfg_select! {
         feature = "install" => {
             logging::init();
@@ -107,6 +108,7 @@ fn main() {
             gpui_component::init(cx);
             gpui_tokio::init(cx);
             Theme::init(cx);
+            Theme::keep_component_overrides(cx);
 
             let window_options = Pyonji::window_options(cx);
             cx.open_window(window_options, |window, cx| {
@@ -159,6 +161,10 @@ struct Pyonji {
 
     //config
     font_family: Option<String>,
+    /// The installed family the grid and the chrome's monospaced text are
+    /// drawn in, resolved from `font_family` on every config load. `None`
+    /// until the first load, so the renderer never starts on a stand-in.
+    text_family: Option<config::TextFamily>,
     font_size: f32,
     line_height: f32,
     default_cwd: Option<PathBuf>,
@@ -168,6 +174,8 @@ struct Pyonji {
 }
 
 impl Pyonji {
+    /// Drawn in Pyonji's own title bar, which only Windows has.
+    #[cfg(windows)]
     const TITLE: &str = cfg_select! {
         feature = "install" => "Pyonji",
         _ => {
@@ -229,6 +237,7 @@ impl Pyonji {
             _subscriptions: smallvec![],
 
             font_family: None,
+            text_family: None,
             font_size: 38.0,
             line_height: 1.1,
             default_cwd: None,
@@ -451,16 +460,10 @@ impl Pyonji {
     }
 
     fn on_lua_print(&mut self, print: &PushLuaPrint, window: &mut Window, cx: &mut Context<Self>) {
-        fn lua_icon(cx: &App) -> Icon {
-            Icon::new(PyonjiAsset::Lua).text_color(gpui_component::ActiveTheme::theme(cx).info)
-        }
-
-        let note = Notification::new()
-            .icon(lua_icon(cx))
-            .bg(cx.theme().surface)
+        let lua = Icon::new(PyonjiAsset::Lua).text_color(cx.theme().info);
+        let note = toast(lua, cx)
             .title("Lua")
             .autohide(true)
-            .placement(Anchor::TopRight)
             .message(print.string.clone());
 
         window.push_notification(note, cx);
@@ -559,32 +562,9 @@ impl Pyonji {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        fn notification_icon(kind: NotificationType, cx: &App) -> Icon {
-            let theme = gpui_component::ActiveTheme::theme(cx);
-            match kind {
-                NotificationType::Error => {
-                    Icon::new(PyonjiAsset::NotificationError).text_color(theme.danger)
-                }
-                NotificationType::Warning => {
-                    Icon::new(PyonjiAsset::NotificationWarning).text_color(theme.warning)
-                }
-                NotificationType::Success => {
-                    Icon::new(PyonjiAsset::NotificationSuccess).text_color(theme.success)
-                }
-                NotificationType::Info => {
-                    Icon::new(PyonjiAsset::NotificationInfo).text_color(theme.info)
-                }
-            }
-        }
-
-        let note = Notification::new()
-            .icon(notification_icon(kind, cx))
-            .bg(cx.theme().surface.opacity(0.15))
-            .shadow(crate::ui::surface_shadow())
+        let note = toast(status_icon(kind, cx), cx)
             .title(title)
             .autohide(autohide)
-            .placement(Anchor::TopRight)
-            .backdrop_blur(px(24.0))
             .message(message);
 
         window.push_notification(note, cx);
@@ -1614,168 +1594,6 @@ impl PushLuaPrint {
     fn new(v: impl ToString) -> Self {
         Self {
             string: v.to_string().into(),
-        }
-    }
-}
-
-pub trait PyTheme {
-    fn theme(&self) -> &Theme;
-}
-
-impl PyTheme for App {
-    #[inline(always)]
-    fn theme(&self) -> &Theme {
-        Theme::global(self)
-    }
-}
-
-impl Global for Theme {}
-
-#[derive(serde::Serialize)]
-pub struct Theme {
-    // Base layers
-    pub background: Rgba,
-    pub surface: Rgba,
-    pub surface_elevated: Rgba,
-
-    // Text
-    pub text: Rgba,
-    pub text_muted: Rgba,
-    pub text_disabled: Rgba,
-
-    // Tabs / list items
-    pub selected: Rgba,
-    pub unselected: Rgba,
-    pub hovered: Rgba,
-    pub selected_border: Rgba,
-    pub unselected_border: Rgba,
-
-    // Accent
-    pub accent: Rgba,
-    pub accent_muted: Rgba,
-
-    // Terminal-specific
-    pub cursor: Rgba,
-    pub cursor_text: Rgba,
-    pub selection: Rgba,
-    pub search_match: Rgba,
-    pub search_match_active: Rgba,
-    pub scrollbar: Rgba,
-    pub scrollbar_hover: Rgba,
-    pub split_divider: Rgba,
-    pub split_divider_active: Rgba,
-
-    // Semantic status
-    pub success: Rgba,
-    pub warning: Rgba,
-    pub error: Rgba,
-    pub info: Rgba,
-
-    // Overlays / popups
-    pub overlay_backdrop: Rgba,
-    pub tooltip_background: Rgba,
-    pub border: Rgba,
-    pub focus_ring: Rgba,
-}
-
-impl Theme {
-    pub fn init(cx: &mut App) {
-        cx.set_global(Theme::new());
-    }
-
-    pub fn apply_component_theme(window: &mut Window, cx: &mut App) {
-        gpui_component::Theme::change(ThemeMode::Dark, Some(window), cx);
-        let selection = rgb_to_hsla(Self::global(cx).selection);
-        gpui_component::Theme::global_mut(cx).selection = selection;
-    }
-
-    #[allow(clippy::eq_op)]
-    fn new() -> Self {
-        Self {
-            // Base layers (kept your background)
-            background: Rgba::new(24.0 / 255.0, 24.0 / 255.0, 24.0 / 255.0, 1.0),
-            surface: Rgba::new(32.0 / 255.0, 32.0 / 255.0, 32.0 / 255.0, 1.0),
-            surface_elevated: Rgba::new(42.0 / 255.0, 42.0 / 255.0, 42.0 / 255.0, 1.0),
-
-            // Text
-            text: Rgba::new(220.0 / 255.0, 220.0 / 255.0, 220.0 / 255.0, 1.0),
-            text_muted: Rgba::new(160.0 / 255.0, 160.0 / 255.0, 160.0 / 255.0, 1.0),
-            text_disabled: Rgba::new(90.0 / 255.0, 90.0 / 255.0, 90.0 / 255.0, 1.0),
-
-            // Tabs / list items
-            selected: Rgba::new(44.0 / 255.0, 44.0 / 255.0, 44.0 / 255.0, 1.0),
-            unselected: Rgba::new(28.0 / 255.0, 28.0 / 255.0, 28.0 / 255.0, 1.0),
-            hovered: Rgba::new(36.0 / 255.0, 36.0 / 255.0, 36.0 / 255.0, 1.0),
-            selected_border: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 1.0),
-            unselected_border: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
-
-            // Accent (one hue, used everywhere emphasis is needed)
-            accent: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 1.0),
-            accent_muted: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 0.25),
-
-            // Terminal-specific
-            cursor: Rgba::new(220.0 / 255.0, 220.0 / 255.0, 220.0 / 255.0, 1.0),
-            cursor_text: Rgba::new(24.0 / 255.0, 24.0 / 255.0, 24.0 / 255.0, 1.0),
-            selection: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 0.3),
-            search_match: Rgba::new(224.0 / 255.0, 175.0 / 255.0, 104.0 / 255.0, 0.4),
-            search_match_active: Rgba::new(224.0 / 255.0, 175.0 / 255.0, 104.0 / 255.0, 0.8),
-            scrollbar: Rgba::new(255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0, 0.12),
-            scrollbar_hover: Rgba::new(255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0, 0.25),
-            split_divider: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
-            split_divider_active: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 1.0),
-
-            // Semantic status (bell, exit codes, warnings, etc.)
-            success: Rgba::new(158.0 / 255.0, 206.0 / 255.0, 106.0 / 255.0, 1.0),
-            warning: Rgba::new(224.0 / 255.0, 175.0 / 255.0, 104.0 / 255.0, 1.0),
-            error: Rgba::new(247.0 / 255.0, 118.0 / 255.0, 142.0 / 255.0, 1.0),
-            info: Rgba::new(125.0 / 255.0, 207.0 / 255.0, 255.0 / 255.0, 1.0),
-
-            // Overlays / popups
-            overlay_backdrop: Rgba::new(0.0, 0.0, 0.0, 0.5),
-            tooltip_background: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
-            border: Rgba::new(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0),
-            focus_ring: Rgba::new(201.0 / 255.0, 167.0 / 255.0, 232.0 / 255.0, 1.0),
-        }
-    }
-}
-
-#[cfg(test)]
-mod theme_readability_tests {
-    use super::Theme;
-    use gpui::Rgba;
-
-    fn luminance(color: Rgba) -> f32 {
-        let channel = |v: f32| {
-            if v <= 0.04045 {
-                v / 12.92
-            } else {
-                ((v + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * channel(color.red) + 0.7152 * channel(color.green) + 0.0722 * channel(color.blue)
-    }
-
-    #[test]
-    fn supporting_text_and_search_matches_remain_readable_on_ui_surfaces() {
-        let theme = Theme::new();
-        for background in [
-            theme.background,
-            theme.surface,
-            theme.surface_elevated,
-            theme.selected,
-            theme.hovered,
-        ] {
-            for foreground in [
-                theme.text,
-                theme.text_muted,
-                theme.accent,
-                theme.search_match,
-                theme.search_match_active,
-            ] {
-                // Search match tokens are rendered as opaque text, with an underline.
-                let contrast = (luminance(foreground) + 0.05) / (luminance(background) + 0.05);
-                assert!(contrast >= 4.5, "text contrast {contrast} is below 4.5:1");
-            }
         }
     }
 }
