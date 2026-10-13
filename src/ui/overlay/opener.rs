@@ -5,19 +5,25 @@ use std::{
 };
 
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, ScrollHandle,
-    SharedString, Window, actions, div, prelude::*, px,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, ScrollHandle, Window,
+    actions, div, prelude::*, px,
 };
-use gpui_base::{h_flex, v_flex};
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_base::h_flex;
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{
     Icon, IconName, Sizable,
     button::{Button, ButtonRounded, ButtonVariants},
 };
 
 use crate::{
-    Next, Prev, PyTheme, Submit,
-    ui::{hint, mono},
+    Next, Prev, Submit,
+    ui::{
+        PyTheme as _,
+        components::{
+            EmptyState, PyInteractive as _, PyStyled as _, SearchField, editable_combo_box,
+            footer_status, hint, panel_footer, panel_header,
+        },
+    },
 };
 
 // Two extra actions this component needs on top of Next/Prev/Submit.
@@ -332,35 +338,40 @@ impl FileOpener {
             .items_center()
             .flex_wrap()
             .gap_0p5()
-            .font_family(mono(cx))
+            .mono()
             .text_size(px(12.))
             .text_color(t.text_muted)
-            .children(parts.into_iter().enumerate().flat_map(|(i, (label, path))| {
-                // The root crumb ends in its own separator; every later crumb
-                // after the second needs one drawn in front of it.
-                let sep = (i > 1).then(|| {
-                    div()
-                        .text_color(t.text_disabled)
-                        .child(std::path::MAIN_SEPARATOR.to_string())
-                });
-                let crumb = div()
-                    .id(("crumb", i))
-                    .role(gpui::accesskit::Role::Button)
-                    .tab_index(0)
-                    .focus_visible(|style| style.text_color(t.accent))
-                    .aria_label(format!("Go to {}", path.display()))
-                    .px_1()
-                    .cursor_pointer()
-                    .when(i == last, |crumb| crumb.text_color(t.text))
-                    .hover(|s| s.bg(t.hovered).text_color(t.text))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.set_input_path(&path, window, cx);
-                    }))
-                    .child(label);
-                sep.into_iter()
-                    .map(IntoElement::into_any_element)
-                    .chain(std::iter::once(crumb.into_any_element()))
-            }))
+            .children(
+                parts
+                    .into_iter()
+                    .enumerate()
+                    .flat_map(|(i, (label, path))| {
+                        // The root crumb ends in its own separator; every later crumb
+                        // after the second needs one drawn in front of it.
+                        let sep = (i > 1).then(|| {
+                            div()
+                                .text_color(t.text_disabled)
+                                .child(std::path::MAIN_SEPARATOR.to_string())
+                        });
+                        let crumb = div()
+                            .id(("crumb", i))
+                            .role(gpui::accesskit::Role::Button)
+                            .tab_index(0)
+                            .focus_visible(|style| style.text_color(t.accent))
+                            .aria_label(format!("Go to {}", path.display()))
+                            .px_1()
+                            .cursor_pointer()
+                            .when(i == last, |crumb| crumb.text_color(t.text))
+                            .hover(|s| s.bg(t.hovered).text_color(t.text))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.set_input_path(&path, window, cx);
+                            }))
+                            .child(label);
+                        sep.into_iter()
+                            .map(IntoElement::into_any_element)
+                            .chain(std::iter::once(crumb.into_any_element()))
+                    }),
+            )
     }
 
     fn render_hidden_toggle(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -404,34 +415,12 @@ impl FileOpener {
             .child("Hidden files")
     }
 
-    /// The path line, ruled like the session search: the rule lights while
-    /// the line has focus.
-    fn render_input(&self, window: &mut Window, cx: &Context<Self>) -> impl IntoElement {
-        let t = cx.theme();
-        let focused = self.path_input.read(cx).focus_handle(cx).is_focused(window);
-        h_flex()
-            .w_full()
-            .h(px(36.))
-            .items_center()
-            .gap_2()
-            .border_b_1()
-            .border_color(if focused { t.focus_ring } else { t.border })
-            .font_family(mono(cx))
+    /// The path line, ruled like the session search.
+    fn render_input(&self) -> impl IntoElement {
+        SearchField::new(&self.path_input)
+            .icon(IconName::FolderOpen)
+            .mono()
             .text_size(px(14.))
-            .text_color(t.text)
-            .child(
-                Icon::new(IconName::FolderOpen)
-                    .size_4()
-                    .flex_shrink_0()
-                    .text_color(t.text_muted),
-            )
-            .child(
-                Input::new(&self.path_input)
-                    .flex_1()
-                    .appearance(false)
-                    .bordered(false)
-                    .role(gpui_base::RoleOverride::Presentational),
-            )
     }
 
     fn render_entry(&self, ix: usize, e: &Entry, cx: &Context<Self>) -> impl IntoElement {
@@ -454,17 +443,7 @@ impl FileOpener {
             .items_center()
             .gap_3()
             .px_4()
-            .cursor_pointer()
-            // A rule and a raised fill, so selection cannot be mistaken for
-            // hover; the same mark as every other list.
-            .border_l_2()
-            .border_color(if selected {
-                t.selected_border
-            } else {
-                gpui::rgba(0)
-            })
-            .when(selected, |d| d.bg(t.surface_elevated))
-            .when(!selected, |d| d.hover(|s| s.bg(t.hovered)))
+            .list_row(selected, cx)
             .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
                 if ev.click_count() >= 2 {
                     this.activate(ix, window, cx);
@@ -491,7 +470,7 @@ impl FileOpener {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .font_family(mono(cx))
+                    .mono()
                     .text_size(px(13.))
                     .text_color(if selected || e.is_dir {
                         t.text
@@ -508,7 +487,7 @@ impl FileOpener {
                 row.child(
                     div()
                         .flex_shrink_0()
-                        .font_family(mono(cx))
+                        .mono()
                         .text_size(px(11.))
                         .text_color(t.text_muted)
                         .child(human_size(e.size)),
@@ -516,80 +495,35 @@ impl FileOpener {
             })
     }
 
-    /// A message where the list would be: what happened, then what to do.
-    fn render_message(
-        &self,
-        heading: impl Into<SharedString>,
-        detail: impl Into<SharedString>,
-        heading_color: gpui::Rgba,
-        cx: &Context<Self>,
-    ) -> gpui::AnyElement {
-        let t = cx.theme();
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .px_6()
-            .child(
-                div()
-                    .text_size(px(14.))
-                    .text_color(heading_color)
-                    .child(heading.into()),
-            )
-            .child(
-                div()
-                    .max_w(px(440.))
-                    .text_size(px(12.))
-                    .text_color(t.text_muted)
-                    .child(detail.into()),
-            )
-            .into_any_element()
-    }
-
     fn render_list(&self, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.theme();
 
         let Some(entries) = &self.listing.entries else {
-            return div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(t.text_muted)
-                .child("Reading directory…")
+            return EmptyState::new("Reading directory…")
+                .muted(cx)
                 .into_any_element();
         };
 
         if let Some(err) = &self.listing.error {
-            return self.render_message(
-                "Can't read this directory.",
-                format!("{err}. Choose another place from the path above, or press alt ↑."),
-                t.error,
-                cx,
-            );
+            return EmptyState::new("Can't read this directory.")
+                .detail(format!(
+                    "{err}. Choose another place from the path above, or press alt ↑."
+                ))
+                .tone(t.error)
+                .into_any_element();
         }
 
         let vis = self.visible(cx);
         if vis.is_empty() {
             let (_, fragment) = self.parse_input(cx);
             return if entries.is_empty() || fragment.is_empty() {
-                self.render_message(
-                    "This directory is empty.",
-                    "Press ⏎ to open a session here.",
-                    t.text,
-                    cx,
-                )
+                EmptyState::new("This directory is empty.")
+                    .detail("Press ⏎ to open a session here.")
             } else {
-                self.render_message(
-                    format!("Nothing here matches \u{201c}{fragment}\u{201d}."),
-                    "Keep typing a path, or press ⏎ to open it if it exists.",
-                    t.text,
-                    cx,
-                )
-            };
+                EmptyState::new(format!("Nothing here matches \u{201c}{fragment}\u{201d}."))
+                    .detail("Keep typing a path, or press ⏎ to open it if it exists.")
+            }
+            .into_any_element();
         }
 
         div()
@@ -611,7 +545,6 @@ impl FileOpener {
     }
 
     fn render_footer(&self, cx: &Context<Self>) -> impl IntoElement {
-        let t = cx.theme();
         let count = self.visible(cx).len();
         // Enter browses into a selected directory; with nothing selected it
         // opens the directory on the line. Say which, before it happens.
@@ -623,25 +556,11 @@ impl FileOpener {
             Some(_) => "open file",
             None => "open here",
         };
-        h_flex()
-            .min_h(px(40.))
-            .py_2()
-            .flex_wrap()
-            .flex_shrink_0()
-            .items_center()
-            .gap_4()
-            .px_4()
-            .border_t_1()
-            .border_color(t.border)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(12.))
-                    .text_color(t.text_muted)
-                    .child(format!("{count} item{}", if count == 1 { "" } else { "s" })),
-            )
+        panel_footer(cx)
+            .child(footer_status(
+                format!("{count} item{}", if count == 1 { "" } else { "s" }),
+                cx.theme().text_muted,
+            ))
             .child(hint("↑↓", "choose", cx))
             .child(hint("⏎", enter, cx))
             .child(hint("alt ↑", "parent", cx))
@@ -666,7 +585,7 @@ impl Focusable for FileOpener {
 }
 
 impl Render for FileOpener {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("file-opener")
             .key_context(CONTEXT)
@@ -680,10 +599,9 @@ impl Render for FileOpener {
             .size_full()
             .flex()
             .flex_col()
-            .bg(gpui::rgba(0))
             .overflow_hidden()
             .child(
-                crate::ui::combo_box::editable_combo_box(
+                editable_combo_box(
                     "file-search-results",
                     "Open a path",
                     "Type a path…",
@@ -694,12 +612,7 @@ impl Render for FileOpener {
                 .size_full()
                 .min_h_0()
                 .child(
-                    v_flex()
-                        .flex_shrink_0()
-                        .gap_2()
-                        .px_4()
-                        .pt_3()
-                        .pb_2()
+                    panel_header()
                         .child(
                             h_flex()
                                 .items_center()
@@ -707,7 +620,7 @@ impl Render for FileOpener {
                                 .child(self.render_breadcrumb(cx))
                                 .child(self.render_hidden_toggle(cx)),
                         )
-                        .child(self.render_input(window, cx)),
+                        .child(self.render_input()),
                 )
                 .child(self.render_list(cx))
                 .child(self.render_footer(cx)),

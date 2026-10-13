@@ -3,7 +3,7 @@
 use gpui::{prelude::*, *};
 use gpui_base::{input::InputState, v_flex};
 
-pub(super) fn editable_combo_box(
+pub fn editable_combo_box(
     id: &'static str,
     label: &'static str,
     placeholder: &'static str,

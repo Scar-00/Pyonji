@@ -3,17 +3,23 @@
 use std::ops::Range;
 
 use crate::{
-    Next, Prev, PyTheme as _, Pyonji, Submit,
+    Next, Prev, Pyonji, Submit,
     assets::PyonjiAsset,
     terminal::SessionId,
-    ui::{hint, mono},
+    ui::{
+        PyTheme as _,
+        components::{
+            EmptyState, PyInteractive as _, PyStyled as _, SearchField, editable_combo_box,
+            enter_mark, footer_status, hint, panel_footer, panel_header,
+        },
+    },
     util,
 };
 use gpui::{prelude::*, *};
 use gpui_base::{Button, actions::Cancel, h_flex, v_flex};
 use gpui_component::{
-    Icon, IconName, WindowExt,
-    input::{Input, InputEvent, InputState},
+    Icon, WindowExt,
+    input::{InputEvent, InputState},
 };
 
 const CONTEXT: &str = "SessionsView";
@@ -217,21 +223,9 @@ impl SessionsView {
         }
     }
 
-    fn render_header(
-        &self,
-        shown: usize,
-        total: usize,
-        window: &Window,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
+    fn render_header(&self, shown: usize, total: usize, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let focused = self.search_input.focus_handle(cx).is_focused(window);
-        v_flex()
-            .flex_shrink_0()
-            .gap_2()
-            .px_4()
-            .pt_3()
-            .pb_2()
+        panel_header()
             .child(
                 h_flex()
                     .items_center()
@@ -261,31 +255,7 @@ impl SessionsView {
                             }),
                     ),
             )
-            .child(
-                h_flex()
-                    .w_full()
-                    .h(px(36.))
-                    .items_center()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(if focused {
-                        theme.focus_ring
-                    } else {
-                        theme.border
-                    })
-                    .child(
-                        Icon::new(IconName::Search)
-                            .size_4()
-                            .text_color(theme.text_muted),
-                    )
-                    .child(
-                        Input::new(&self.search_input)
-                            .role(gpui_base::RoleOverride::Presentational)
-                            .flex_1()
-                            .bordered(false)
-                            .appearance(false),
-                    ),
-            )
+            .child(SearchField::new(&self.search_input))
     }
 
     fn render_row(&self, entry: &Entry, cx: &Context<Self>) -> impl IntoElement {
@@ -309,20 +279,7 @@ impl SessionsView {
             .when(selected, |row| row.aria_active_descendant())
             .w_full()
             .h(px(ROW_HEIGHT))
-            .border_l_2()
-            .border_color(if selected {
-                theme.selected_border
-            } else {
-                rgba(0)
-            })
-            .bg(if selected { theme.selected } else { rgba(0) })
-            .hover(|style| {
-                style.bg(if selected {
-                    theme.selected
-                } else {
-                    theme.hovered
-                })
-            })
+            .list_row(selected, cx)
             .focus_visible(|style| style.border_color(theme.focus_ring).bg(theme.selected))
             .child(
                 h_flex()
@@ -350,7 +307,7 @@ impl SessionsView {
                                 // to, so it reads in the terminal's face.
                                 div()
                                     .truncate()
-                                    .font_family(mono(cx))
+                                    .mono()
                                     .text_size(px(14.))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
@@ -381,20 +338,12 @@ impl SessionsView {
                                     }),
                             ),
                     )
-                    .child(
-                        div()
-                            .w_4()
-                            .flex_shrink_0()
-                            .text_size(px(13.))
-                            .text_color(if selected { theme.accent } else { rgba(0) })
-                            .child("⏎"),
-                    ),
+                    .child(enter_mark(selected, cx)),
             )
             .on_click(cx.listener(move |this, _, window, cx| this.activate(id, None, window, cx)))
     }
 
     fn render_list(&self, entries: Vec<Entry>, total: usize, cx: &Context<Self>) -> AnyElement {
-        let theme = cx.theme();
         if entries.is_empty() {
             let heading = if total > 0 {
                 "No matching sessions"
@@ -410,26 +359,7 @@ impl SessionsView {
             } else {
                 "Open a tab to start a new session."
             };
-            return v_flex()
-                .flex_1()
-                .min_h_0()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .px_6()
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .text_color(theme.text)
-                        .child(heading),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(theme.text_muted)
-                        .child(detail),
-                )
-                .into_any_element();
+            return EmptyState::new(heading).detail(detail).into_any_element();
         }
         v_flex()
             .id("session-results-list")
@@ -477,30 +407,15 @@ impl SessionsView {
             ),
             (None, None) => ("Nothing selected".to_string(), theme.text_muted),
         };
-        h_flex()
-            .min_h(px(40.))
-            .py_2()
-            .flex_wrap()
-            .flex_shrink_0()
-            .items_center()
-            .gap_4()
-            .px_4()
-            .border_t_1()
-            .border_color(theme.border)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(12.))
-                    .text_color(color)
-                    .child(status),
-            )
+        panel_footer(cx)
+            .child(footer_status(status, color))
             .when(entry.is_some(), |this| this.child(hint("↑↓", "choose", cx)))
             .when(destination.is_some(), |this| {
                 this.child(hint("⏎", if attach { "attach" } else { "switch" }, cx))
             })
-            .when(attach, |this| this.child(hint("alt 1–9", "attach to tab", cx)))
+            .when(attach, |this| {
+                this.child(hint("alt 1–9", "attach to tab", cx))
+            })
             .child(hint(
                 "esc",
                 if self.search_input.read(cx).value().is_empty() {
@@ -527,7 +442,7 @@ impl SessionsView {
 }
 
 impl Render for SessionsView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let all = self.entries(cx);
         let total = all.len();
         let entries = self.visible(cx);
@@ -549,14 +464,13 @@ impl Render for SessionsView {
             .size_full()
             .overflow_hidden()
             .rounded_lg()
-            .bg(rgba(0))
             .on_action(cx.listener(|this, _: &Next, _, cx| this.navigate(false, cx)))
             .on_action(cx.listener(|this, _: &Prev, _, cx| this.navigate(true, cx)))
             .on_action(cx.listener(Self::on_submit))
             .on_action(cx.listener(Self::on_cancel))
             .on_action(cx.listener(Self::on_attach_to_tab))
             .child(
-                crate::ui::combo_box::editable_combo_box(
+                editable_combo_box(
                     "session-search-results",
                     "Sessions",
                     "Find by name or session number…",
@@ -566,7 +480,7 @@ impl Render for SessionsView {
                 )
                 .size_full()
                 .min_h_0()
-                .child(self.render_header(entries.len(), total, window, cx))
+                .child(self.render_header(entries.len(), total, cx))
                 .child(self.render_list(entries.clone(), total, cx))
                 .child(self.render_footer(&entries, cx)),
             )

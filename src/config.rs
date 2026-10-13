@@ -619,7 +619,7 @@ pub fn load(this: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>) ->
     cx.clear_key_bindings();
     Pyonji::init(cx);
     gpui_component::init(cx);
-    crate::Theme::apply_component_theme(window, cx);
+    crate::ui::Theme::apply_component_theme(window, cx);
     this.ssh_sessions.clear();
     this.registered_callbacks.clear();
 

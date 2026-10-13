@@ -16,10 +16,11 @@ use super::signature_help::LuaSignature;
 
 use crate::Next;
 use crate::Prev;
-use crate::PyTheme as _;
 use crate::Pyonji;
 use crate::lua_complete::{LspClient, default_command};
 use crate::terminal::SessionId;
+use crate::ui::components::{PyStyled as _, editable_combo_box, text_input};
+use crate::ui::{PyTheme as _, Theme};
 use crate::util;
 
 actions!([
@@ -331,7 +332,7 @@ impl Render for StatusBar {
             .text_color(theme.text)
             // The bar sits on the grid's edge and is half a command line;
             // it reads in the grid's own face.
-            .font_family(super::mono(cx))
+            .mono()
             .text_size(px(16.0))
             .items_center()
             .backdrop_blur(px(16.0))
@@ -454,7 +455,7 @@ impl RenderOnce for SessionView {
                             if selected {
                                 this.bg(theme.selected).border_color(theme.accent)
                             } else {
-                                this.border_color(theme.accent.opacity(0.0))
+                                this.border_color(Theme::TRANSPARENT)
                                     .text_color(theme.text_muted)
                                     .hover(|style| style.bg(theme.hovered).text_color(theme.text))
                             }
@@ -526,7 +527,7 @@ impl RenderOnce for RenameView {
             .w_full()
             .items_center()
             .child(prompt(format!("rename {}", session), cx))
-            .child(super::text_input(&input_state, cx))
+            .child(text_input(&input_state, cx))
     }
 }
 
@@ -755,7 +756,7 @@ impl RenderOnce for LuaView {
         let input_click = input_state.clone();
         let py_click = self.pyonji.clone();
 
-        crate::ui::combo_box::editable_combo_box(
+        editable_combo_box(
             "lua-search-results",
             "Lua repl",
             "Lua repl",
@@ -800,7 +801,7 @@ impl RenderOnce for LuaView {
                 .w_full()
                 .items_center()
                 .child(prompt(">", cx))
-                .child(super::text_input(&input_state, cx)),
+                .child(text_input(&input_state, cx)),
         )
     }
 }
