@@ -80,9 +80,11 @@ impl CB {
         let replies: String = match params {
             // OSC 4: `index;?` pairs, any number of them.
             [b"4", pairs @ ..] => pairs
-                .chunks_exact(2)
-                .filter(|pair| pair[1] == b"?")
-                .filter_map(|pair| std::str::from_utf8(pair[0]).ok()?.parse::<u8>().ok())
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .filter(|[_, spec]| *spec == b"?")
+                .filter_map(|[index, _]| std::str::from_utf8(index).ok()?.parse::<u8>().ok())
                 .map(|idx| reply(&format!("4;{idx}"), vt100::Color::Idx(idx).into()))
                 .collect(),
             // OSC 10/11: each further `?` queries the next code, so
