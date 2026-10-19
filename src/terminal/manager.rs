@@ -67,6 +67,8 @@ impl CB {
         c: char,
     ) -> Option<String> {
         let param = |i: usize| params.get(i).and_then(|p| p.first()).copied().unwrap_or(0);
+        // Cursor reports are absolute even under origin mode (DECOM): vt100
+        // keeps that mode and the scroll margins private.
         match (i1, i2, c) {
             // DSR: operating status and cursor position.
             (None, None, 'n') => match param(0) {
@@ -77,10 +79,10 @@ impl CB {
                 }
                 _ => None,
             },
-            // DECXCPR: cursor position, DEC form.
+            // DECXCPR: cursor position, DEC form, always on page 1.
             (Some(b'?'), None, 'n') if param(0) == 6 => {
                 let (row, col) = screen.cursor_position();
-                Some(format!("\x1b[?{};{}R", row + 1, col + 1))
+                Some(format!("\x1b[?{};{};1R", row + 1, col + 1))
             }
             // DA1: VT220 with ANSI color.
             (None, None, 'c') if param(0) == 0 => Some("\x1b[?62;22c".into()),
@@ -89,10 +91,9 @@ impl CB {
                 Some(format!("\x1b[>0;{};0c", Self::version_number()))
             }
             // XTVERSION.
-            (Some(b'>'), None, 'q') if param(0) == 0 => Some(format!(
-                "\x1bP>|pyonji {}\x1b\\",
-                env!("CARGO_PKG_VERSION")
-            )),
+            (Some(b'>'), None, 'q') if param(0) == 0 => {
+                Some(format!("\x1bP>|pyonji {}\x1b\\", env!("CARGO_PKG_VERSION")))
+            }
             // XTWINOPS 18: text area size in characters.
             (None, None, 't') if param(0) == 18 => {
                 let (rows, cols) = screen.size();
@@ -345,7 +346,7 @@ mod tests {
     fn cursor_position_reports_are_one_based() {
         assert_eq!(replies_to(b"\x1b[6n"), ["\x1b[1;1R"]);
         assert_eq!(replies_to(b"\x1b[5;10H\x1b[6n"), ["\x1b[5;10R"]);
-        assert_eq!(replies_to(b"\x1b[3;4H\x1b[?6n"), ["\x1b[?3;4R"]);
+        assert_eq!(replies_to(b"\x1b[3;4H\x1b[?6n"), ["\x1b[?3;4;1R"]);
         assert_eq!(replies_to(b"\x1b[5n"), ["\x1b[0n"]);
     }
 
