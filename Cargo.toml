@@ -72,6 +72,12 @@ tower = "0.5.3"
 # window opens; DXC takes well under two.
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "29.0.3", features = ["static-dxc"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Environment",
+    "Win32_System_Threading",
+] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.30"
