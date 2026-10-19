@@ -310,6 +310,7 @@ impl Pty {
                 for (key, value) in vars {
                     cmd.env(key, value);
                 }
+                windows_env::keep_inherited(cmd, |key| std::env::var_os(key));
             }
             Err(error) => {
                 tracing::warn!(%error, "failed to load the user environment, inheriting Pyonji's");
@@ -348,6 +349,7 @@ mod windows_env {
     use std::{ffi::OsString, os::windows::ffi::OsStringExt};
 
     use anyhow::{Context, Result};
+    use portable_pty::CommandBuilder;
     use windows_sys::Win32::{
         Foundation::{CloseHandle, HANDLE},
         Security::{TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY},
@@ -356,6 +358,21 @@ mod windows_env {
             Threading::{GetCurrentProcess, OpenProcessToken},
         },
     };
+
+    /// Variables that only exist in the process that launched Pyonji but
+    /// that sessions need: an SSH agent started by Git Bash or a password
+    /// manager is reachable only through these, and `ssh` (including the
+    /// one remote sessions run) can't authenticate with it otherwise.
+    const INHERITED: [&str; 2] = ["SSH_AUTH_SOCK", "SSH_AGENT_PID"];
+
+    /// Copy the [`INHERITED`] variables that `lookup` finds into `cmd`.
+    pub fn keep_inherited(cmd: &mut CommandBuilder, lookup: impl Fn(&str) -> Option<OsString>) {
+        for key in INHERITED {
+            if let Some(value) = lookup(key) {
+                cmd.env(key, value);
+            }
+        }
+    }
 
     /// The current user's environment as Windows assembles it at logon:
     /// system and user variables from the registry, without anything the
@@ -542,6 +559,25 @@ mod tests {
         assert_eq!(cmd.get_env("PWD"), None);
         assert!(cmd.get_env("SystemRoot").is_some());
         assert!(cmd.get_env("Path").is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_sessions_keep_the_launching_ssh_agent() {
+        let mut cmd = CommandBuilder::new("ssh");
+        cmd.env_clear();
+        windows_env::keep_inherited(&mut cmd, |key| match key {
+            "SSH_AUTH_SOCK" => Some("/tmp/ssh-agent.sock".into()),
+            "SSH_AGENT_PID" => Some("1234".into()),
+            "PWD" => Some("C:/somewhere/else".into()),
+            _ => None,
+        });
+        assert_eq!(
+            cmd.get_env("SSH_AUTH_SOCK"),
+            Some("/tmp/ssh-agent.sock".as_ref())
+        );
+        assert_eq!(cmd.get_env("SSH_AGENT_PID"), Some("1234".as_ref()));
+        assert_eq!(cmd.get_env("PWD"), None);
     }
 
     #[cfg(windows)]
