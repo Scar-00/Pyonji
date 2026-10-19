@@ -5,6 +5,7 @@ use std::{collections::HashMap, path::Path};
 
 use crate::{
     pty::{Event, Pty, SshConnection},
+    renderer::{Color, DEFAULT_BACKGROUND, DEFAULT_FOREGROUND},
     terminal::{CursorState, TerminalSession},
 };
 use vt100::Callbacks;
@@ -57,6 +58,51 @@ impl CB {
             let path = Path::new(title);
             path.file_name().map(|file| file.display().to_string())
         }
+    }
+
+    fn reply(&self, reply: String) {
+        // A program that floods queries without reading its input would
+        // otherwise grow the unbounded input queue forever.
+        if self.pty.len() < MAX_QUEUED_INPUT {
+            _ = self.pty.force_send(reply.into_bytes());
+        }
+    }
+
+    /// Answer OSC color queries with the colors the renderer draws, so
+    /// programs like Neovim can pick a light or dark theme. Colors can't be
+    /// changed, so set requests are ignored.
+    fn osc_reply(params: &[&[u8]]) -> Option<String> {
+        let reply = |code: &str, color: Color| {
+            let [r, g, b, _] = color.inner();
+            // xterm's 16-bit form: each byte repeated, e.g. 0xc6 -> c6c6.
+            format!("\x1b]{code};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x1b\\")
+        };
+        let replies: String = match params {
+            // OSC 4: `index;?` pairs, any number of them.
+            [b"4", pairs @ ..] => pairs
+                .chunks_exact(2)
+                .filter(|pair| pair[1] == b"?")
+                .filter_map(|pair| std::str::from_utf8(pair[0]).ok()?.parse::<u8>().ok())
+                .map(|idx| reply(&format!("4;{idx}"), vt100::Color::Idx(idx).into()))
+                .collect(),
+            // OSC 10/11: each further `?` queries the next code, so
+            // `10;?;?` asks for foreground and background.
+            [code @ (b"10" | b"11"), specs @ ..] => {
+                let first = if *code == b"10" { 10 } else { 11 };
+                specs
+                    .iter()
+                    .zip(first..)
+                    .take_while(|&(spec, _)| *spec == b"?")
+                    .filter_map(|(_, code)| match code {
+                        10 => Some(reply("10", DEFAULT_FOREGROUND)),
+                        11 => Some(reply("11", DEFAULT_BACKGROUND)),
+                        _ => None,
+                    })
+                    .collect()
+            }
+            _ => return None,
+        };
+        (!replies.is_empty()).then_some(replies)
     }
 
     /// Answer CSI queries. Programs block until these replies arrive: ConPTY
@@ -193,17 +239,16 @@ impl Callbacks for CB {
         params: &[&[u16]],
         c: char,
     ) {
-        // A program that floods queries without reading its input would
-        // otherwise grow the unbounded input queue forever.
-        if self.pty.len() >= MAX_QUEUED_INPUT {
-            return;
-        }
         if let Some(reply) = Self::csi_reply(screen, i1, i2, params, c) {
-            _ = self.pty.force_send(reply.into_bytes());
+            self.reply(reply);
         }
     }
 
-    fn unhandled_osc(&mut self, _: &mut vt100::Screen, _params: &[&[u8]]) {}
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        if let Some(reply) = Self::osc_reply(params) {
+            self.reply(reply);
+        }
+    }
 }
 
 pub struct SessionManager {
@@ -402,6 +447,41 @@ mod tests {
         assert_eq!(replies_to(b"\x1b[?1049h\x1b[?1047$p"), ["\x1b[?1047;0$y"]);
         assert_eq!(replies_to(b"\x1b[4$p"), ["\x1b[4;0$y"]);
         assert_eq!(replies_to(b"\x1b[18t"), ["\x1b[8;24;80t"]);
+    }
+
+    #[test]
+    fn color_queries_report_the_rendered_colors() {
+        assert_eq!(
+            replies_to(b"\x1b]10;?\x07\x1b]11;?\x1b\\"),
+            [
+                "\x1b]10;rgb:c6c6/d0d0/f5f5\x1b\\",
+                "\x1b]11;rgb:1818/1818/1818\x1b\\"
+            ]
+        );
+        // A further `?` queries the next code.
+        assert_eq!(
+            replies_to(b"\x1b]10;?;?\x07"),
+            ["\x1b]10;rgb:c6c6/d0d0/f5f5\x1b\\\x1b]11;rgb:1818/1818/1818\x1b\\"]
+        );
+        // Palette entries come from the same lookup the renderer uses.
+        let [r, g, b, _] = Color::from(vt100::Color::Idx(1)).inner();
+        assert_eq!(
+            replies_to(b"\x1b]4;1;?;196;?\x07"),
+            [format!(
+                "\x1b]4;1;rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x1b\\\
+                 \x1b]4;196;rgb:ffff/0000/0000\x1b\\"
+            )]
+        );
+    }
+
+    #[test]
+    fn color_changes_and_other_oscs_get_no_reply() {
+        assert!(
+            replies_to(
+                b"\x1b]11;#ffffff\x07\x1b]4;1;rgb:ff/00/00\x07\x1b]12;?\x07\x1b]4;300;?\x07"
+            )
+            .is_empty()
+        );
     }
 
     #[test]
