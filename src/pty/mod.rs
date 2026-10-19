@@ -53,11 +53,7 @@ impl Pty {
         if let Some(path) = path {
             cmd.cwd(path);
         }
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-        std::env::vars_os().for_each(|var| {
-            cmd.env(var.0, var.1);
-        });
+        Self::set_session_env(&mut cmd);
 
         let mut child = pair
             .slave
@@ -126,11 +122,7 @@ impl Pty {
         let program_name = "ssh";
         let mut cmd = CommandBuilder::new(program_name);
         cmd.arg(format!("{}@{}", ssh.user_name, ssh.ip));
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-        std::env::vars_os().for_each(|var| {
-            cmd.env(var.0, var.1);
-        });
+        Self::set_session_env(&mut cmd);
 
         let mut child = pair
             .slave
@@ -303,6 +295,33 @@ impl Pty {
         _ = self.killer.kill();
     }
 
+    /// Environment for a new session. `CommandBuilder` starts from Pyonji's
+    /// own environment, which is what terminals do on Unix. On Windows it is
+    /// rebuilt from the user's registered environment instead, as Explorer and
+    /// Windows Terminal do. Sessions then don't inherit whatever launched
+    /// Pyonji (a shell's `PWD`, which cmd never updates and Starship prefers
+    /// over the real directory; `CARGO_*` from `cargo run`, ...), and they
+    /// see variables changed since Pyonji started.
+    fn set_session_env(cmd: &mut CommandBuilder) {
+        #[cfg(windows)]
+        match windows_env::user_environment() {
+            Ok(vars) => {
+                cmd.env_clear();
+                for (key, value) in vars {
+                    cmd.env(key, value);
+                }
+                windows_env::keep_inherited(cmd, |key| std::env::var_os(key));
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to load the user environment, inheriting Pyonji's");
+            }
+        }
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("TERM_PROGRAM", "pyonji");
+        cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+    }
+
     fn get_shell() -> String {
         fn from_env() -> Option<String> {
             use std::env;
@@ -322,6 +341,107 @@ impl Pty {
             }
             .to_string()
         })
+    }
+}
+
+#[cfg(windows)]
+mod windows_env {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+
+    use anyhow::{Context, Result};
+    use portable_pty::CommandBuilder;
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        Security::{TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY},
+        System::{
+            Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock},
+            Threading::{GetCurrentProcess, OpenProcessToken},
+        },
+    };
+
+    /// Variables that only exist in the process that launched Pyonji but
+    /// that sessions need: an SSH agent started by Git Bash or a password
+    /// manager is reachable only through these, and `ssh` (including the
+    /// one remote sessions run) can't authenticate with it otherwise.
+    const INHERITED: [&str; 2] = ["SSH_AUTH_SOCK", "SSH_AGENT_PID"];
+
+    /// Copy the [`INHERITED`] variables that `lookup` finds into `cmd`.
+    pub fn keep_inherited(cmd: &mut CommandBuilder, lookup: impl Fn(&str) -> Option<OsString>) {
+        for key in INHERITED {
+            if let Some(value) = lookup(key) {
+                cmd.env(key, value);
+            }
+        }
+    }
+
+    /// The current user's environment as Windows assembles it at logon:
+    /// system and user variables from the registry, without anything the
+    /// running process inherited or set.
+    pub fn user_environment() -> Result<Vec<(OsString, OsString)>> {
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: the pseudo-handle from GetCurrentProcess needs no closing,
+        // and `token` is a valid out pointer.
+        let opened = unsafe {
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE,
+                &mut token,
+            )
+        };
+        if opened == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("failed to open the process token");
+        }
+
+        let mut block = std::ptr::null_mut();
+        // SAFETY: `token` is open with the access CreateEnvironmentBlock
+        // requires, and `block` is a valid out pointer.
+        let created = unsafe { CreateEnvironmentBlock(&mut block, token, 0) };
+        let error = std::io::Error::last_os_error();
+        // SAFETY: `token` was opened above and is not used afterwards.
+        unsafe { CloseHandle(token) };
+        if created == 0 {
+            return Err(error).context("failed to create the user environment block");
+        }
+
+        // SAFETY: CreateEnvironmentBlock returns a Unicode block, which is
+        // released once and only after parsing copied it out.
+        let vars = unsafe { parse_block(block.cast()) };
+        unsafe { DestroyEnvironmentBlock(block) };
+        Ok(vars)
+    }
+
+    /// Split a block of NUL-terminated UTF-16 `KEY=value` strings, ended by an
+    /// empty string. Hidden `=C:=C:\dir` entries (per-drive directories) are
+    /// skipped.
+    ///
+    /// # Safety
+    ///
+    /// `block` must point to a valid, double-NUL-terminated environment block.
+    pub unsafe fn parse_block(block: *const u16) -> Vec<(OsString, OsString)> {
+        let mut vars = Vec::new();
+        let mut entry = block;
+        loop {
+            // SAFETY: every entry, including the final empty one, is
+            // NUL-terminated within the block.
+            let len = (0..).take_while(|&i| unsafe { *entry.add(i) } != 0).count();
+            if len == 0 {
+                break;
+            }
+            // SAFETY: the `len` units before the terminator were just read.
+            let wide = unsafe { std::slice::from_raw_parts(entry, len) };
+            if let Some(eq) = wide.iter().position(|&c| c == u16::from(b'='))
+                && eq > 0
+            {
+                vars.push((
+                    OsString::from_wide(&wide[..eq]),
+                    OsString::from_wide(&wide[eq + 1..]),
+                ));
+            }
+            // SAFETY: skips the entry and its terminator, staying in the block.
+            entry = unsafe { entry.add(len + 1) };
+        }
+        vars
     }
 }
 
@@ -412,6 +532,70 @@ mod tests {
         fn drop(&mut self) {
             let _ = self.0.send(());
         }
+    }
+
+    #[test]
+    fn sessions_advertise_pyonji_over_the_parent_terminal() {
+        let mut cmd = CommandBuilder::new("shell");
+        // Stand-ins for values inherited from a launching shell.
+        cmd.env("TERM", "cygwin");
+        cmd.env("TERM_PROGRAM", "WezTerm");
+        Pty::set_session_env(&mut cmd);
+        assert_eq!(cmd.get_env("TERM"), Some("xterm-256color".as_ref()));
+        assert_eq!(cmd.get_env("COLORTERM"), Some("truecolor".as_ref()));
+        assert_eq!(cmd.get_env("TERM_PROGRAM"), Some("pyonji".as_ref()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_sessions_drop_what_the_launching_process_set() {
+        // Cargo sets this for the test process only; a launching shell's
+        // `PWD` arrives the same way.
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.env("PWD", "C:/somewhere/else");
+        Pty::set_session_env(&mut cmd);
+        assert_eq!(cmd.get_env("CARGO_MANIFEST_DIR"), None);
+        assert_eq!(cmd.get_env("PWD"), None);
+        assert!(cmd.get_env("SystemRoot").is_some());
+        assert!(cmd.get_env("Path").is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_sessions_keep_the_launching_ssh_agent() {
+        let mut cmd = CommandBuilder::new("ssh");
+        cmd.env_clear();
+        windows_env::keep_inherited(&mut cmd, |key| match key {
+            "SSH_AUTH_SOCK" => Some("/tmp/ssh-agent.sock".into()),
+            "SSH_AGENT_PID" => Some("1234".into()),
+            "PWD" => Some("C:/somewhere/else".into()),
+            _ => None,
+        });
+        assert_eq!(
+            cmd.get_env("SSH_AUTH_SOCK"),
+            Some("/tmp/ssh-agent.sock".as_ref())
+        );
+        assert_eq!(cmd.get_env("SSH_AGENT_PID"), Some("1234".as_ref()));
+        assert_eq!(cmd.get_env("PWD"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn environment_blocks_split_into_pairs_and_skip_drive_directories() {
+        let block: Vec<u16> = "=C:=C:\\dev\0Path=C:\\bin;D:\\x\0EMPTY=\0A=b=c\0\0"
+            .encode_utf16()
+            .collect();
+        // SAFETY: the block above is double-NUL-terminated.
+        let vars = unsafe { windows_env::parse_block(block.as_ptr()) };
+        let vars: Vec<_> = vars
+            .iter()
+            .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
+            .collect();
+        assert_eq!(
+            vars,
+            [("Path", "C:\\bin;D:\\x"), ("EMPTY", ""), ("A", "b=c")]
+        );
     }
 
     #[test]
