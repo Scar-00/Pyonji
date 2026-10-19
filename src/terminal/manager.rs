@@ -75,6 +75,8 @@ impl CB {
         let reply = |code: &str, color: Color| {
             let [r, g, b, _] = color.inner();
             // xterm's 16-bit form: each byte repeated, e.g. 0xc6 -> c6c6.
+            // Always ST-terminated: vt100 doesn't tell callbacks whether the
+            // query ended with BEL or ST.
             format!("\x1b]{code};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x1b\\")
         };
         let replies: String = match params {
@@ -87,14 +89,16 @@ impl CB {
                 .filter_map(|[index, _]| std::str::from_utf8(index).ok()?.parse::<u8>().ok())
                 .map(|idx| reply(&format!("4;{idx}"), vt100::Color::Idx(idx).into()))
                 .collect(),
-            // OSC 10/11: each further `?` queries the next code, so
-            // `10;?;?` asks for foreground and background.
+            // OSC 10/11: each further argument applies to the next code, so
+            // `10;?;?` asks for foreground and background, and
+            // `10;#fff;?` sets the foreground (ignored) and asks for the
+            // background.
             [code @ (b"10" | b"11"), specs @ ..] => {
                 let first = if *code == b"10" { 10 } else { 11 };
                 specs
                     .iter()
                     .zip(first..)
-                    .take_while(|&(spec, _)| *spec == b"?")
+                    .filter(|&(spec, _)| *spec == b"?")
                     .filter_map(|(_, code)| match code {
                         10 => Some(reply("10", DEFAULT_FOREGROUND)),
                         11 => Some(reply("11", DEFAULT_BACKGROUND)),
@@ -464,6 +468,11 @@ mod tests {
         assert_eq!(
             replies_to(b"\x1b]10;?;?\x07"),
             ["\x1b]10;rgb:c6c6/d0d0/f5f5\x1b\\\x1b]11;rgb:1818/1818/1818\x1b\\"]
+        );
+        // An ignored setter still moves on to the next code.
+        assert_eq!(
+            replies_to(b"\x1b]10;#ffffff;?\x07"),
+            ["\x1b]11;rgb:1818/1818/1818\x1b\\"]
         );
         // Palette entries come from the same lookup the renderer uses.
         let [r, g, b, _] = Color::from(vt100::Color::Idx(1)).inner();
