@@ -39,6 +39,9 @@ impl IntoLua for SessionId {
     }
 }
 
+/// Pending input writes past which query replies are dropped.
+const MAX_QUEUED_INPUT: usize = 1024;
+
 pub struct CB {
     id: SessionId,
     proxy: Sender<Event>,
@@ -67,22 +70,29 @@ impl CB {
         c: char,
     ) -> Option<String> {
         let param = |i: usize| params.get(i).and_then(|p| p.first()).copied().unwrap_or(0);
-        // Cursor reports are absolute even under origin mode (DECOM): vt100
-        // keeps that mode and the scroll margins private.
+        // One-based cursor position. vt100 parks the cursor one past the last
+        // column while a wrap is pending; terminals report the last column.
+        // Reports are absolute even under origin mode (DECOM): vt100 keeps
+        // that mode and the scroll margins private.
+        let cursor = || {
+            let (row, col) = screen.cursor_position();
+            let cols = screen.size().1;
+            (row + 1, (col + 1).min(cols))
+        };
         match (i1, i2, c) {
             // DSR: operating status and cursor position.
             (None, None, 'n') => match param(0) {
                 5 => Some("\x1b[0n".into()),
                 6 => {
-                    let (row, col) = screen.cursor_position();
-                    Some(format!("\x1b[{};{}R", row + 1, col + 1))
+                    let (row, col) = cursor();
+                    Some(format!("\x1b[{row};{col}R"))
                 }
                 _ => None,
             },
             // DECXCPR: cursor position, DEC form, always on page 1.
             (Some(b'?'), None, 'n') if param(0) == 6 => {
-                let (row, col) = screen.cursor_position();
-                Some(format!("\x1b[?{};{};1R", row + 1, col + 1))
+                let (row, col) = cursor();
+                Some(format!("\x1b[?{row};{col};1R"))
             }
             // DA1: VT220 with ANSI color.
             (None, None, 'c') if param(0) == 0 => Some("\x1b[?62;22c".into()),
@@ -124,7 +134,7 @@ impl CB {
             1 => screen.application_cursor(),
             9 => mouse == Mouse::Press,
             25 => !screen.hide_cursor(),
-            47 | 1047 | 1049 => screen.alternate_screen(),
+            47 | 1049 => screen.alternate_screen(),
             1000 => mouse == Mouse::PressRelease,
             1002 => mouse == Mouse::ButtonMotion,
             1003 => mouse == Mouse::AnyMotion,
@@ -183,6 +193,11 @@ impl Callbacks for CB {
         params: &[&[u16]],
         c: char,
     ) {
+        // A program that floods queries without reading its input would
+        // otherwise grow the unbounded input queue forever.
+        if self.pty.len() >= MAX_QUEUED_INPUT {
+            return;
+        }
         if let Some(reply) = Self::csi_reply(screen, i1, i2, params, c) {
             _ = self.pty.force_send(reply.into_bytes());
         }
@@ -351,6 +366,20 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_wrap_reports_the_last_column() {
+        let mut input = b"\x1b[3;1H".to_vec();
+        input.extend([b'x'; 80]);
+        input.extend(b"\x1b[6n\x1b[?6n");
+        assert_eq!(replies_to(&input), ["\x1b[3;80R", "\x1b[?3;80;1R"]);
+    }
+
+    #[test]
+    fn query_floods_cannot_grow_the_input_queue_unbounded() {
+        let replies = replies_to(&b"\x1b[5n".repeat(MAX_QUEUED_INPUT + 100));
+        assert_eq!(replies.len(), MAX_QUEUED_INPUT);
+    }
+
+    #[test]
     fn device_attribute_queries_are_answered() {
         assert_eq!(replies_to(b"\x1b[c"), ["\x1b[?62;22c"]);
         assert_eq!(replies_to(b"\x1b[0c"), ["\x1b[?62;22c"]);
@@ -369,6 +398,8 @@ mod tests {
         assert_eq!(replies_to(b"\x1b[?2004$p"), ["\x1b[?2004;2$y"]);
         assert_eq!(replies_to(b"\x1b[?2004h\x1b[?2004$p"), ["\x1b[?2004;1$y"]);
         assert_eq!(replies_to(b"\x1b[?2026$p"), ["\x1b[?2026;0$y"]);
+        // vt100 ignores 1047, so it must not be reported as recognized.
+        assert_eq!(replies_to(b"\x1b[?1049h\x1b[?1047$p"), ["\x1b[?1047;0$y"]);
         assert_eq!(replies_to(b"\x1b[4$p"), ["\x1b[4;0$y"]);
         assert_eq!(replies_to(b"\x1b[18t"), ["\x1b[8;24;80t"]);
     }
