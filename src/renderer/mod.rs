@@ -16,6 +16,11 @@ use crate::terminal::{CursorState, Divider, PaneGeometry, SplitDirection};
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Color([u8; 4]);
 
+/// Text in the default color.
+pub const DEFAULT_FOREGROUND: Color = Color([0xc6, 0xd0, 0xf5, 0xFF]);
+/// Cells in the default color, and the window behind them.
+pub const DEFAULT_BACKGROUND: Color = Color([0x18, 0x18, 0x18, 0xFF]);
+
 #[allow(unused)]
 impl Color {
     pub fn inner(self) -> [u8; 4] {
@@ -59,7 +64,7 @@ impl From<vt100::Color> for Color {
         match value {
             vt100::Color::Idx(idx) => ansi_index_to_rgb(idx),
             vt100::Color::Rgb(r, g, b) => Self([r, g, b, 0xFF]),
-            vt100::Color::Default => Self([0x18, 0x18, 0x18, 0xFF]),
+            vt100::Color::Default => DEFAULT_BACKGROUND,
         }
     }
 }
@@ -172,7 +177,7 @@ impl Renderer {
                         continue;
                     };
                     let fg_color = match cell.fgcolor() {
-                        vt100::Color::Default => Color::rgb(0xc6, 0xd0, 0xf5),
+                        vt100::Color::Default => DEFAULT_FOREGROUND,
                         x => Color::from(x),
                     };
                     let selected = pane
@@ -288,8 +293,7 @@ impl Renderer {
                 SplitDirection::Horizontal => {
                     let x = cell_width * f32::from(divider.x);
                     let y = self.line_height * f32::from(divider.y) + divider_px;
-                    let width =
-                        divider_width * f32::from(divider.cols.max(1)) * cell_width;
+                    let width = divider_width * f32::from(divider.cols.max(1)) * cell_width;
                     let [x, y] = self.ndc([x, y], size);
                     self.divider_renderer
                         .add_rect(x, y, width, divider_height, divider_color);
@@ -309,7 +313,7 @@ impl Renderer {
                     view,
                     resolve_target: None,
                     ops: Operations {
-                        load: LoadOp::Clear(Color([0x18, 0x18, 0x18, 0xFF]).to_wgpu()),
+                        load: LoadOp::Clear(DEFAULT_BACKGROUND.to_wgpu()),
                         store: StoreOp::Store,
                     },
                     depth_slice: None,

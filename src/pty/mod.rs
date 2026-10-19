@@ -254,6 +254,12 @@ impl Pty {
         tx
     }
 
+    /// Queue shared with keyboard input, so replies to terminal queries stay
+    /// ordered with what the user types.
+    pub fn writer(&self) -> Sender<Vec<u8>> {
+        self.writer.clone()
+    }
+
     pub fn add_bytes(&mut self, buf: impl AsRef<[u8]>) {
         _ = self.writer.force_send(buf.as_ref().to_vec());
     }

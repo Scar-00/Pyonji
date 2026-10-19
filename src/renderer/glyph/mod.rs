@@ -424,12 +424,7 @@ impl TerminalRenderer {
         })
     }
 
-    pub fn new(
-        device: &Device,
-        font_family: &str,
-        font_size: f32,
-        format: TextureFormat,
-    ) -> Self {
+    pub fn new(device: &Device, font_family: &str, font_size: f32, format: TextureFormat) -> Self {
         // GPU limits describe supported dimensions, not a useful atlas size.
         // Bound allocations and full-atlas uploads when reloading the config.
         let atlas_dimension = device
