@@ -21,7 +21,6 @@ use gpui_component::{
     button::{Button, ButtonRounded, ButtonVariants},
     input::{InputEvent, InputState},
     progress::Progress,
-    scroll::ScrollableElement,
     spinner::Spinner,
     text::TextView,
 };
@@ -706,7 +705,7 @@ impl ReleasesView {
             .when(compact, |rail| rail.flex_shrink_1().min_h_0())
             .border_color(theme.border)
             .overflow_hidden()
-            .child(
+            .child(crate::ui::components::scroll_viewport(
                 v_flex()
                     .id("releases-rail")
                     .role(gpui::accesskit::Role::ListBox)
@@ -715,8 +714,17 @@ impl ReleasesView {
                     .overflow_y_scroll()
                     .track_scroll(&self.rail_scroll)
                     .children(entries.iter().map(|e| self.render_version(e, cx))),
+                &self.rail_scroll,
+            ))
+            .child(
+                div().absolute().inset_0().child(
+                    gpui_base::Scrollbar::new(&self.rail_scroll)
+                        .id("release-versions-scrollbar")
+                        .axis(ScrollbarAxis::Vertical)
+                        .mode(gpui_base::ScrollbarMode::Hover)
+                        .viewport_from_layout(),
+                ),
             )
-            .scrollbar(&self.rail_scroll, ScrollbarAxis::Vertical)
     }
 
     fn render_version(&self, entry: &Entry, cx: &Context<Self>) -> impl IntoElement {
@@ -827,18 +835,11 @@ impl ReleasesView {
             )
             .when(filtered, |this| {
                 this.child(
-                    div()
-                        .id("clear-filter")
-                        .role(gpui::accesskit::Role::Button)
-                        .tab_index(0)
-                        .aria_label("Clear release filter")
-                        .px_2()
-                        .py_1()
-                        .outlined(cx)
-                        .text_size(px(12.0))
-                        .text_color(theme.accent)
-                        .on_click(cx.listener(|this, _, window, cx| this.clear_filter(window, cx)))
-                        .child("Clear filter"),
+                    Button::new("clear-filter")
+                        .outline()
+                        .small()
+                        .label("Clear filter")
+                        .on_click(cx.listener(|this, _, window, cx| this.clear_filter(window, cx))),
                 )
             })
             .into_any_element();
@@ -879,7 +880,7 @@ impl ReleasesView {
             .flex_1()
             .min_w_0()
             .overflow_hidden()
-            .child(
+            .child(crate::ui::components::scroll_viewport(
                 v_flex()
                     .id("releases-manifest")
                     .size_full()
@@ -890,7 +891,8 @@ impl ReleasesView {
                             .w_full()
                             .flex_shrink_0()
                             .gap_5()
-                            .px_3()
+                            .pl_3()
+                            .pr_5()
                             .py_3()
                             .child(
                                 v_flex()
@@ -942,8 +944,17 @@ impl ReleasesView {
                             .child(self.render_builds(entry, compact, cx))
                             .child(self.render_notes(entry, cx)),
                     ),
+                &self.body_scroll,
+            ))
+            .child(
+                div().absolute().inset_0().child(
+                    gpui_base::Scrollbar::new(&self.body_scroll)
+                        .id("release-notes-scrollbar")
+                        .axis(ScrollbarAxis::Vertical)
+                        .mode(gpui_base::ScrollbarMode::Hover)
+                        .viewport_from_layout(),
+                ),
             )
-            .scrollbar(&self.body_scroll, ScrollbarAxis::Vertical)
             .into_any_element()
     }
 
@@ -1123,7 +1134,6 @@ impl ReleasesView {
                         this.child(div().child("Replaces "))
                             .child(div().mono(cx).truncate().child(self.binary.clone()))
                     })
-                    .when(entry.is_none(), |this| this.child("Nothing selected"))
                     .when(roomy && entry.is_some(), |this| {
                         this.child(rule(cx))
                             .child(div().child(if installable {
@@ -1184,8 +1194,11 @@ impl ReleasesView {
         h_flex()
             .flex_shrink_0()
             .gap_4()
-            .child(hint("↑↓", "choose", cx))
-            .child(hint("pgup/pgdn", "notes", cx))
+            .when(self.selected.is_some(), |hints| {
+                hints
+                    .child(hint("↑↓", "choose", cx))
+                    .child(hint("pgup/pgdn", "notes", cx))
+            })
             .child(hint(
                 "esc",
                 if self.search_input.read(cx).value().is_empty() {

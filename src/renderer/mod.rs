@@ -98,10 +98,12 @@ pub struct Pane<'a> {
 
 /// Colours for what the renderer draws around the cells, taken from the theme.
 #[derive(Debug, Clone, Copy)]
-pub struct Chrome {
+pub struct Chrome<'a> {
     pub divider: [u8; 4],
     pub divider_active: [u8; 4],
     pub cursor: [u8; 4],
+    /// Divider segments bordering the focused pane.
+    pub active_dividers: &'a [Divider],
     /// How far to darken the whole grid (0 leaves it alone), for when a
     /// dialog sits on top of it.
     pub dim: f32,
@@ -170,8 +172,7 @@ impl Renderer {
         panes: &[Pane<'_>],
         dividers: &[Divider],
         ime_preedit: Option<&ImePreedit>,
-        chrome: Chrome,
-        active_dividers: &[Divider],
+        chrome: Chrome<'_>,
         size: [u32; 2],
     ) -> Result<()> {
         let screen_size = [size[0] as f32, size[1] as f32];
@@ -341,7 +342,8 @@ impl Renderer {
             .iter()
             .map(|divider| (divider, chrome.divider))
             .chain(
-                active_dividers
+                chrome
+                    .active_dividers
                     .iter()
                     .map(|divider| (divider, chrome.divider_active)),
             );

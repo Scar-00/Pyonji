@@ -22,17 +22,31 @@ Things the UI should do but can't cleanly today, with the workaround in place
   wrapper (or a `content_fit` / `max_h` mode that measures its child), so the
   views can be `flex_1` and the dialog uses intrinsic height.
 
-## Scroll-aware overflow cues
+## Scroll-aware overflow cues (resolved)
 
-- **Want:** a fade at the bottom of the release notes only while there is more
-  to scroll.
-- **Blocker:** `ScrollHandle` has no change event, so a view isn't re-rendered
-  when its scroll position changes (scrollbar drags, keyboard scrolling).
-- **Workaround:** the directory picker reads `offset()` / `max_offset()` during
-  render and re-renders on scroll-wheel events. Release notes use an always
-  visible scrollbar in a separate overlay, preserving main's scrolling fix.
-- **Proper fix:** an `on_scroll` callback (or a notify on offset change) for
-  scroll handles.
+`components::scroll_viewport` uses the wgpu content alpha-mask API. It reads
+scroll position during paint and fades only edges with more content beyond
+them. The same adapter supports ScrollHandle, ListState, and UniformListScrollHandle.
+Scrollbars appear on hover or scroll, not permanently, per user preference.
+Other renderers are out of scope for this treatment.
+
+## Native content masks dropped text (fixed in GPUI)
+
+Core revision `c165ef597e` dropped text without a backing quad inside content
+masks. This reproduced with the standard `.mask_image(...)` API as well as a
+custom paint wrapper. The subpixel text pipeline wrote only RGB, leaving the
+isolated group's alpha transparent; selected rows and argument badges supplied
+a background alpha and hid the bug for their own text.
+
+Pyonji now pins `b7b61ab0a1b016218bb9d7d211bdc46b43b48c46`, which writes
+coverage alpha as well as RGB. Pixel regression tests cover content masks,
+opacity, and uncovered glyph texels over a colored backdrop. A separate
+renderer cleanup fix joins unused pipeline compilation workers before driver
+teardown. All 112 shader/renderer tests pass with clean process exit.
+
+The gradient-overlay workaround was removed after this fix. Diagnostic captures
+of the original bug remain in `/tmp/pyonji-mask-native/mask.png` (standard API)
+and `/tmp/pyonji-mask-smoke/mask.png` (custom wrapper).
 
 ## Split divider hover feedback
 
@@ -73,14 +87,10 @@ Things the UI should do but can't cleanly today, with the workaround in place
 - **Proper fix:** a supported way to register app-level theme overrides that
   survive `Theme::change` (or a custom theme in the registry).
 
-## Uniform lists can't mix row heights
+## Mixed-height palette rows (resolved)
 
-- **Want:** compact section headings in the palette (about 28px) between 38px
-  command rows.
-- **Blocker:** `uniform_list` measures its first item and gives every item
-  that height, and the first item is a heading.
-- **Workaround:** headings are as tall as rows (`SECTION = ROW` in
-  `palette.rs`) and sit their label at the bottom of the slot.
-- **Proper fix:** a virtualised list that takes a per-item height (gpui's
-  `list` with measured items, or a `uniform_list` variant with an item-height
-  callback).
+The palette now uses GPUI's `list` and a persistent `ListState`, with 26px
+section headings and 38px command rows. `measure_all` keeps the scrollbar
+accurate for this short list. The state resets when the row structure changes;
+keyboard navigation reveals command rows and skips section headings. The base
+scrollbar already supports `ListState`, so no custom scrollbar is needed.

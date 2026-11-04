@@ -580,40 +580,21 @@ impl FileOpener {
                 vis.into_iter()
                     .map(|ix| self.render_entry(ix, &entries[ix], cx)),
             );
-        // Like the palette and release notes: a scrollbar that stays visible
-        // while the listing overflows, so the rest of it is visibly there.
-        let more_below =
-            self.scroll_handle.offset().y > -self.scroll_handle.max_offset().y + gpui::px(1.0);
-        let fade = t.glass;
+        // The viewport fades at overflowing edges; the scrollbar appears on interaction.
         div()
             .relative()
             .flex_1()
             .min_h_0()
-            .child(list)
-            // A row cut by the footer reads as clipped, not cramped, under a fade.
-            .when(more_below, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom_0()
-                        // About a row tall and solid at the footer, so a cut
-                        // row fades out instead of ending in a fragment.
-                        .h(gpui::px(30.0))
-                        .bg(gpui::linear_gradient(
-                            180.,
-                            gpui::linear_color_stop(gpui::ColorExt::opacity(&fade, 0.0), 0.),
-                            gpui::linear_color_stop(fade, 1.),
-                        )),
-                )
-            })
+            .child(crate::ui::components::scroll_viewport(
+                list,
+                &self.scroll_handle,
+            ))
             .child(
                 div().absolute().inset_0().child(
                     gpui_base::Scrollbar::new(&self.scroll_handle)
                         .id("file-opener-scrollbar")
                         .axis(gpui_base::ScrollbarAxis::Vertical)
-                        .mode(gpui_base::ScrollbarMode::Always)
+                        .mode(gpui_base::ScrollbarMode::Hover)
                         .viewport_from_layout(),
                 ),
             )

@@ -15,6 +15,7 @@
 mod combo_box;
 mod marks;
 mod panel;
+mod scroll;
 mod search_field;
 mod style;
 mod toast;
@@ -22,6 +23,7 @@ mod toast;
 pub use combo_box::editable_combo_box;
 pub use marks::{enter_mark, hint, rule};
 pub use panel::{EmptyState, footer_status, panel_footer, panel_header};
+pub use scroll::scroll_viewport;
 pub use search_field::SearchField;
 pub use style::{PyInteractive, PyStyled};
 pub use toast::{status_icon, toast};

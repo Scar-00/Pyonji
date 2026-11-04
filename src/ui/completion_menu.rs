@@ -412,7 +412,7 @@ impl RenderOnce for CompletionMenu {
                                                 .w_full()
                                                 .h(px(list_height))
                                                 .flex_shrink_0()
-                                                .child(
+                                                .child(super::components::scroll_viewport(
                                                     uniform_list(
                                                         "completion-items-list",
                                                         count,
@@ -435,15 +435,15 @@ impl RenderOnce for CompletionMenu {
                                                     .h(px(list_height))
                                                     .flex_shrink_0()
                                                     .track_scroll(&scroll_handle),
-                                                )
-                                                // Visible at rest while the list
-                                                // overflows, like the palette's.
+                                                    &scroll_handle,
+                                                ))
+                                                // Revealed on hover or while scrolling.
                                                 .child(
                                                     div().absolute().inset_0().child(
                                                         gpui_base::Scrollbar::new(&scroll_handle)
                                                             .id("lua-completion-scrollbar")
                                                             .axis(ScrollbarAxis::Vertical)
-                                                            .mode(gpui_base::ScrollbarMode::Always)
+                                                            .mode(gpui_base::ScrollbarMode::Hover)
                                                             .viewport_from_layout(),
                                                     ),
                                                 ),

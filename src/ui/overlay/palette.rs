@@ -8,9 +8,8 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, FontWeight, KeyBinding, Rgba, ScrollStrategy,
-    SharedString, UniformListScrollHandle, WeakEntity, Window, actions, div, prelude::*, px,
-    uniform_list,
+    App, Context, Entity, FocusHandle, Focusable, FontWeight, KeyBinding, ListAlignment, ListState,
+    Rgba, SharedString, WeakEntity, Window, actions, div, list, prelude::*, px,
 };
 use gpui_base::{actions::Cancel, h_flex, v_flex};
 use gpui_component::{
@@ -36,9 +35,7 @@ actions!(palette, [Complete]);
 const CONTEXT: &str = "CommandPalette";
 
 const ROW: f32 = 38.0;
-// `uniform_list` sizes every row like its first, and a section heading comes
-// first, so headings must be exactly as tall as command rows.
-const SECTION: f32 = ROW;
+const SECTION: f32 = 26.0;
 const LINE: f32 = 52.0;
 
 pub fn init(cx: &mut App) {
@@ -52,6 +49,7 @@ pub fn init(cx: &mut App) {
 
 /// A row of the list. A section heading is a row of its own, so it takes up
 /// space in the scroll handle and the selection has to step over it.
+#[derive(PartialEq, Eq)]
 enum Row {
     Section(Origin),
     Command(usize),
@@ -74,7 +72,8 @@ pub struct PaletteView {
 
     focus_handle: FocusHandle,
     query: Entity<InputState>,
-    scroll_handle: UniformListScrollHandle,
+    scroll_handle: ListState,
+    list_rows: Vec<Row>,
 
     /// The name of the selected command. A name rather than a row number: the
     /// list is re-filtered on every keystroke, and a number carried across that
@@ -120,7 +119,8 @@ impl PaletteView {
 
             focus_handle,
             query,
-            scroll_handle: UniformListScrollHandle::new(),
+            scroll_handle: ListState::new(0, ListAlignment::Top, px(100.)).measure_all(),
+            list_rows: Vec::new(),
 
             selected: None,
             completion: Completion::default(),
@@ -158,11 +158,13 @@ impl PaletteView {
     }
 
     /// Re-measure, and redraw the window once if the dialog has to change size.
-    fn update_fit(&mut self, window: &mut Window, cx: &App) {
+    fn update_fit(&mut self, window: &mut Window, cx: &mut App) {
         let fit = self.measure(cx);
         if fit != self.fit {
             self.fit = fit;
-            window.refresh();
+            // Refresh is ignored during draw. Schedule it after this frame so
+            // a dialog with no focused/blinking input still takes its new size.
+            window.defer(cx, |window, _| window.refresh());
         }
     }
 
@@ -181,9 +183,8 @@ impl PaletteView {
             let commands = rows.len() - sections;
             sections as f32 * SECTION + commands as f32 * ROW + 8.0
         };
-        // Input line, footer, the dialog's inner padding and border, and a row's
-        // worth of slack so the last row is never clipped by rounding.
-        px(LINE + list + 40.0 + 14.0 + 24.0)
+        // Input, footer, and the dialog's inner padding and border.
+        px((LINE + list + 40.0 + 14.0).ceil())
     }
 
     /// Put the highlight on a row, by the name that row answers to.
@@ -235,8 +236,7 @@ impl PaletteView {
         cx.notify();
     }
 
-    /// Bring a row into view. `Nearest` rather than `Center`, so the list holds
-    /// still until the highlight would otherwise have left it.
+    /// Reveal a row without moving the viewport until selection leaves it.
     fn scroll_to(&self, at: usize, matches: &[commands::Match]) {
         // The scroll handle counts the children of the scrolling element, and
         // a heading is a child like any other row.
@@ -244,8 +244,9 @@ impl PaletteView {
             .iter()
             .position(|row| matches!(row, Row::Command(ix) if *ix == at))
             .unwrap_or(at);
-        self.scroll_handle
-            .scroll_to_item(row, ScrollStrategy::Nearest);
+        if row < self.scroll_handle.item_count() {
+            self.scroll_handle.scroll_to_reveal_item(row);
+        }
     }
 
     fn on_next(&mut self, _: &Next, _: &mut Window, cx: &mut Context<Self>) {
@@ -413,12 +414,12 @@ impl PaletteView {
                 // thing here: this is the live thing. `h_full` because the row
                 // centres its children, and a rule with no height of its own
                 // would collapse to nothing.
-                // Always present (muted until the line names a command), so the
+                // Always reserved (visible when the line names a command), so the
                 // input's edge doesn't jump as you type.
                 div().w(px(2.0)).h_full().flex_shrink_0().bg(if naming {
                     theme.accent
                 } else {
-                    theme.accent_muted
+                    gpui::rgba(0)
                 }),
             )
             .child(
@@ -598,35 +599,26 @@ impl PaletteView {
             .size_full()
             .py_1()
             //.overflow_y_scroll()
-            .child(
-                uniform_list(
-                    "palette-list-list",
-                    rows.len(),
-                    cx.processor(move |this, range: Range<usize>, _, cx| {
-                        rows[range]
-                            .iter()
-                            .map(|row| match row {
-                                Row::Section(origin) => {
-                                    this.render_section(*origin, cx).into_any_element()
-                                }
-                                Row::Command(ix) => this
-                                    .render_row(&matches[*ix], selected == Some(*ix), cx)
-                                    .into_any_element(),
-                            })
-                            .collect()
+            .child(crate::ui::components::scroll_viewport(
+                list(
+                    self.scroll_handle.clone(),
+                    cx.processor(move |this, index: usize, _, cx| match &rows[index] {
+                        Row::Section(origin) => this.render_section(*origin, cx).into_any_element(),
+                        Row::Command(ix) => this
+                            .render_row(&matches[*ix], selected == Some(*ix), cx)
+                            .into_any_element(),
                     }),
                 )
-                .size_full()
-                .track_scroll(&self.scroll_handle),
-            )
-            // Always drawn while the list overflows, so the commands past the
-            // first screenful are visibly there.
+                .size_full(),
+                &self.scroll_handle,
+            ))
+            // The thumb appears on hover/scroll; edge fades cue overflow at rest.
             .child(
                 div().absolute().inset_0().child(
                     gpui_base::Scrollbar::new(&self.scroll_handle)
                         .id("palette-list-scrollbar")
                         .axis(gpui_base::ScrollbarAxis::Vertical)
-                        .mode(gpui_base::ScrollbarMode::Always)
+                        .mode(gpui_base::ScrollbarMode::Hover)
                         .viewport_from_layout(),
                 ),
             )
@@ -722,6 +714,14 @@ impl Focusable for PaletteView {
 impl Render for PaletteView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let matches = self.matches(cx);
+        let rows = Self::rows(&matches);
+        if rows != self.list_rows {
+            self.scroll_handle.reset(rows.len());
+            self.list_rows = rows;
+            if let Some(selected) = self.selected(&matches) {
+                self.scroll_to(selected, &matches);
+            }
+        }
         self.compact = window.viewport_size().width < px(700.0);
         self.update_fit(window, cx);
 

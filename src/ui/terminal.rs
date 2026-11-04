@@ -312,28 +312,28 @@ impl Terminal {
         let target_size = target.size();
         let size = [target_size.width.0 as u32, target_size.height.0 as u32];
         let theme = crate::Theme::global(cx);
+        let active_dividers = pane_data
+            .iter()
+            .find(|pane| pane.is_active)
+            .map(|pane| bordering_dividers(&dividers, pane.geometry))
+            .unwrap_or_default();
         let chrome = Chrome {
             divider: rgba_bytes(theme.split_divider),
             divider_active: rgba_bytes(theme.split_divider_active),
             cursor: rgba_bytes(theme.cursor),
+            active_dividers: &active_dividers,
             dim: if self.dimmed {
                 theme.overlay_backdrop.alpha
             } else {
                 0.0
             },
         };
-        let active_dividers = pane_data
-            .iter()
-            .find(|pane| pane.is_active)
-            .map(|pane| bordering_dividers(&dividers, pane.geometry))
-            .unwrap_or_default();
         _ = renderer.render(
             target.view(),
             &pane_data,
             &dividers,
             ime_preedit.as_ref(),
             chrome,
-            &active_dividers,
             size,
         );
     }

@@ -83,7 +83,7 @@ impl SessionsView {
         .detach();
         let focus_handle = cx.focus_handle();
         cx.on_focus_in(&focus_handle, window, |this, window, cx| {
-            if this.focus_handle.is_focused(window) {
+            if this.focus_handle.is_focused(window) && !this.entries(cx).is_empty() {
                 window.focus(&this.search_input.focus_handle(cx), cx);
             }
         })
@@ -233,26 +233,30 @@ impl SessionsView {
     }
 
     /// Re-measure, and redraw the window once if the dialog has to change size.
-    fn update_fit(&mut self, window: &mut Window, cx: &App) {
+    fn update_fit(&mut self, window: &mut Window, cx: &mut App) {
         let fit = self.measure(cx);
         if fit != self.fit {
             self.fit = fit;
-            window.refresh();
+            // Refresh is ignored during draw. Schedule it after this frame so
+            // a dialog with no focused/blinking input still takes its new size.
+            window.defer(cx, |window, _| window.refresh());
         }
     }
 
     /// How tall the sessions list needs to be for the sessions it shows, so a
     /// couple of sessions don't sit in a mostly empty dialog. The dialog caps it.
     fn measure(&self, cx: &App) -> Pixels {
-        let rows = self.entries(cx).len();
+        let total = self.entries(cx).len();
+        let rows = self.visible(cx).len();
         let list = if rows == 0 {
             // The empty state's heading and detail.
             100.0
         } else {
-            rows as f32 * ROW_HEIGHT + 16.0
+            rows as f32 * ROW_HEIGHT + 8.0
         };
         // Header (title and search), footer, and the dialog's padding and border.
-        px(100.0 + list + 56.0 + 10.0)
+        let header = if total == 0 { 56.0 } else { 100.0 };
+        px(header + list + 40.0 + 10.0)
     }
 
     fn render_header(&self, shown: usize, total: usize, cx: &Context<Self>) -> impl IntoElement {
@@ -287,7 +291,9 @@ impl SessionsView {
                             }),
                     ),
             )
-            .child(SearchField::new(&self.search_input))
+            .when(total > 0, |header| {
+                header.child(SearchField::new(&self.search_input))
+            })
     }
 
     fn render_row(&self, entry: &Entry, cx: &Context<Self>) -> impl IntoElement {
@@ -443,7 +449,7 @@ impl SessionsView {
                 ),
                 theme.text_muted,
             ),
-            (None, None) => ("Nothing selected".to_string(), theme.text_muted),
+            (None, None) => (String::new(), theme.text_muted),
         };
         panel_footer(cx)
             .child(footer_status(status, color))

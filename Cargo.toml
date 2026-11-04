@@ -50,10 +50,10 @@ ssh2 = "0.9.6"
 mio = { version = "1.2.2", features = ["net", "os-poll"] }
 smallvec = "1.16.1"
 path-absolutize = "4.0.1"
-gpui = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e", features = ["custom-gpu"], package = "gpui-ce" }
-gpui_platform = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e", features = ["custom-gpu"], package = "gpui_ce_platform" }
-gpui_tokio = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e", package = "gpui_ce_tokio" }
-gpui_wgpu = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e", features = ["custom-gpu"], package = "gpui_ce_wgpu" }
+gpui = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46", features = ["custom-gpu"], package = "gpui-ce" }
+gpui_platform = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46", features = ["custom-gpu"], package = "gpui_ce_platform" }
+gpui_tokio = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46", package = "gpui_ce_tokio" }
+gpui_wgpu = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46", features = ["custom-gpu"], package = "gpui_ce_wgpu" }
 gpui_ce_components = { git = "https://github.com/Scar-00/gpui-component-fork", features = ["inspector"] }
 gpui_ce_components_base = { git = "https://github.com/Scar-00/gpui-component-fork", features = ["inspector"] }
 gpui_ce_components_assets = { git = "https://github.com/Scar-00/gpui-component-fork" }
@@ -89,22 +89,22 @@ gpui_ce_components = { opt-level = 3 }
 # Use the same GPUI fork for the component crates' upstream dependencies
 # too, so custom GPU handles and UI elements share the same GPUI types.
 [patch."https://github.com/gpui-ce/gpui-ce"]
-gpui-ce = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_apple = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_collections = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_derive_refineable = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_linux = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_macos = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_macros = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_media = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_platform = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_refineable = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_render = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_scheduler = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_shared_string = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_sum_tree = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_tokio = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_util = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_web = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_wgpu = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
-gpui_ce_windows = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "faf129a63fbbef42ea80663151fef7177698068e" }
+gpui-ce = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_apple = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_collections = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_derive_refineable = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_linux = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_macos = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_macros = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_media = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_platform = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_refineable = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_render = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_scheduler = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_shared_string = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_sum_tree = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_tokio = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_util = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_web = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_wgpu = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
+gpui_ce_windows = { git = "https://github.com/Scar-00/gpui-ce-fork", rev = "b7b61ab0a1b016218bb9d7d211bdc46b43b48c46" }
