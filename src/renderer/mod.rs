@@ -77,6 +77,26 @@ pub struct Renderer {
     divider_renderer: BackgroundRenderer,
     font_size: f32,
     line_height: f32,
+    /// The word being collected for shaping, reused across rows and frames.
+    word: Word,
+}
+
+/// A run of cells drawn as one shaped word: printable, non-space ASCII in
+/// the same face, one character per cell.
+#[derive(Default)]
+struct Word {
+    text: String,
+    colors: Vec<Color>,
+    /// The first cell's position, in pixels.
+    pos: [f32; 2],
+    bold: bool,
+}
+
+impl Word {
+    /// Whether a cell's contents can join a word.
+    fn accepts(contents: &str) -> bool {
+        matches!(contents.as_bytes(), [b'!'..=b'~'])
+    }
 }
 
 #[derive(Debug)]
@@ -116,6 +136,7 @@ impl Renderer {
             divider_renderer,
             font_size,
             line_height,
+            word: Word::default(),
         })
     }
 
@@ -164,8 +185,7 @@ impl Renderer {
             (cell_width * 2.0) / size[0] as f32,
             (self.line_height * 2.0) / size[1] as f32,
         ];
-        //  TODO(K): paraellize this -- maybe this will allow proper line shaping without having a
-        //  performance impact
+        //  TODO(K): paraellize this
         for pane in panes {
             if pane.geometry.cols == 0 || pane.geometry.rows == 0 {
                 continue;
@@ -174,6 +194,7 @@ impl Renderer {
             for row in 0..rows {
                 for col in 0..cols {
                     let Some(cell) = pane.screen.cell(row, col) else {
+                        self.flush_word(screen_size);
                         continue;
                     };
                     let fg_color = match cell.fgcolor() {
@@ -212,6 +233,19 @@ impl Renderer {
                     };
                     let contents = cell.contents();
                     let bold = cell.bold();
+                    if Word::accepts(contents) {
+                        if self.word.bold != bold {
+                            self.flush_word(screen_size);
+                        }
+                        if self.word.text.is_empty() {
+                            self.word.pos = [x, y];
+                            self.word.bold = bold;
+                        }
+                        self.word.text.push_str(contents);
+                        self.word.colors.push(fg_color);
+                        continue;
+                    }
+                    self.flush_word(screen_size);
                     #[allow(clippy::if_not_else)]
                     if contents.is_ascii() {
                         for ch in contents.chars() {
@@ -250,6 +284,7 @@ impl Renderer {
                         }
                     }
                 }
+                self.flush_word(screen_size);
             }
 
             if pane.is_active && !pane.screen.hide_cursor() && pane.screen.scrollback() == 0 {
@@ -333,6 +368,23 @@ impl Renderer {
         }
         self.queue.submit(Some(encoder.finish()));
         Ok(())
+    }
+
+    /// Draws the word collected so far, if any, and starts a new one.
+    fn flush_word(&mut self, screen_size: [f32; 2]) {
+        if self.word.text.is_empty() {
+            return;
+        }
+        self.terminal_renderer.add_word(
+            &self.queue,
+            self.word.pos,
+            screen_size,
+            &self.word.text,
+            &self.word.colors,
+            self.word.bold,
+        );
+        self.word.text.clear();
+        self.word.colors.clear();
     }
 
     fn draw_ime_preedit(&mut self, preedit: &ImePreedit, screen_size: [f32; 2]) {

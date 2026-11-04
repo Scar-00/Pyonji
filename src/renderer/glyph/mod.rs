@@ -4,6 +4,7 @@ pub use system::{DEFAULT_FAMILIES, prewarm as prewarm_system_fonts, resolve_fami
 
 use std::{borrow::Cow, mem, sync::Arc};
 
+use ahash::AHashMap;
 use bytemuck::{Pod, Zeroable};
 use etagere::{AtlasAllocator, BucketedAtlasAllocator};
 use smallvec::SmallVec;
@@ -164,6 +165,22 @@ impl Font {
     }
 }
 
+/// A glyph of a shaped word, placed relative to the cell its cluster starts
+/// in rather than to the word's start, so it stays on the grid even where
+/// the face's advance differs from the rounded cell width.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ShapedGlyph {
+    id: u16,
+    /// The column within the word.
+    cell: u16,
+    x: f32,
+    y: f32,
+}
+
+/// `None` for words the face can't draw a character of; those take the
+/// per-character path, which falls back to other faces.
+type ShapedWord = Option<Arc<[ShapedGlyph]>>;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Glyph {
     uv_min: [f32; 2],
@@ -204,6 +221,10 @@ pub struct TerminalRenderer {
     ime_glyph_map: Vec<Option<Glyph>>,
     icon_glyph_map: Vec<Option<Glyph>>,
     emoji_glyph_map: Vec<Option<Glyph>>,
+    /// Words shaped in the normal and bold faces. The grid mostly redraws
+    /// the same text, so shaping happens once per word, not per frame.
+    normal_words: AHashMap<Box<str>, ShapedWord>,
+    bold_words: AHashMap<Box<str>, ShapedWord>,
     glyph_atlas: BucketedAtlasAllocator,
     image_atlas: AtlasAllocator,
     atlas_size: [f32; 2],
@@ -217,6 +238,8 @@ impl TerminalRenderer {
     const EMOJI_FONT: &[u8] = include_bytes!("../../../resources/fonts/NotoEmoji.ttf");
     const DEFAULT_BUFFER_SIZE: u64 = (1024 * 16) * 32;
     const MAX_ATLAS_DIMENSION: u32 = 2048;
+    /// Bounds the shaped word caches; they are cleared when either fills.
+    const MAX_CACHED_WORDS: usize = 16 * 1024;
 
     fn load_glyph(&mut self, variant: FontVariant, id: u16) -> Option<Image> {
         let font = match variant {
@@ -637,6 +660,8 @@ impl TerminalRenderer {
             ime_glyph_map: Vec::new(),
             icon_glyph_map: Vec::new(),
             emoji_glyph_map: Vec::new(),
+            normal_words: AHashMap::new(),
+            bold_words: AHashMap::new(),
             scale_context: ScaleContext::new(),
             shape_context: ShapeContext::new(),
             normal_font,
@@ -659,10 +684,15 @@ impl TerminalRenderer {
         self.ime_glyph_map.clear();
         self.icon_glyph_map.clear();
         self.emoji_glyph_map.clear();
+        self.normal_words.clear();
+        self.bold_words.clear();
     }
 
     pub fn set_font_size(&mut self, font_size: f32) {
         self.font_size = font_size;
+        // Shaped offsets are in pixels at the old size.
+        self.normal_words.clear();
+        self.bold_words.clear();
         self.cell_width = Self::measure_cell_width(&self.normal_font, font_size);
     }
 
@@ -879,6 +909,108 @@ impl TerminalRenderer {
             .extend_from_slice(&[idx, idx + 1, idx + 2, idx + 1, idx + 2, idx + 3]);
     }
 
+    /// Draws a word of printable, non-space ASCII, one character per cell
+    /// starting at `pos`, shaped as a whole so the face's ligatures and
+    /// contextual alternates apply. Each glyph takes the color of the cell
+    /// its cluster starts in.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_word(
+        &mut self,
+        queue: &Queue,
+        pos: [f32; 2],
+        screen_size: [f32; 2],
+        word: &str,
+        colors: &[Color],
+        bold: bool,
+    ) {
+        debug_assert_eq!(word.len(), colors.len());
+        let shaped = if word.len() > 1 {
+            self.shaped_word(word, bold)
+        } else {
+            None
+        };
+        let Some(glyphs) = shaped else {
+            for ((col, ch), &color) in word.chars().enumerate().zip(colors) {
+                let pos = [pos[0] + self.cell_width * col as f32, pos[1]];
+                self.add_glyph(queue, pos, screen_size, ch, color, bold);
+            }
+            return;
+        };
+        let variant = if bold {
+            FontVariant::Bold
+        } else {
+            FontVariant::Normal
+        };
+        for glyph in glyphs.iter() {
+            let cell = usize::from(glyph.cell);
+            let pos = [
+                pos[0] + self.cell_width * cell as f32 + glyph.x,
+                pos[1] + glyph.y,
+            ];
+            self.add_glyph_id(queue, pos, screen_size, glyph.id, variant, colors[cell]);
+        }
+    }
+
+    fn shaped_word(&mut self, word: &str, bold: bool) -> ShapedWord {
+        let words = if bold {
+            &self.bold_words
+        } else {
+            &self.normal_words
+        };
+        if let Some(shaped) = words.get(word) {
+            return shaped.clone();
+        }
+        let font = if bold {
+            &self.bold_font
+        } else {
+            &self.normal_font
+        };
+        let shaped = Self::shape_word(&mut self.shape_context, font, self.font_size, word);
+        let words = if bold {
+            &mut self.bold_words
+        } else {
+            &mut self.normal_words
+        };
+        if words.len() >= Self::MAX_CACHED_WORDS {
+            words.clear();
+        }
+        words.insert(word.into(), shaped.clone());
+        shaped
+    }
+
+    fn shape_word(
+        shape_context: &mut ShapeContext,
+        font: &Font,
+        font_size: f32,
+        word: &str,
+    ) -> ShapedWord {
+        let mut shaper = shape_context
+            .builder(font.as_ref())
+            .direction(Direction::LeftToRight)
+            .size(font_size)
+            .build();
+        shaper.add_str(word);
+
+        let mut glyphs = Vec::with_capacity(word.len());
+        let mut missing = false;
+        shaper.shape_with(|cluster| {
+            // One byte per cell, as the word is ASCII.
+            let cell = cluster.source.start as u16;
+            let mut pen = 0.0;
+            for glyph in cluster.glyphs {
+                missing |= glyph.id == 0;
+                glyphs.push(ShapedGlyph {
+                    id: glyph.id,
+                    cell,
+                    x: pen + glyph.x,
+                    y: glyph.y,
+                });
+                pen += glyph.advance;
+            }
+        });
+        (!missing).then(|| glyphs.into())
+    }
+
     pub fn add_cluster(
         &mut self,
         queue: &Queue,
@@ -964,6 +1096,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn shape(word: &str) -> ShapedWord {
+        let font = Font::from_data(TerminalRenderer::ICON_FONT, 0).unwrap();
+        TerminalRenderer::shape_word(&mut ShapeContext::new(), &font, 24.0, word)
+    }
+
+    #[test]
+    fn words_shape_with_the_face_ligatures() {
+        let font = Font::from_data(TerminalRenderer::ICON_FONT, 0).unwrap();
+        let charmap = font.charmap();
+        for word in ["->", "!=", "===", "=>"] {
+            let glyphs = shape(word).unwrap();
+            let unshaped: Vec<u16> = word.chars().map(|ch| charmap.map(ch)).collect();
+            let shaped: Vec<u16> = glyphs.iter().map(|glyph| glyph.id).collect();
+            assert_ne!(shaped, unshaped, "{word} should ligate");
+            // Glyphs stay inside the word's cells.
+            assert!(glyphs.iter().all(|glyph| usize::from(glyph.cell) < word.len()));
+        }
+    }
+
+    #[test]
+    fn words_without_ligatures_keep_one_glyph_per_cell() {
+        let font = Font::from_data(TerminalRenderer::ICON_FONT, 0).unwrap();
+        let charmap = font.charmap();
+        let glyphs = shape("cargo").unwrap();
+        assert_eq!(glyphs.len(), 5);
+        for (col, (glyph, ch)) in glyphs.iter().zip("cargo".chars()).enumerate() {
+            assert_eq!(usize::from(glyph.cell), col);
+            assert_eq!(glyph.id, charmap.map(ch));
+            assert_eq!((glyph.x, glyph.y), (0.0, 0.0));
+        }
+    }
+
+    /// `cargo test --release -- --ignored --nocapture shaping_cost`
+    #[test]
+    #[ignore = "benchmark"]
+    fn shaping_cost() {
+        use std::{hint::black_box, time::Instant};
+        let font = Font::from_data(TerminalRenderer::ICON_FONT, 0).unwrap();
+        let mut context = ShapeContext::new();
+        let mut cache: AHashMap<Box<str>, ShapedWord> = AHashMap::new();
+        let words: Vec<String> = (0..2000).map(|i| format!("fn_{i}->x!={i}")).collect();
+        let start = Instant::now();
+        for word in &words {
+            let shaped = TerminalRenderer::shape_word(&mut context, &font, 24.0, word);
+            cache.insert(word.as_str().into(), shaped);
+        }
+        let cold = start.elapsed();
+        let start = Instant::now();
+        for _ in 0..100 {
+            for word in &words {
+                black_box(cache.get(word.as_str()).cloned());
+            }
+        }
+        let warm = start.elapsed() / 100;
+        println!("2000 words: shaping {cold:?}, cached lookups {warm:?}");
     }
 
     #[test]
