@@ -229,10 +229,23 @@ impl StatusBar {
     }
 
     fn resolve_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(index) = self.completion.selected {
+            self.resolve(index, cx);
+        }
+    }
+
+    /// Resolve the first screenful too: LuaLS only says a field holds a
+    /// function once the item is resolved, and the list should mark every
+    /// method as one, not just the highlighted row.
+    fn resolve_leading(&mut self, cx: &mut Context<Self>) {
+        let count = self.completion.items.as_ref().map_or(0, Vec::len).min(12);
+        for index in 0..count {
+            self.resolve(index, cx);
+        }
+    }
+
+    fn resolve(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(lsp) = self.lua_lsp.as_ref().filter(|lsp| lsp.resolve_completions) else {
-            return;
-        };
-        let Some(index) = self.completion.selected else {
             return;
         };
         let Some(item) = self
@@ -337,7 +350,10 @@ impl Render for StatusBar {
             .items_center()
             .backdrop_blur(px(16.0))
             .map(|this| match &self.mode {
-                Mode::Sessions => this.child(SessionView::new(&self.pyonji)),
+                Mode::Sessions => this
+                    .child(SessionView::new(&self.pyonji))
+                    // The one way in to everything else, so it's always shown.
+                    .child(prompt_hints(&[("ctrl+shift+p", "commands")], cx)),
                 Mode::Rename { inital, session } => {
                     this.child(RenameView::new(&self.pyonji, inital.clone(), *session))
                 }
@@ -350,6 +366,8 @@ impl Render for StatusBar {
                     )
                     .on_next(cx.listener(|this, _, _, cx| {
                         let Some(items) = this.completion.items.as_ref() else {
+                            // With no list open the arrows page through overloads.
+                            this.signature.cycle(1);
                             this.completion.selected = None;
                             cx.notify();
                             return;
@@ -371,6 +389,8 @@ impl Render for StatusBar {
                     }))
                     .on_prev(cx.listener(|this, _, _, cx| {
                         let Some(items) = this.completion.items.as_ref() else {
+                            // With no list open the arrows page through overloads.
+                            this.signature.cycle(-1);
                             this.completion.selected = None;
                             cx.notify();
                             return;
@@ -428,11 +448,16 @@ impl RenderOnce for SessionView {
             .min_w_0()
             .role(Role::TabList)
             .aria_label("Terminal tabs")
-            .gap_3()
+            .h_full()
+            .gap_1()
             .overflow_x_scroll()
             .children(py.tabs.iter().enumerate().filter_map(move |(i, tab)| {
                 let id = tab.as_ref().and_then(|tab| tab.active_session())?;
-                let title = py.session_manager.session(id)?.title().to_string();
+                let title = py.session_manager.session(id)?.title();
+                // Tab shortcuts are Lua callbacks the config binds, so there is
+                // no key to name here; say what a click does instead.
+                let tooltip = format!("Tab {}: {title} · click to switch", i + 1);
+                let title = title.to_string();
                 let selected = py.current_tab == Some(i);
                 let pyonji = pyonji.clone();
                 Some(
@@ -443,6 +468,9 @@ impl RenderOnce for SessionView {
                         .focus_visible(|style| style.text_color(theme.accent))
                         .aria_selected(selected)
                         .aria_label(format!("Tab {}: {title}", i + 1))
+                        .flex_shrink_0()
+                        .max_w(px(240.))
+                        .h_full()
                         .items_center()
                         .justify_center()
                         .gap_1p5()
@@ -460,14 +488,28 @@ impl RenderOnce for SessionView {
                                     .hover(|style| style.bg(theme.hovered).text_color(theme.text))
                             }
                         })
-                        // The number is the key that reaches the tab; on the
-                        // live tab it carries the accent with the rule.
                         .child(
                             div()
-                                .when(selected, |number| number.text_color(theme.accent))
-                                .child((i + 1).to_string()),
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_color(if selected {
+                                    theme.accent
+                                } else {
+                                    theme.text_muted
+                                })
+                                .child(format!("{}", i + 1)),
                         )
-                        .child(title)
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(title),
+                        )
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                        })
                         .cursor_pointer()
                         .on_click(move |_, window, cx| {
                             Self::on_click(pyonji.clone(), i, window, cx);
@@ -501,6 +543,8 @@ impl RenderOnce for RenameView {
         let input_state = window.use_state(cx, |window, cx| {
             let mut state = InputState::new(window, cx);
             state.insert(self.inital, window, cx);
+            // Selected, so typing replaces the old name and arrows keep it.
+            state.select_all(window, cx);
             cx.on_focus_out(&state.focus_handle(cx), window, {
                 let py = py.clone();
                 move |_, _, _, cx| {
@@ -526,22 +570,41 @@ impl RenderOnce for RenameView {
         h_flex()
             .w_full()
             .items_center()
-            .child(prompt(format!("rename {}", session), cx))
-            .child(text_input(&input_state, cx))
+            .gap_2()
+            .child(prompt_label("rename", cx))
+            .child(div().flex_1().min_w_0().child(text_input(&input_state, cx)))
+            .child(prompt_hints(&[("\u{23ce}", "save"), ("esc", "cancel")], cx))
     }
 }
 
-/// What the bar is asking for, in the accent, where a shell puts its prompt.
-/// Without it a bare field on the bar looks like the tab list went missing.
-fn prompt(text: impl Into<SharedString>, cx: &App) -> Div {
+/// What the status bar is asking for, ahead of its input.
+fn prompt_label(label: &'static str, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
     div()
         .flex_shrink_0()
-        .pl_1()
-        .pr_2()
-        .text_color(cx.theme().accent)
-        .child(text.into())
+        .px_1p5()
+        .rounded_sm()
+        .bg(theme.accent_muted)
+        .text_xs()
+        .text_color(theme.accent)
+        .child(label)
 }
 
+fn prompt_hints(hints: &[(&'static str, &'static str)], cx: &App) -> impl IntoElement {
+    // The input matters more than its hints; in a narrow window the hints go
+    // first rather than squeezing the field.
+    h_flex()
+        .flex_shrink(10.)
+        .min_w_0()
+        .overflow_hidden()
+        .gap_3()
+        .px_1()
+        .children(
+            hints
+                .iter()
+                .map(|(keys, what)| crate::ui::components::hint(*keys, *what, cx)),
+        )
+}
 #[derive(IntoElement)]
 struct LuaView {
     pyonji: WeakEntity<Pyonji>,
@@ -690,6 +753,7 @@ impl RenderOnce for LuaView {
                                             ScrollStrategy::Top,
                                         );
                                         this.resolve_selected(cx);
+                                        this.resolve_leading(cx);
                                         cx.notify();
                                     }
                                 })
@@ -794,14 +858,28 @@ impl RenderOnce for LuaView {
                     },
                 )
                 .signature_help(signature)
+                .callee(super::signature_help::callee(&value, cursor).map(Into::into))
             })
         })
         .child(
             h_flex()
                 .w_full()
                 .items_center()
-                .child(prompt(">", cx))
-                .child(text_input(&input_state, cx)),
+                .gap_2()
+                .child(prompt_label("lua", cx))
+                .child(
+                    // Code, so the code font, as in the popups above it.
+                    div()
+                        .font_family(
+                            gpui_component::ActiveTheme::theme(cx)
+                                .mono_font_family
+                                .clone(),
+                        )
+                        .flex_1()
+                        .min_w_0()
+                        .child(text_input(&input_state, cx)),
+                )
+                .child(prompt_hints(&[("\u{23ce}", "run"), ("esc", "close")], cx)),
         )
     }
 }

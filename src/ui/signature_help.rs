@@ -47,6 +47,19 @@ impl LuaSignature {
         true
     }
 
+    /// Show the next (`1`) or previous (`-1`) overload.
+    pub(super) fn cycle(&mut self, delta: i32) {
+        let Some(help) = self.help.as_mut() else {
+            return;
+        };
+        let len = help.signatures.len() as i32;
+        if len < 2 {
+            return;
+        }
+        let current = help.active_signature.unwrap_or(0) as i32;
+        help.active_signature = Some((current + delta).rem_euclid(len) as u32);
+    }
+
     pub(super) fn dismiss(&mut self) {
         // Keep the input snapshot so cursor blinking cannot reopen a dismissed
         // popover. A real edit or caret movement starts a new request.
@@ -59,12 +72,75 @@ impl LuaSignature {
 pub(super) struct SignaturePopover {
     help: SignatureHelp,
     width: Pixels,
+    callee: Option<SharedString>,
 }
 
 impl SignaturePopover {
     pub(super) fn new(help: SignatureHelp, width: Pixels) -> Self {
-        Self { help, width }
+        Self {
+            help,
+            width,
+            callee: None,
+        }
     }
+
+    pub(super) fn callee(mut self, callee: Option<SharedString>) -> Self {
+        self.callee = callee;
+        self
+    }
+}
+
+/// A signature label as the call it describes: the `(method) ` style prefix
+/// split off as the kind, and the callee's name put in front of a bare
+/// parameter list. `highlight` is moved along with the text.
+fn display_label(
+    label: &str,
+    callee: Option<&str>,
+    highlight: Option<Range<usize>>,
+) -> (Option<&'static str>, String, Option<Range<usize>>) {
+    const KINDS: [(&str, &str); 3] = [
+        ("(method) ", "Method"),
+        ("(function) ", "Function"),
+        ("(field) ", "Field"),
+    ];
+    let (kind, cut) = KINDS
+        .iter()
+        .find(|(prefix, _)| label.starts_with(prefix))
+        .map_or((None, 0), |(prefix, kind)| (Some(*kind), prefix.len()));
+    let rest = &label[cut..];
+    let name = callee.filter(|_| rest.starts_with('(')).unwrap_or("");
+    let shift = |ix: usize| ix.saturating_sub(cut) + name.len();
+    let highlight = highlight
+        .filter(|range| range.start >= cut)
+        .map(|range| shift(range.start)..shift(range.end));
+    (kind, format!("{name}{rest}"), highlight)
+}
+
+/// The name of the innermost call the caret sits in, `py:rename` for
+/// `py:rename("a`.
+pub(super) fn callee(value: &str, cursor: usize) -> Option<String> {
+    let before = &value[..value.floor_char_boundary(cursor.min(value.len()))];
+    let mut depth = 0usize;
+    let open = before.char_indices().rev().find_map(|(ix, ch)| match ch {
+        ')' => {
+            depth += 1;
+            None
+        }
+        '(' if depth == 0 => Some(ix),
+        '(' => {
+            depth -= 1;
+            None
+        }
+        _ => None,
+    })?;
+    let head = before[..open].trim_end();
+    let start = head
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !(ch.is_alphanumeric() || matches!(ch, '_' | '.' | ':')))
+        .map_or(0, |(ix, ch)| ix + ch.len_utf8());
+    let name = &head[start..];
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 impl RenderOnce for SignaturePopover {
@@ -87,6 +163,10 @@ impl RenderOnce for SignaturePopover {
         let parameter = parameters.get(parameter_index);
         let highlight =
             parameter.and_then(|parameter| parameter_range(signature, &parameter.label));
+        // LuaLS labels a method `(method) (name: string)`; show it as the call
+        // being written, `py:rename(name: string)`, and keep the kind for the header.
+        let (kind, label, highlight) =
+            display_label(&signature.label, self.callee.as_deref(), highlight);
         let documentation = parameter
             .and_then(|parameter| parameter.documentation.as_ref())
             .or(signature.documentation.as_ref())
@@ -116,19 +196,25 @@ impl RenderOnce for SignaturePopover {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .child("Function arguments"),
+                            .child(kind.unwrap_or("Function arguments")),
                     )
                     .when(parameter.is_some(), |header| {
-                        header.child(format!(
-                            "Argument {} / {}",
-                            parameter_index + 1,
-                            parameters.len()
-                        ))
+                        header.child(format!("arg {}/{}", parameter_index + 1, parameters.len()))
                     })
-                    .when(
-                        self.help.signatures.len() > 1 && self.width >= px(400.0),
-                        |header| header.child(format!("{} overloads", self.help.signatures.len())),
-                    ),
+                    // Kept at every width (shortened when narrow), so other
+                    // overloads stay discoverable.
+                    .when(self.help.signatures.len() > 1, |header| {
+                        header.child(format!(
+                            "↑↓ {}{}/{}",
+                            if self.width >= px(360.0) {
+                                "overload "
+                            } else {
+                                ""
+                            },
+                            index + 1,
+                            self.help.signatures.len()
+                        ))
+                    }),
             )
             .child(
                 v_flex()
@@ -139,7 +225,7 @@ impl RenderOnce for SignaturePopover {
                     .pb_2()
                     .gap_1()
                     .child(div().text_color(theme.text).child(
-                        StyledText::new(signature.label.clone()).with_highlights(
+                        StyledText::new(label).with_highlights(
                             highlight.map(|range| (range, theme.match_highlight())),
                         ),
                     ))
@@ -266,5 +352,30 @@ mod tests {
             parameter_range(&signature, &ParameterLabel::Simple("foo".into())),
             Some(4..7)
         );
+    }
+}
+
+#[cfg(test)]
+mod callee_tests {
+    use super::callee;
+
+    #[test]
+    fn a_method_label_reads_as_the_call() {
+        let label = "(method) (name: string)";
+        let start = label.find("name").unwrap();
+        let (kind, text, highlight) =
+            super::display_label(label, Some("py:rename"), Some(start..start + 4));
+        assert_eq!(kind, Some("Method"));
+        assert_eq!(text, "py:rename(name: string)");
+        assert_eq!(&text[highlight.unwrap()], "name");
+        assert_eq!(super::display_label("f(a)", None, None).1, "f(a)");
+    }
+
+    #[test]
+    fn the_innermost_open_call_is_named() {
+        assert_eq!(callee("py:rename(", 10).as_deref(), Some("py:rename"));
+        assert_eq!(callee("f(g(1), h(", 10).as_deref(), Some("h"));
+        assert_eq!(callee("f(g(1), ", 8).as_deref(), Some("f"));
+        assert_eq!(callee("x = 1", 5), None);
     }
 }

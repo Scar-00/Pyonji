@@ -374,7 +374,7 @@ fn builtins() -> Vec<Command> {
             "close",
             [Arg::new("session")],
             Origin::Workspace,
-            "Close a session; leave off the argument to close the focused one",
+            "Close a session (the focused one if none is named)",
             |args, py: &mut Pyonji, _: &mut Window, cx: &mut Context<Pyonji>| {
                 let Some(id) = session_id(args.first()).or_else(|| py.active_session()) else {
                     return;
@@ -448,7 +448,12 @@ fn builtins() -> Vec<Command> {
             [Arg::new("name")],
             Origin::Workspace,
             "Rename the focused session",
-            |args, py: &mut Pyonji, _: &mut Window, cx: &mut Context<Pyonji>| {
+            |args, py: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>| {
+                // Without a name, edit the current one in the status bar.
+                if args.is_empty() {
+                    window.dispatch_action(Box::new(crate::EnterRename), cx);
+                    return;
+                }
                 let Some(session) = py
                     .active_session()
                     .and_then(|id| py.session_manager.session_mut(id))

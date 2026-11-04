@@ -31,13 +31,18 @@ use smol::stream::StreamExt as _;
 
 const RAIL: f32 = 232.0;
 
-const ROW: f32 = 62.0;
+const ROW: f32 = 48.0;
+
+actions!(releases, [NotesPageDown, NotesPageUp]);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("down", Next, Some(ReleasesView::CONTEXT)),
         KeyBinding::new("up", Prev, Some(ReleasesView::CONTEXT)),
         KeyBinding::new("enter", Submit, Some(ReleasesView::CONTEXT)),
+        // The arrows choose a version, so the notes page with these.
+        KeyBinding::new("pagedown", NotesPageDown, Some(ReleasesView::CONTEXT)),
+        KeyBinding::new("pageup", NotesPageUp, Some(ReleasesView::CONTEXT)),
     ]);
 }
 
@@ -370,9 +375,17 @@ impl ReleasesView {
         let version = release.version().to_string();
         let (notes, changelog) = split_notes(release.body());
 
-        // GitHub's default release name is the tag, which the version already
-        // says.
-        let title = (release.name() != format!("v{version}")).then(|| release.name().to_string());
+        // GitHub's default release name is the tag, and ours is often
+        // `Pyonji 0.4.0`; both only restate the heading. Keep names that say
+        // something more.
+        let name = release.name();
+        let restates_version = name
+            .trim()
+            .trim_start_matches("Pyonji")
+            .trim()
+            .trim_start_matches('v')
+            == version;
+        let title = (!restates_version).then(|| name.to_string());
 
         let build = |name: &str| {
             let triple = target_triple(name, &version);
@@ -731,21 +744,25 @@ impl ReleasesView {
             }))
             .child(
                 // A fixed slot for the mark showing which release is running.
-                div()
-                    .w(px(14.0))
-                    .flex_shrink_0()
-                    .child(div().size(px(6.0)).bg(if running {
-                        theme.accent
-                    } else {
-                        Theme::TRANSPARENT
-                    })),
+                div().w(px(14.0)).flex_shrink_0().child(
+                    div()
+                        .size(px(6.0))
+                        // Success, not the accent: the accent already
+                        // marks the selected row.
+                        .rounded_full()
+                        .bg(if running {
+                            theme.success
+                        } else {
+                            Theme::TRANSPARENT
+                        }),
+                ),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .mono(cx)
-                    .text_size(px(22.0))
+                    .text_size(px(17.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(if selected {
                         theme.text
@@ -941,15 +958,8 @@ impl ReleasesView {
                 .gap_3()
                 .min_h(px(30.0))
                 .when(compact, |row| row.flex_col().items_start().gap_1().py_1())
-                .pl_3()
-                // The same accent rule the rail uses for selection marks the
-                // build that works here.
-                .border_l_2()
-                .border_color(if mine {
-                    theme.selected_border
-                } else {
-                    Theme::TRANSPARENT
-                })
+                // Plain rows: these are facts, not choices, so no selection
+                // rule. This machine's build says so with a badge instead.
                 .child(
                     div()
                         .when(!compact, |label| label.w(px(112.0)))
@@ -968,6 +978,18 @@ impl ReleasesView {
                         .text_color(theme.text_muted)
                         .child(build.triple.clone()),
                 )
+                .when(mine, |row| {
+                    row.child(
+                        div()
+                            .flex_shrink_0()
+                            .px_1p5()
+                            .rounded_sm()
+                            .bg(theme.success.opacity(0.15))
+                            .text_size(px(11.0))
+                            .text_color(theme.success)
+                            .child("\u{2713} this machine"),
+                    )
+                })
         };
 
         v_flex()
@@ -1132,12 +1154,12 @@ impl ReleasesView {
                     // version again, or a step back, is not an "install".
                     .label(match entry {
                         Some(e) if e.installable() && e.version == RUNNING => {
-                            format!("Reinstall v{}", e.version)
+                            format!("⏎ Reinstall v{}", e.version)
                         }
                         Some(e) if e.installable() && is_older(&e.version, RUNNING) => {
-                            format!("Downgrade to v{}", e.version)
+                            format!("⏎ Downgrade to v{}", e.version)
                         }
-                        Some(e) if e.installable() => format!("Install v{}", e.version),
+                        Some(e) if e.installable() => format!("⏎ Install v{}", e.version),
                         Some(e) => format!("No build for v{}", e.version),
                         None => "Install".to_string(),
                     })
@@ -1148,12 +1170,22 @@ impl ReleasesView {
             )
     }
 
+    /// Scroll the release notes by most of a screen (`1` down, `-1` up).
+    fn page_notes(&mut self, direction: f32, cx: &mut Context<Self>) {
+        let page = self.body_scroll.bounds().size.height * 0.85;
+        let max = self.body_scroll.max_offset().y;
+        let mut offset = self.body_scroll.offset();
+        offset.y = (offset.y - page * direction).clamp(-max, px(0.0));
+        self.body_scroll.set_offset(offset);
+        cx.notify();
+    }
+
     fn render_hints(&self, cx: &Context<Self>) -> impl IntoElement {
         h_flex()
             .flex_shrink_0()
             .gap_4()
             .child(hint("↑↓", "choose", cx))
-            .child(hint("⏎", "install", cx))
+            .child(hint("pgup/pgdn", "notes", cx))
             .child(hint(
                 "esc",
                 if self.search_input.read(cx).value().is_empty() {
@@ -1266,6 +1298,8 @@ impl Render for ReleasesView {
             .on_action(cx.listener(Self::on_select_prev))
             .on_action(cx.listener(Self::on_confirm))
             .on_action(cx.listener(Self::on_cancel))
+            .on_action(cx.listener(|this, _: &NotesPageDown, _, cx| this.page_notes(1.0, cx)))
+            .on_action(cx.listener(|this, _: &NotesPageUp, _, cx| this.page_notes(-1.0, cx)))
             .size_full()
             .min_h_0()
             .overflow_hidden()

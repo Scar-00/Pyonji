@@ -22,7 +22,7 @@ use crate::{
     Next, Prev, Pyonji, Submit,
     commands::{self, Origin},
     ui::{
-        PyTheme as _, Theme,
+        PyTheme as _,
         components::{
             EmptyState, PyInteractive as _, PyStyled as _, editable_combo_box, enter_mark,
             footer_status, hint, panel_footer,
@@ -35,8 +35,10 @@ actions!(palette, [Complete]);
 
 const CONTEXT: &str = "CommandPalette";
 
-const ROW: f32 = 46.0;
-const SECTION: f32 = 46.0;
+const ROW: f32 = 38.0;
+// `uniform_list` sizes every row like its first, and a section heading comes
+// first, so headings must be exactly as tall as command rows.
+const SECTION: f32 = ROW;
 const LINE: f32 = 52.0;
 
 pub fn init(cx: &mut App) {
@@ -79,6 +81,11 @@ pub struct PaletteView {
     /// would go on pointing at whatever row happens to sit there afterwards.
     selected: Option<SharedString>,
     completion: Completion,
+    /// The window is too narrow for a name column and a summary column side by
+    /// side; summaries drop the column and keep to one line then.
+    compact: bool,
+    /// The height this view last measured for itself; see `fit_height`.
+    fit: gpui::Pixels,
 }
 
 impl PaletteView {
@@ -117,6 +124,8 @@ impl PaletteView {
 
             selected: None,
             completion: Completion::default(),
+            compact: false,
+            fit: gpui::px(520.),
         }
     }
 
@@ -140,6 +149,41 @@ impl PaletteView {
             rows.push(Row::Command(ix));
         }
         rows
+    }
+
+    /// The height measured at the last render. The dialog is built while the
+    /// app is mid-update, when this view can't read the app to measure itself.
+    pub fn fit_height(&self) -> gpui::Pixels {
+        self.fit
+    }
+
+    /// Re-measure, and redraw the window once if the dialog has to change size.
+    fn update_fit(&mut self, window: &mut Window, cx: &App) {
+        let fit = self.measure(cx);
+        if fit != self.fit {
+            self.fit = fit;
+            window.refresh();
+        }
+    }
+
+    /// How tall the palette needs to be to show every match without blank
+    /// space, so a short list gets a short dialog. The dialog caps it.
+    fn measure(&self, cx: &App) -> gpui::Pixels {
+        let rows = Self::rows(&self.matches(cx));
+        let list = if rows.is_empty() {
+            // The empty state's message and suggestion.
+            120.0
+        } else {
+            let sections = rows
+                .iter()
+                .filter(|row| matches!(row, Row::Section(_)))
+                .count();
+            let commands = rows.len() - sections;
+            sections as f32 * SECTION + commands as f32 * ROW + 8.0
+        };
+        // Input line, footer, the dialog's inner padding and border, and a row's
+        // worth of slack so the last row is never clipped by rounding.
+        px(LINE + list + 40.0 + 14.0 + 24.0)
     }
 
     /// Put the highlight on a row, by the name that row answers to.
@@ -369,10 +413,12 @@ impl PaletteView {
                 // thing here: this is the live thing. `h_full` because the row
                 // centres its children, and a rule with no height of its own
                 // would collapse to nothing.
+                // Always present (muted until the line names a command), so the
+                // input's edge doesn't jump as you type.
                 div().w(px(2.0)).h_full().flex_shrink_0().bg(if naming {
                     theme.accent
                 } else {
-                    Theme::TRANSPARENT
+                    theme.accent_muted
                 }),
             )
             .child(
@@ -419,13 +465,16 @@ impl PaletteView {
 
     fn render_section(&self, origin: Origin, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        // Sat at the bottom of its slot, so the label reads as belonging to
+        // the rows under it rather than floating in a gap.
         h_flex()
             .h(px(SECTION))
             .flex_shrink_0()
-            .items_center()
+            .items_end()
+            .pb_1()
             .pl_3()
             .mono(cx)
-            .text_size(px(10.0))
+            .text_size(px(11.0))
             .text_color(theme.text_muted)
             .child(origin.label())
     }
@@ -438,11 +487,9 @@ impl PaletteView {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let command = &entry.command;
-        let name_color = if selected {
-            theme.text
-        } else {
-            theme.text_muted
-        };
+        // Names are what the eye scans for, so they stay bright on every row;
+        // the summary beside them is the muted part.
+        let name_color = theme.text;
         let name: SharedString = command.name.clone().into();
 
         h_flex()
@@ -475,8 +522,11 @@ impl PaletteView {
                 })
             })
             .child(
+                // A shared minimum width lines the summaries up in one column;
+                // only unusually long names and arguments push past it.
                 h_flex()
                     .flex_shrink_0()
+                    .when(!self.compact, |names| names.min_w(px(210.0)))
                     .max_w(px(300.0))
                     .items_center()
                     .gap_2()
@@ -506,18 +556,24 @@ impl PaletteView {
                             .items_center()
                             .rounded_sm()
                             .border_1()
-                            .border_color(theme.border)
+                            // Clear enough to read as "this takes an argument".
+                            .border_color(theme.text_disabled)
+                            .bg(theme.surface_elevated)
                             .text_size(px(11.0))
-                            .text_color(theme.text_muted)
+                            .text_color(theme.text)
                             .child(format!("<{}>", arg.name))
                     })),
             )
             .child(
-                h_flex()
+                // Two lines rather than one, so a summary keeps its point
+                // ("…the focused one") instead of being cut mid-phrase.
+                div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
+                    .line_clamp(if self.compact { 1 } else { 2 })
+                    .text_ellipsis()
                     .text_size(px(12.0))
+                    .line_height(px(15.0))
                     .text_color(theme.text_muted)
                     .child(command.summary.clone()),
             )
@@ -533,6 +589,9 @@ impl PaletteView {
 
         h_flex()
             .id("palette-list")
+            .relative()
+            // Rows stop short of the scrollbar so it never runs over the ⏎ mark.
+            .pr(px(10.0))
             .role(gpui::accesskit::Role::ListBox)
             .aria_label("Matching commands")
             //.flex_1()
@@ -559,6 +618,17 @@ impl PaletteView {
                 )
                 .size_full()
                 .track_scroll(&self.scroll_handle),
+            )
+            // Always drawn while the list overflows, so the commands past the
+            // first screenful are visibly there.
+            .child(
+                div().absolute().inset_0().child(
+                    gpui_base::Scrollbar::new(&self.scroll_handle)
+                        .id("palette-list-scrollbar")
+                        .axis(gpui_base::ScrollbarAxis::Vertical)
+                        .mode(gpui_base::ScrollbarMode::Always)
+                        .viewport_from_layout(),
+                ),
             )
             .into_any_element()
     }
@@ -614,17 +684,21 @@ impl PaletteView {
 
     fn render_footer(&self, matches: &[commands::Match], cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let usage = self
-            .selected(matches)
+        let selected = self.selected(matches);
+        // With nothing selected the slot stays empty rather than printing a
+        // phrase that looks like a command.
+        let usage = selected
             .map(|ix| matches[ix].command.usage())
-            .unwrap_or_else(|| String::from("nothing selected"));
+            .unwrap_or_default();
 
         panel_footer(cx)
             .px_3()
             .child(footer_status(usage, theme.text_muted).mono(cx))
-            .child(hint("\u{2191}\u{2193}", "choose", cx))
-            .child(hint("\u{23ce}", "run", cx))
-            .child(hint("tab", "complete", cx))
+            .when(selected.is_some(), |this| {
+                this.child(hint("↑↓", "choose", cx))
+                    .child(hint("⏎", "run", cx))
+                    .child(hint("tab", "complete", cx))
+            })
             .child(hint(
                 "esc",
                 if !commands::query_args(&self.line(cx)).is_empty() {
@@ -646,8 +720,10 @@ impl Focusable for PaletteView {
 }
 
 impl Render for PaletteView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let matches = self.matches(cx);
+        self.compact = window.viewport_size().width < px(700.0);
+        self.update_fit(window, cx);
 
         v_flex()
             .id("command-palette")

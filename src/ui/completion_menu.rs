@@ -23,6 +23,7 @@ pub(super) struct CompletionMenu {
     scroll_handle: UniformListScrollHandle,
     on_accept: Accept,
     signature_help: Option<SignatureHelp>,
+    callee: Option<SharedString>,
 }
 
 impl CompletionMenu {
@@ -40,11 +41,18 @@ impl CompletionMenu {
             scroll_handle,
             on_accept: Rc::new(on_accept),
             signature_help: None,
+            callee: None,
         }
     }
 
     pub(super) fn signature_help(mut self, help: Option<SignatureHelp>) -> Self {
         self.signature_help = help;
+        self
+    }
+
+    /// The name of the function being called, for the signature help header.
+    pub(super) fn callee(mut self, callee: Option<SharedString>) -> Self {
+        self.callee = callee;
         self
     }
 
@@ -57,7 +65,8 @@ impl CompletionMenu {
         cx: &App,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme();
-        let (symbol, kind) = kind_label(item.kind);
+        let (symbol, kind) = kind_label(effective_kind(item));
+        let symbol_color = kind_color(effective_kind(item), theme);
         let highlights =
             match_prefix(&item.label, fragment).map(|range| (range, theme.match_highlight()));
         let deprecated = item.deprecated == Some(true)
@@ -99,11 +108,7 @@ impl CompletionMenu {
                     .w(px(30.0))
                     .flex_shrink_0()
                     .text_center()
-                    .text_color(if selected {
-                        theme.accent
-                    } else {
-                        theme.text_muted
-                    })
+                    .text_color(symbol_color)
                     .child(symbol),
             )
             .child(
@@ -140,10 +145,13 @@ impl CompletionMenu {
                     ),
             )
             .child(
+                // The glyph already says the kind on every row; the word is
+                // kept for the selected one only.
                 div()
                     .flex_shrink_0()
                     .text_size(px(11.0))
                     .text_color(theme.text_muted)
+                    .when(!selected, |kind| kind.invisible())
                     .child(kind),
             )
     }
@@ -160,7 +168,7 @@ impl CompletionMenu {
             .id("lua-completion-details")
             .occlude()
             .w(width)
-            .h(height)
+            .max_h(height)
             .popover(cx)
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
                 window.prevent_default();
@@ -169,7 +177,8 @@ impl CompletionMenu {
             .child(
                 v_flex()
                     .id(("lua-completion-documentation", index))
-                    .size_full()
+                    .w_full()
+                    .max_h(height)
                     .p_3()
                     .gap_2()
                     .when_some(item, |details, item| {
@@ -195,8 +204,12 @@ impl CompletionMenu {
                                             ))
                                 }),
                                 |details, detail| {
-                                    details
-                                        .child(div().text_color(theme.text).child(detail.clone()))
+                                    details.child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .text_color(theme.text)
+                                            .child(readable_signature(detail)),
+                                    )
                                 },
                             )
                             .when_some(
@@ -214,11 +227,18 @@ impl CompletionMenu {
                                     Documentation::MarkupContent(content)
                                         if content.kind == MarkupKind::Markdown =>
                                     {
-                                        TextView::markdown(
-                                            "lua-completion-markdown",
-                                            content.value.clone(),
-                                        )
-                                        .into_any_element()
+                                        // The signature is already shown as the
+                                        // detail line; keep only the prose.
+                                        let prose = if item.detail.is_some() {
+                                            without_code_blocks(&content.value)
+                                        } else {
+                                            content.value.clone()
+                                        };
+                                        if prose.trim().is_empty() {
+                                            return details;
+                                        }
+                                        TextView::markdown("lua-completion-markdown", prose)
+                                            .into_any_element()
                                     }
                                     Documentation::MarkupContent(content) => {
                                         div().child(content.value.clone()).into_any_element()
@@ -250,12 +270,21 @@ impl RenderOnce for CompletionMenu {
         // Keep both popovers inside the window. In narrow windows the list
         // takes priority; documentation stays to the right whenever it fits.
         let room_for_details = available_width >= px(640.0);
+        // As wide as the longest label needs (glyph, label, kind), not a share
+        // of the window, so short names don't sit across a wide empty row.
+        let longest = self
+            .items
+            .iter()
+            .map(|item| item.label.chars().count())
+            .max()
+            .unwrap_or(0);
+        let wanted = px((longest as f32 * 8.0 + 150.0).clamp(320.0, 520.0));
         let width = if room_for_details {
-            (available_width * 0.55).min(px(520.0))
+            wanted.min(available_width * 0.55)
         } else {
-            available_width.min(px(520.0))
+            wanted.min(available_width)
         };
-        let compact = width < px(360.0);
+        let compact = width < px(300.0);
         let signature_budget = if self.signature_help.is_some() {
             (f32::from(window.viewport_size().height) * 0.3).min(160.0) + 8.0
         } else {
@@ -264,9 +293,19 @@ impl RenderOnce for CompletionMenu {
         let available = (f32::from(window.viewport_size().height) - 100.0 - signature_budget)
             .max(ROW_HEIGHT + HEADER_HEIGHT + FOOTER_HEIGHT);
         let selected_item = self.selected.and_then(|index| self.items.get(index));
-        let show_details = room_for_details && selected_item.is_some_and(has_details);
-        let list_height = (self.items.len().min(8) as f32 * ROW_HEIGHT)
-            .min(available - HEADER_HEIGHT - FOOTER_HEIGHT - 2.0);
+        let show_details = selected_item.is_some_and(has_details);
+        // Too narrow to sit beside the list, the details go under it instead,
+        // in a short strip taken out of the list's height.
+        const STACKED_DETAILS: f32 = 96.0;
+        let stacked = show_details && !room_for_details;
+        let list_budget = if stacked {
+            available - STACKED_DETAILS - 8.0
+        } else {
+            available
+        };
+        let list_height = (self.items.len().min(6) as f32 * ROW_HEIGHT)
+            .min(list_budget - HEADER_HEIGHT - FOOTER_HEIGHT - 2.0)
+            .max(ROW_HEIGHT);
         let count = self.items.len();
         let position = self
             .selected
@@ -276,17 +315,26 @@ impl RenderOnce for CompletionMenu {
         let details = Self::render_details(
             self.selected.unwrap_or(0),
             selected_item,
-            (available_width - width - px(8.0))
-                .min(px(400.0))
-                .max(px(0.0)),
-            // A single matching row still needs a useful reading area.
-            px((list_height + HEADER_HEIGHT + FOOTER_HEIGHT + 2.0)
-                .max(240.0)
-                .min(available)),
+            if stacked {
+                width
+            } else {
+                (available_width - width - px(8.0))
+                    .min(px(400.0))
+                    .max(px(0.0))
+            },
+            if stacked {
+                px(STACKED_DETAILS)
+            } else {
+                // A single matching row still needs a useful reading area.
+                px((list_height + HEADER_HEIGHT + FOOTER_HEIGHT + 2.0)
+                    .max(240.0)
+                    .min(available))
+            },
             cx,
         );
         let has_items = !self.items.is_empty();
         let signature_help = self.signature_help;
+        let callee = self.callee;
         let Self {
             items,
             selected,
@@ -310,12 +358,28 @@ impl RenderOnce for CompletionMenu {
                     .text_size(px(13.0))
                     .text_color(theme.text)
                     .when_some(signature_help, |popovers, help| {
-                        popovers.child(SignaturePopover::new(help, available_width.min(px(600.0))))
+                        popovers.child(
+                            SignaturePopover::new(help.clone(), {
+                                // Sized to the overload on screen, plus room for
+                                // its header, so a short one stays compact.
+                                let active = help
+                                    .active_signature
+                                    .and_then(|ix| help.signatures.get(ix as usize))
+                                    .or(help.signatures.first())
+                                    .map_or(0, |signature| signature.label.chars().count());
+                                px((active as f32 * 7.6 + 48.0).clamp(360.0, 600.0))
+                                    .min(available_width)
+                            })
+                            .callee(callee),
+                        )
                     })
                     .when(has_items, |popovers| {
                         popovers.child(
                             h_flex()
-                                .items_end()
+                                // Beside the list the card lines up with its
+                                // top, where the selection starts.
+                                .items_start()
+                                .when(stacked, |row| row.flex_col())
                                 .gap_2()
                                 .child(
                                     v_flex()
@@ -372,11 +436,28 @@ impl RenderOnce for CompletionMenu {
                                                     .flex_shrink_0()
                                                     .track_scroll(&scroll_handle),
                                                 )
-                                                .scrollbar(&scroll_handle, ScrollbarAxis::Vertical),
+                                                // Visible at rest while the list
+                                                // overflows, like the palette's.
+                                                .child(
+                                                    div().absolute().inset_0().child(
+                                                        gpui_base::Scrollbar::new(&scroll_handle)
+                                                            .id("lua-completion-scrollbar")
+                                                            .axis(ScrollbarAxis::Vertical)
+                                                            .mode(gpui_base::ScrollbarMode::Always)
+                                                            .viewport_from_layout(),
+                                                    ),
+                                                ),
                                         )
                                         .child(
                                             h_flex()
                                                 .h(px(FOOTER_HEIGHT))
+                                                // Hints use the UI font, as on
+                                                // every other surface.
+                                                .font_family(
+                                                    gpui_component::ActiveTheme::theme(cx)
+                                                        .font_family
+                                                        .clone(),
+                                                )
                                                 .flex_shrink_0()
                                                 .px_3()
                                                 .items_center()
@@ -462,5 +543,121 @@ mod tests {
         assert_eq!(match_prefix("print", "printf"), None);
         assert_eq!(match_prefix("print", "int"), None);
         assert_eq!(match_prefix("print", ""), None);
+    }
+}
+
+/// Markdown with its fenced code blocks and horizontal rules removed.
+fn without_code_blocks(markdown: &str) -> String {
+    let mut out = String::new();
+    let mut fenced = false;
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced || trimmed == "---" {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// A LuaLS `fun(self: T, a: x, b?: y):r` detail as `(a: x, b?: y) → r`: the
+/// implicit receiver dropped, and spaces inside a parameter made unbreakable
+/// so a long signature wraps between parameters, not inside one. Anything
+/// that isn't a `fun(...)` comes back as it was.
+fn readable_signature(detail: &str) -> String {
+    let Some(rest) = detail.trim().strip_prefix("fun(") else {
+        return detail.to_string();
+    };
+    let mut depth = 0usize;
+    let mut params = Vec::new();
+    let mut start = 0;
+    let mut close = None;
+    for (ix, ch) in rest.char_indices() {
+        match ch {
+            '(' | '<' | '{' | '[' => depth += 1,
+            ')' if depth == 0 => {
+                params.push(&rest[start..ix]);
+                close = Some(ix);
+                break;
+            }
+            ')' | '>' | '}' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                params.push(&rest[start..ix]);
+                start = ix + 1;
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close else {
+        return detail.to_string();
+    };
+    let params: Vec<String> = params
+        .into_iter()
+        .map(str::trim)
+        .filter(|param| !param.is_empty())
+        .filter(|param| *param != "self" && !param.starts_with("self:"))
+        .map(|param| param.replace(' ', "\u{a0}"))
+        .collect();
+    let returns = rest[close + 1..].trim().trim_start_matches(':').trim();
+    let mut out = format!("({})", params.join(", "));
+    if !returns.is_empty() {
+        out.push_str(" \u{2192} ");
+        out.push_str(&returns.replace(' ', "\u{a0}"));
+    }
+    out
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::readable_signature;
+
+    #[test]
+    fn method_details_drop_the_receiver_and_keep_parameters_whole() {
+        assert_eq!(
+            readable_signature("fun(self: Pyonji, session: integer, tab?: integer):boolean"),
+            "(session:\u{a0}integer, tab?:\u{a0}integer) \u{2192} boolean"
+        );
+        assert_eq!(
+            readable_signature("fun(f: fun(a: x):y)"),
+            "(f:\u{a0}fun(a:\u{a0}x):y)"
+        );
+        assert_eq!(readable_signature("integer"), "integer");
+    }
+}
+/// LuaLS reports a table's functions as fields; a field holding a function
+/// is a method as far as the reader is concerned.
+fn effective_kind(item: &CompletionItem) -> Option<Kind> {
+    let holds_function = item.detail.as_deref().is_some_and(|detail| {
+        let detail = detail.trim_start();
+        detail.starts_with("fun(") || detail.starts_with("function")
+    });
+    match item.kind {
+        Some(Kind::FIELD | Kind::PROPERTY | Kind::VARIABLE) if holds_function => Some(Kind::METHOD),
+        kind => kind,
+    }
+}
+
+/// One hue per family of kinds, so the glyph column can be scanned.
+fn kind_color(kind: Option<Kind>, theme: &crate::Theme) -> Rgba {
+    match kind {
+        Some(Kind::METHOD | Kind::FUNCTION | Kind::CONSTRUCTOR) => theme.info,
+        Some(
+            Kind::CLASS
+            | Kind::INTERFACE
+            | Kind::STRUCT
+            | Kind::ENUM
+            | Kind::TYPE_PARAMETER
+            | Kind::MODULE,
+        ) => theme.success,
+        Some(Kind::CONSTANT | Kind::ENUM_MEMBER | Kind::VALUE | Kind::UNIT | Kind::COLOR) => {
+            theme.warning
+        }
+        Some(Kind::KEYWORD | Kind::SNIPPET) => theme.accent,
+        _ => theme.text_muted,
     }
 }

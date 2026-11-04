@@ -182,7 +182,7 @@ impl Theme {
             background: rgb(0x181818),
             surface,
             surface_elevated: rgb(0x2a2a2a),
-            glass: surface.opacity(0.15),
+            glass: surface.opacity(0.82),
             glass_selected: rgb(LILAC).opacity(0.12),
 
             // Text
@@ -209,7 +209,7 @@ impl Theme {
             search_match_active: rgb(AMBER).opacity(0.8),
             scrollbar: rgb(0xffffff).opacity(0.12),
             scrollbar_hover: rgb(0xffffff).opacity(0.25),
-            split_divider: rgb(LINE),
+            split_divider: rgb(0x484848),
             split_divider_active: rgb(LILAC),
 
             // Semantic status (bell, exit codes, warnings, etc.)

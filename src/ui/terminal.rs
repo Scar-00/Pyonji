@@ -1,6 +1,6 @@
+use crate::Pyonji;
 use crate::renderer::{Pane as RendererPane, *};
 use crate::terminal::{Divider, PaneGeometry, PanePathStep, SessionId, SplitDirection};
-use crate::Pyonji;
 
 use gpui::*;
 use gpui_base::ElementExt;
@@ -26,6 +26,8 @@ pub struct Terminal {
     input_session: Option<SessionId>,
     pub resize_mode_held: bool,
     pub divider_drag: Option<DividerDrag>,
+    /// A dialog is open over the terminal, so the grid is drawn darkened.
+    dimmed: bool,
 }
 
 impl Terminal {
@@ -48,6 +50,7 @@ impl Terminal {
             input_session: None,
             resize_mode_held: false,
             divider_drag: None,
+            dimmed: false,
         }
     }
 
@@ -308,11 +311,29 @@ impl Terminal {
         };
         let target_size = target.size();
         let size = [target_size.width.0 as u32, target_size.height.0 as u32];
+        let theme = crate::Theme::global(cx);
+        let chrome = Chrome {
+            divider: rgba_bytes(theme.split_divider),
+            divider_active: rgba_bytes(theme.split_divider_active),
+            cursor: rgba_bytes(theme.cursor),
+            dim: if self.dimmed {
+                theme.overlay_backdrop.alpha
+            } else {
+                0.0
+            },
+        };
+        let active_dividers = pane_data
+            .iter()
+            .find(|pane| pane.is_active)
+            .map(|pane| bordering_dividers(&dividers, pane.geometry))
+            .unwrap_or_default();
         _ = renderer.render(
             target.view(),
             &pane_data,
             &dividers,
             ime_preedit.as_ref(),
+            chrome,
+            &active_dividers,
             size,
         );
     }
@@ -340,6 +361,9 @@ impl Render for Terminal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         container_query(cx.processor(|this, size: Size<Pixels>, window, cx| {
             this.sync_surface(size, window, cx);
+            // The dialog's own backdrop can't cover the GPU surface, so the
+            // grid darkens itself while one is open.
+            this.dimmed = gpui_component::WindowExt::has_active_dialog(window, cx);
             this.paint(cx);
             div()
                 .on_prepaint(cx.processor(Self::on_prepaint))
@@ -359,6 +383,48 @@ impl Render for Terminal {
     }
 }
 
+fn rgba_bytes(color: Rgba) -> [u8; 4] {
+    let color = color.into_format::<u8, u8>();
+    [color.red, color.green, color.blue, color.alpha]
+}
+
+/// The stretches of divider that run along an edge of `pane`, clipped to the
+/// pane so a long divider shared with other panes only lights up beside it.
+fn bordering_dividers(dividers: &[Divider], pane: PaneGeometry) -> Vec<Divider> {
+    let clip = |start: u16, len: u16, other: u16, other_len: u16| {
+        let from = start.max(other);
+        let to = (start + len).min(other + other_len);
+        (from < to).then_some((from, to - from))
+    };
+    dividers
+        .iter()
+        .filter_map(|divider| match divider.direction {
+            SplitDirection::Vertical => {
+                if pane.x + pane.cols != divider.x && pane.x != divider.x + 1 {
+                    return None;
+                }
+                let (y, rows) = clip(pane.y, pane.rows, divider.y, divider.rows)?;
+                Some(Divider {
+                    y,
+                    rows,
+                    ..divider.clone()
+                })
+            }
+            SplitDirection::Horizontal => {
+                if pane.y + pane.rows != divider.y && pane.y != divider.y + 1 {
+                    return None;
+                }
+                let (x, cols) = clip(pane.x, pane.cols, divider.x, divider.cols)?;
+                Some(Divider {
+                    x,
+                    cols,
+                    ..divider.clone()
+                })
+            }
+        })
+        .collect()
+}
+
 pub fn hit_divider(
     dividers: &[Divider],
     x: f32,
@@ -370,7 +436,7 @@ pub fn hit_divider(
     for divider in dividers {
         match divider.direction {
             SplitDirection::Vertical => {
-                let line_x = cell_width * f32::from(divider.x);
+                let line_x = cell_width * (f32::from(divider.x) + 0.5);
                 let min_y = line_height * f32::from(divider.y);
                 let max_y = line_height * f32::from(divider.y + divider.rows);
                 if (x - line_x).abs() <= HIT_SLOP && y >= min_y - HIT_SLOP && y <= max_y + HIT_SLOP
@@ -379,7 +445,7 @@ pub fn hit_divider(
                 }
             }
             SplitDirection::Horizontal => {
-                let line_y = line_height * f32::from(divider.y);
+                let line_y = line_height * (f32::from(divider.y) + 0.5);
                 let min_x = cell_width * f32::from(divider.x);
                 let max_x = cell_width * f32::from(divider.x + divider.cols);
                 if (y - line_y).abs() <= HIT_SLOP && x >= min_x - HIT_SLOP && x <= max_x + HIT_SLOP

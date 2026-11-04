@@ -162,14 +162,14 @@ impl Pane {
                         path: path.clone(),
                         direction: *direction,
                         x: area.x,
-                        y: second_area.y,
+                        y: second_area.y - split_gutter(area, *direction),
                         cols: area.cols,
                         rows: 0,
                     },
                     SplitDirection::Vertical => Divider {
                         path: path.clone(),
                         direction: *direction,
-                        x: second_area.x,
+                        x: second_area.x - split_gutter(area, *direction),
                         y: area.y,
                         cols: 0,
                         rows: area.rows,
@@ -505,15 +505,17 @@ fn split_geometry(
 ) -> (PaneGeometry, PaneGeometry, u16) {
     match direction {
         SplitDirection::Horizontal => {
-            let first_rows = first_split_size(area.rows, ratio_per_mille);
-            let second_rows = area.rows.saturating_sub(first_rows);
+            let gutter = split_gutter(area, direction);
+            let usable = split_axis_size(area, direction);
+            let first_rows = first_split_size(usable, ratio_per_mille);
+            let second_rows = usable.saturating_sub(first_rows);
             (
                 PaneGeometry {
                     rows: first_rows,
                     ..area
                 },
                 PaneGeometry {
-                    y: area.y.saturating_add(first_rows),
+                    y: area.y.saturating_add(first_rows + gutter),
                     rows: second_rows,
                     ..area
                 },
@@ -521,15 +523,17 @@ fn split_geometry(
             )
         }
         SplitDirection::Vertical => {
-            let first_cols = first_split_size(area.cols, ratio_per_mille);
-            let second_cols = area.cols.saturating_sub(first_cols);
+            let gutter = split_gutter(area, direction);
+            let usable = split_axis_size(area, direction);
+            let first_cols = first_split_size(usable, ratio_per_mille);
+            let second_cols = usable.saturating_sub(first_cols);
             (
                 PaneGeometry {
                     cols: first_cols,
                     ..area
                 },
                 PaneGeometry {
-                    x: area.x.saturating_add(first_cols),
+                    x: area.x.saturating_add(first_cols + gutter),
                     cols: second_cols,
                     ..area
                 },
@@ -539,10 +543,20 @@ fn split_geometry(
     }
 }
 
-fn split_axis_size(area: PaneGeometry, direction: SplitDirection) -> u16 {
+/// Panes keep one cell between them for the divider, so text on either side
+/// never runs into the line.
+fn split_gutter(area: PaneGeometry, direction: SplitDirection) -> u16 {
     match direction {
-        SplitDirection::Horizontal => area.rows,
-        SplitDirection::Vertical => area.cols,
+        SplitDirection::Horizontal => u16::from(area.rows >= 3),
+        SplitDirection::Vertical => u16::from(area.cols >= 3),
+    }
+}
+
+fn split_axis_size(area: PaneGeometry, direction: SplitDirection) -> u16 {
+    let gutter = split_gutter(area, direction);
+    match direction {
+        SplitDirection::Horizontal => area.rows - gutter,
+        SplitDirection::Vertical => area.cols - gutter,
     }
 }
 
@@ -911,8 +925,9 @@ impl TerminalSession {
         self.title = title;
     }
 
+    /// An empty name drops the custom title and goes back to the shell's own.
     pub fn rename(&mut self, name: String) {
-        self.custom_title = Some(name);
+        self.custom_title = (!name.trim().is_empty()).then_some(name);
     }
 
     pub fn title(&self) -> &str {
@@ -1119,8 +1134,8 @@ mod tests {
         assert!(tab.resize_split_by_position(area, &[], SplitDirection::Vertical, 70.0));
         let panes = tab.layout(area);
         assert_eq!(panes[0].1.cols, 70);
-        assert_eq!(panes[1].1.cols, 30);
-        assert_eq!(panes[1].1.x, 70);
+        assert_eq!(panes[1].1.cols, 29);
+        assert_eq!(panes[1].1.x, 71);
     }
 
     #[test]

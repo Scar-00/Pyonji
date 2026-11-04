@@ -105,6 +105,17 @@ impl Overlay {
         }
         let builder = cx.processor(move |this, dialog: Dialog, window, cx| {
             let (width, height) = Self::dialog_size(screen, window);
+            // Lists that can be short shrink to fit; the size above is their cap.
+            let fit = match screen {
+                OverlayScreen::Palette => Some(this.palette.read(cx).fit_height()),
+                OverlayScreen::Sessions => Some(this.sessions.read(cx).fit_height()),
+                OverlayScreen::Detached => Some(this.detached.read(cx).fit_height()),
+                _ => None,
+            };
+            let height = match (height, fit) {
+                (Some(height), Some(fit)) => Some(height.min(fit.max(px(200.)))),
+                (height, _) => height,
+            };
             let dialog = dialog.p_0().floating(cx).close_button(false);
             let dialog = match (width, height) {
                 (Some(width), Some(height)) => dialog.w(width).h(height),
@@ -125,7 +136,12 @@ impl Overlay {
                         .child(releases.clone())
                 });
             }
-            dialog.child(div().size_full().p_1().child(match screen {
+            let content = div().w_full().p_1();
+            let content = match height {
+                Some(height) => content.h(height - px(2.)),
+                None => content.size_full(),
+            };
+            dialog.child(content.child(match screen {
                 OverlayScreen::Palette => this.palette.clone().into_any_element(),
                 OverlayScreen::Sessions => this.sessions.clone().into_any_element(),
                 OverlayScreen::Detached => this.detached.clone().into_any_element(),
@@ -148,8 +164,8 @@ impl Overlay {
 
     fn dialog_size(screen: OverlayScreen, window: &Window) -> (Option<Pixels>, Option<Pixels>) {
         let (width, height) = match screen {
-            OverlayScreen::Palette => (px(620.), px(520.)),
-            OverlayScreen::Sessions | OverlayScreen::Detached => (px(660.), px(520.)),
+            OverlayScreen::Palette => (px(640.), px(520.)),
+            OverlayScreen::Sessions | OverlayScreen::Detached => (px(640.), px(520.)),
             OverlayScreen::Releases => (px(920.), px(500.)),
             OverlayScreen::Opener => (px(760.), px(560.)),
         };
@@ -163,7 +179,7 @@ impl Overlay {
 
     fn setup_opener(window: &mut Window, cx: &mut Context<Self>) -> Entity<FileOpener> {
         let opener = cx.new(|cx| {
-            FileOpener::new(std::env::current_dir().unwrap(), window, cx).show_hidden(true)
+            FileOpener::new(std::env::current_dir().unwrap(), window, cx).show_hidden(false)
         });
         cx.subscribe_in(
             &opener,

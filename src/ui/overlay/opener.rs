@@ -212,6 +212,10 @@ impl FileOpener {
             .collect()
     }
 
+    fn selected_entry(&self) -> Option<&Entry> {
+        self.listing.entries.as_ref()?.get(self.selected?)
+    }
+
     fn select(&mut self, ix: Option<usize>, cx: &mut Context<Self>) {
         self.selected = ix;
         if let Some(position) =
@@ -341,7 +345,7 @@ impl FileOpener {
             .mono(cx)
             .text_size(px(12.))
             .text_color(t.text_muted)
-            .children(
+            .children({
                 parts
                     .into_iter()
                     .enumerate()
@@ -370,8 +374,8 @@ impl FileOpener {
                         sep.into_iter()
                             .map(IntoElement::into_any_element)
                             .chain(std::iter::once(crumb.into_any_element()))
-                    }),
-            )
+                    })
+            })
     }
 
     fn render_hidden_toggle(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -399,6 +403,12 @@ impl FileOpener {
             })
             .hover(|s| s.text_color(t.text))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_hidden(cx)))
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "space" | "enter") {
+                    cx.stop_propagation();
+                    this.toggle_hidden(cx);
+                }
+            }))
             // A square that fills, the same mark the release rail uses for the
             // running build: on or off, nothing in between.
             .child(
@@ -445,7 +455,13 @@ impl FileOpener {
             .px_4()
             .list_row(selected, cx)
             .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
-                if ev.click_count() >= 2 {
+                let is_dir = this
+                    .listing
+                    .entries
+                    .as_ref()
+                    .and_then(|entries| entries.get(ix))
+                    .is_some_and(|entry| entry.is_dir);
+                if is_dir || ev.click_count() >= 2 {
                     this.activate(ix, window, cx);
                 } else {
                     this.select(Some(ix), cx);
@@ -483,15 +499,38 @@ impl FileOpener {
                         e.name.clone()
                     }),
             )
-            .when(!e.is_dir, |row| {
-                row.child(
-                    div()
-                        .flex_shrink_0()
-                        .mono(cx)
-                        .text_size(px(11.))
-                        .text_color(t.text_muted)
-                        .child(human_size(e.size)),
-                )
+            // size, or for a directory a chevron that browses into it with a
+            // single click, matching the directory row.
+            .map(|row| {
+                if e.is_dir {
+                    row.child(
+                        div()
+                            .id(("browse", ix))
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .text_base()
+                            .text_color(if selected { t.text } else { t.text_muted })
+                            .hover(|s| s.bg(t.hovered).text_color(t.text))
+                            .cursor_pointer()
+                            .tooltip(|window, cx| {
+                                gpui_component::tooltip::Tooltip::new("Browse directory")
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.activate(ix, window, cx);
+                            }))
+                            .child("›"),
+                    )
+                } else {
+                    row.child(
+                        div()
+                            .text_xs()
+                            .text_color(t.text_muted)
+                            .child(human_size(e.size)),
+                    )
+                }
             })
     }
 
@@ -526,20 +565,57 @@ impl FileOpener {
             .into_any_element();
         }
 
-        div()
+        let list = div()
             .id("file-opener-list")
             .role(gpui::accesskit::Role::ListBox)
             .aria_label("Files and directories")
-            .flex_1()
-            .min_h_0()
+            .size_full()
             .flex()
             .flex_col()
             .py_1()
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
             .children(
                 vis.into_iter()
                     .map(|ix| self.render_entry(ix, &entries[ix], cx)),
+            );
+        // Like the palette and release notes: a scrollbar that stays visible
+        // while the listing overflows, so the rest of it is visibly there.
+        let more_below =
+            self.scroll_handle.offset().y > -self.scroll_handle.max_offset().y + gpui::px(1.0);
+        let fade = t.glass;
+        div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(list)
+            // A row cut by the footer reads as clipped, not cramped, under a fade.
+            .when(more_below, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        // About a row tall and solid at the footer, so a cut
+                        // row fades out instead of ending in a fragment.
+                        .h(gpui::px(30.0))
+                        .bg(gpui::linear_gradient(
+                            180.,
+                            gpui::linear_color_stop(gpui::ColorExt::opacity(&fade, 0.0), 0.),
+                            gpui::linear_color_stop(fade, 1.),
+                        )),
+                )
+            })
+            .child(
+                div().absolute().inset_0().child(
+                    gpui_base::Scrollbar::new(&self.scroll_handle)
+                        .id("file-opener-scrollbar")
+                        .axis(gpui_base::ScrollbarAxis::Vertical)
+                        .mode(gpui_base::ScrollbarMode::Always)
+                        .viewport_from_layout(),
+                ),
             )
             .into_any_element()
     }
@@ -548,10 +624,7 @@ impl FileOpener {
         let count = self.visible(cx).len();
         // Enter browses into a selected directory; with nothing selected it
         // opens the directory on the line. Say which, before it happens.
-        let enter = match self
-            .selected
-            .and_then(|ix| self.listing.entries.as_ref()?.get(ix))
-        {
+        let enter = match self.selected_entry() {
             Some(entry) if entry.is_dir => "browse",
             Some(_) => "open file",
             None => "open here",

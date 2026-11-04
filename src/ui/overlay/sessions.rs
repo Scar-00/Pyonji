@@ -58,6 +58,8 @@ pub struct SessionsView {
     search_input: Entity<InputState>,
     scroll_handle: UniformListScrollHandle,
     error: Option<&'static str>,
+    /// The height this view last measured for itself; see `fit_height`.
+    fit: gpui::Pixels,
 }
 
 impl SessionsView {
@@ -68,7 +70,7 @@ impl SessionsView {
         cx: &mut Context<Self>,
     ) -> Self {
         let search_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Find by name or session number…"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Find by name or session ID…"));
         cx.subscribe(&search_input, |this, _, event, cx| {
             if matches!(event, InputEvent::Change) {
                 this.selected = None;
@@ -94,6 +96,7 @@ impl SessionsView {
             search_input,
             scroll_handle: UniformListScrollHandle::new(),
             error: None,
+            fit: gpui::px(520.),
         }
     }
 
@@ -223,6 +226,35 @@ impl SessionsView {
         }
     }
 
+    /// The height measured at the last render. The dialog is built while the
+    /// app is mid-update, when this view can't read the app to measure itself.
+    pub fn fit_height(&self) -> gpui::Pixels {
+        self.fit
+    }
+
+    /// Re-measure, and redraw the window once if the dialog has to change size.
+    fn update_fit(&mut self, window: &mut Window, cx: &App) {
+        let fit = self.measure(cx);
+        if fit != self.fit {
+            self.fit = fit;
+            window.refresh();
+        }
+    }
+
+    /// How tall the sessions list needs to be for the sessions it shows, so a
+    /// couple of sessions don't sit in a mostly empty dialog. The dialog caps it.
+    fn measure(&self, cx: &App) -> Pixels {
+        let rows = self.entries(cx).len();
+        let list = if rows == 0 {
+            // The empty state's heading and detail.
+            100.0
+        } else {
+            rows as f32 * ROW_HEIGHT + 16.0
+        };
+        // Header (title and search), footer, and the dialog's padding and border.
+        px(100.0 + list + 56.0 + 10.0)
+    }
+
     fn render_header(&self, shown: usize, total: usize, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         panel_header()
@@ -249,7 +281,7 @@ impl SessionsView {
                             .text_size(px(12.))
                             .text_color(theme.text_muted)
                             .child(if shown == total {
-                                total.to_string()
+                                format!("{total} session{}", if total == 1 { "" } else { "s" })
                             } else {
                                 format!("{shown} / {total}")
                             }),
@@ -319,7 +351,13 @@ impl SessionsView {
                                     .gap_3()
                                     .text_size(px(11.))
                                     .text_color(theme.text_muted)
-                                    .child(format!("Session {id}"))
+                                    // Identifiers in mono, like the other overlays.
+                                    .font_family(
+                                        gpui_component::ActiveTheme::theme(&**cx)
+                                            .mono_font_family
+                                            .clone(),
+                                    )
+                                    .child(format!("ID {id}"))
                                     .when(!self.detached_only || entry.tab.is_some(), |this| {
                                         this.child(
                                             div()
@@ -442,7 +480,8 @@ impl SessionsView {
 }
 
 impl Render for SessionsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.update_fit(window, cx);
         let all = self.entries(cx);
         let total = all.len();
         let entries = self.visible(cx);
@@ -473,7 +512,7 @@ impl Render for SessionsView {
                 editable_combo_box(
                     "session-search-results",
                     "Sessions",
-                    "Find by name or session number…",
+                    "Find by name or session ID…",
                     &self.search_input,
                     true,
                     cx,
