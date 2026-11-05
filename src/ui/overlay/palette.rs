@@ -13,7 +13,7 @@ use gpui::{
 };
 use gpui_base::{actions::Cancel, h_flex, v_flex};
 use gpui_component::{
-    WindowExt,
+    Icon, IconName, WindowExt,
     input::{Input, InputEvent, InputState},
 };
 
@@ -23,7 +23,7 @@ use crate::{
     ui::{
         PyTheme as _,
         components::{
-            EmptyState, PyInteractive as _, PyStyled as _, editable_combo_box, enter_mark,
+            EmptyState, PyInteractive as _, PyStyled as _, counter, editable_combo_box, enter_mark,
             footer_status, hint, panel_footer,
         },
     },
@@ -34,7 +34,7 @@ actions!(palette, [Complete]);
 
 const CONTEXT: &str = "CommandPalette";
 
-const ROW: f32 = 38.0;
+const ROW: f32 = 34.0;
 const SECTION: f32 = 26.0;
 const LINE: f32 = 52.0;
 
@@ -138,9 +138,22 @@ impl PaletteView {
         commands::filter(&cmds, &self.line(cx))
     }
 
-    fn rows(matches: &[commands::Match]) -> Vec<Row> {
+    /// The list as drawn: the commands, under a heading per group while
+    /// nothing is typed. Once a query ranks them, a heading would split the
+    /// ranking, so the list goes flat.
+    /// Whether the list is shown in groups: only while nothing is typed.
+    fn grouped(&self, cx: &App) -> bool {
+        commands::query_name(&self.line(cx)).is_empty()
+    }
+
+    fn rows(&self, matches: &[commands::Match], cx: &App) -> Vec<Row> {
+        if !self.grouped(cx) {
+            return (0..matches.len()).map(Row::Command).collect();
+        }
         let mut rows = Vec::new();
-        let mut last: Option<Origin> = None;
+        // The first group's label is the one standing above the list (see
+        // `render_list`), so the list itself starts with its rows.
+        let mut last: Option<Origin> = matches.first().map(|entry| entry.command.origin);
         for (ix, entry) in matches.iter().enumerate() {
             if last != Some(entry.command.origin) {
                 rows.push(Row::Section(entry.command.origin));
@@ -171,17 +184,19 @@ impl PaletteView {
     /// How tall the palette needs to be to show every match without blank
     /// space, so a short list gets a short dialog. The dialog caps it.
     fn measure(&self, cx: &App) -> gpui::Pixels {
-        let rows = Self::rows(&self.matches(cx));
+        let rows = self.rows(&self.matches(cx), cx);
         let list = if rows.is_empty() {
-            // The empty state's message and suggestion.
-            120.0
+            // The empty state's icon, message, and suggestion or detail.
+            170.0
         } else {
             let sections = rows
                 .iter()
                 .filter(|row| matches!(row, Row::Section(_)))
                 .count();
             let commands = rows.len() - sections;
-            sections as f32 * SECTION + commands as f32 * ROW + 8.0
+            // Plus the label standing above a grouped list.
+            let above = if self.grouped(cx) { SECTION } else { 0.0 };
+            above + sections as f32 * SECTION + commands as f32 * ROW + 8.0
         };
         // Input, footer, and the dialog's inner padding and border.
         px((LINE + list + 40.0 + 14.0).ceil())
@@ -209,7 +224,7 @@ impl PaletteView {
             .first()
             .map(|entry| entry.command.name.clone().into());
         if self.selected.is_some() {
-            self.scroll_to(0, &matches);
+            self.scroll_to(0, &matches, cx);
         }
         cx.notify();
     }
@@ -232,15 +247,16 @@ impl PaletteView {
             Some(ix) => (ix as isize + delta).clamp(0, last as isize) as usize,
         };
         self.selected = Some(matches[at].command.name.clone().into());
-        self.scroll_to(at, &matches);
+        self.scroll_to(at, &matches, cx);
         cx.notify();
     }
 
     /// Reveal a row without moving the viewport until selection leaves it.
-    fn scroll_to(&self, at: usize, matches: &[commands::Match]) {
+    fn scroll_to(&self, at: usize, matches: &[commands::Match], cx: &App) {
         // The scroll handle counts the children of the scrolling element, and
         // a heading is a child like any other row.
-        let row = Self::rows(matches)
+        let row = self
+            .rows(matches, cx)
             .iter()
             .position(|row| matches!(row, Row::Command(ix) if *ix == at))
             .unwrap_or(at);
@@ -398,70 +414,54 @@ impl PaletteView {
     // ---------------------------------------------------------------- render
 
     /// The line the whole screen exists to write.
-    fn render_line(&self, shown: usize, cx: &Context<Self>) -> impl IntoElement {
+    fn render_line(&self, shown: usize, focused: bool, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let cmds = commands::all(util::read!(self.pyonji, cx));
         let total = cmds.len();
-        let naming = commands::naming(&cmds, &self.line(cx));
 
         h_flex()
             .h(px(LINE))
             .flex_shrink_0()
+            .items_center()
+            .gap_3()
+            // The icon sits where the rows' names start, like the search
+            // fields on the other screens.
+            .pl(px(14.0))
+            .pr_3()
             .border_b_1()
-            .border_color(theme.border)
+            // Focus shows on the rule, as on every other screen's field.
+            .border_color(if focused {
+                theme.focus_ring
+            } else {
+                theme.border
+            })
             .child(
-                // The mark a selected row also uses, so the accent means one
-                // thing here: this is the live thing. `h_full` because the row
-                // centres its children, and a rule with no height of its own
-                // would collapse to nothing.
-                // Always reserved (visible when the line names a command), so the
-                // input's edge doesn't jump as you type.
-                div().w(px(2.0)).h_full().flex_shrink_0().bg(if naming {
-                    theme.accent
-                } else {
-                    gpui::rgba(0)
-                }),
+                Icon::new(IconName::Search)
+                    .size_4()
+                    .flex_shrink_0()
+                    .text_color(theme.text_muted),
             )
             .child(
                 h_flex()
                     .flex_1()
                     .min_w_0()
-                    .items_center()
-                    .gap_3()
-                    .px_3()
+                    .mono(cx)
+                    .text_size(px(15.0))
+                    .text_color(theme.text)
                     .child(
-                        h_flex()
+                        Input::new(&self.query)
+                            .role(gpui_base::RoleOverride::Presentational)
                             .flex_1()
-                            .min_w_0()
-                            .mono(cx)
-                            .text_size(px(15.0))
-                            .text_color(theme.text)
-                            .child(
-                                Input::new(&self.query)
-                                    .role(gpui_base::RoleOverride::Presentational)
-                                    .flex_1()
-                                    .bordered(false)
-                                    .appearance(false),
-                            ),
-                    )
-                    // How much of the table the line has narrowed to. With
-                    // nothing filtered there is nothing to compare, so the
-                    // number only appears once it means something.
-                    .when(shown != total, |this| {
-                        this.child(
-                            h_flex()
-                                .flex_shrink_0()
-                                .items_center()
-                                .gap_1p5()
-                                .mono(cx)
-                                .text_size(px(11.0))
-                                .text_color(theme.text_muted)
-                                .child(format!("{shown}"))
-                                .child(div().text_color(theme.border).child("/"))
-                                .child(format!("{total}")),
-                        )
-                    }),
+                            .px_0()
+                            .bordered(false)
+                            .appearance(false),
+                    ),
             )
+            // How much of the table the line has narrowed to, counted the
+            // way every screen counts.
+            .when(total > 0, |this| {
+                this.child(counter(shown, total, "command", cx))
+            })
     }
 
     fn render_section(&self, origin: Origin, cx: &Context<Self>) -> impl IntoElement {
@@ -576,27 +576,66 @@ impl PaletteView {
                     .text_size(px(12.0))
                     .line_height(px(15.0))
                     .text_color(theme.text_muted)
-                    .child(command.summary.clone()),
+                    // A row the name didn't match is there for its summary;
+                    // mark the letters there, the way names are marked.
+                    .child(
+                        gpui::StyledText::new(command.summary.clone()).with_highlights(
+                            entry.summary_marks.iter().map(|range| {
+                                (
+                                    range.clone(),
+                                    gpui::HighlightStyle {
+                                        color: Some(gpui::rgb_to_hsla({
+                                            let mut mark = theme.search_match;
+                                            mark.alpha = 1.0;
+                                            mark
+                                        })),
+                                        underline: Some(gpui::UnderlineStyle {
+                                            thickness: px(1.0),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    },
+                                )
+                            }),
+                        ),
+                    ),
             )
             .child(enter_mark(selected, cx))
     }
 
     fn render_list(&self, matches: Vec<commands::Match>, cx: &Context<Self>) -> impl IntoElement {
-        let rows = Self::rows(&matches);
+        let rows = self.rows(&matches, cx);
         if rows.is_empty() {
             return self.render_empty(cx).into_any_element();
         }
         let selected = self.selected(&matches);
+        // The group the top of the viewport is in stands above the list, so
+        // rows never sit there without saying what they belong to, and
+        // nothing scrolls under the label.
+        let current = self.grouped(cx).then(|| {
+            let top = self.scroll_handle.logical_scroll_top().item_ix;
+            rows[..=top.min(rows.len() - 1)]
+                .iter()
+                .rev()
+                .find_map(|row| match row {
+                    Row::Section(origin) => Some(*origin),
+                    Row::Command(_) => None,
+                })
+                .or_else(|| matches.first().map(|entry| entry.command.origin))
+        });
+        let current = current
+            .flatten()
+            .map(|origin| self.render_section(origin, cx));
 
-        h_flex()
+        let list = h_flex()
             .id("palette-list")
             .relative()
-            // Rows stop short of the scrollbar so it never runs over the ⏎ mark.
-            .pr(px(10.0))
             .role(gpui::accesskit::Role::ListBox)
             .aria_label("Matching commands")
             //.flex_1()
-            .size_full()
+            .w_full()
+            .flex_1()
+            .min_h_0()
             .py_1()
             //.overflow_y_scroll()
             .child(crate::ui::components::scroll_viewport(
@@ -621,7 +660,12 @@ impl PaletteView {
                         .mode(gpui_base::ScrollbarMode::Hover)
                         .viewport_from_layout(),
                 ),
-            )
+            );
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .children(current)
+            .child(list)
             .into_any_element()
     }
 
@@ -640,7 +684,10 @@ impl PaletteView {
         };
 
         EmptyState::new(heading)
-            .muted(cx)
+            .nothing(gpui_component::IconName::Search, cx)
+            .when(!cmds.is_empty() && suggestion.is_none(), |this| {
+                this.detail("Check the spelling, or try fewer letters.")
+            })
             .when_some(suggestion.clone(), |this, suggestion| {
                 this.child(
                     h_flex()
@@ -679,16 +726,46 @@ impl PaletteView {
         let selected = self.selected(matches);
         // With nothing selected the slot stays empty rather than printing a
         // phrase that looks like a command.
-        let usage = selected
-            .map(|ix| matches[ix].command.usage())
-            .unwrap_or_default();
+        // The row already shows the name and its placeholders. The footer
+        // says what is still missing, or what enter will run.
+        let line = self.line(cx);
+        let typed = commands::query_args(&line);
+        let usage = h_flex().gap_1().items_center().when_some(
+            selected
+                .map(|ix| &matches[ix].command)
+                .filter(|command| !command.args.is_empty()),
+            |this, command| {
+                if typed.is_empty() {
+                    this.child("Type")
+                        .child(
+                            div().mono(cx).child(
+                                command
+                                    .args
+                                    .iter()
+                                    .map(|arg| format!("<{}>", arg.name))
+                                    .collect::<Vec<_>>()
+                                    .join(" "),
+                            ),
+                        )
+                        .child("after the name")
+                } else {
+                    this.child("Runs").child(div().mono(cx).child(format!(
+                        "{} {}",
+                        command.name,
+                        typed.join(" ")
+                    )))
+                }
+            },
+        );
 
         panel_footer(cx)
             .px_3()
-            .child(footer_status(usage, theme.text_muted).mono(cx))
-            .when(selected.is_some(), |this| {
+            .child(footer_status(usage, theme.text_muted))
+            .when(selected.is_some() && matches.len() > 1, |this| {
                 this.child(hint("↑↓", "choose", cx))
-                    .child(hint("⏎", "run", cx))
+            })
+            .when(selected.is_some(), |this| {
+                this.child(hint("⏎", "run", cx))
                     .child(hint("tab", "complete", cx))
             })
             .child(hint(
@@ -714,12 +791,12 @@ impl Focusable for PaletteView {
 impl Render for PaletteView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let matches = self.matches(cx);
-        let rows = Self::rows(&matches);
+        let rows = self.rows(&matches, cx);
         if rows != self.list_rows {
             self.scroll_handle.reset(rows.len());
             self.list_rows = rows;
             if let Some(selected) = self.selected(&matches) {
-                self.scroll_to(selected, &matches);
+                self.scroll_to(selected, &matches, cx);
             }
         }
         self.compact = window.viewport_size().width < px(700.0);
@@ -748,7 +825,11 @@ impl Render for PaletteView {
                 )
                 .size_full()
                 .min_h_0()
-                .child(self.render_line(matches.len(), cx))
+                .child(self.render_line(
+                    matches.len(),
+                    self.query.read(cx).focus_handle(cx).is_focused(window),
+                    cx,
+                ))
                 .child(self.render_list(matches.clone(), cx))
                 .child(self.render_footer(&matches, cx)),
             )

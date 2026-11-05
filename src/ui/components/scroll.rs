@@ -80,7 +80,7 @@ impl<H: ScrollbarHandle> Element for ScrollMask<H> {
             self.child.paint(window, cx);
             return;
         }
-        let edge = (px(20.) / bounds.size.height).min(0.25);
+        let edge = (px(8.) / bounds.size.height).min(0.25);
         let mask = linear_gradient(
             180.,
             linear_color_stop(rgba(0xffffffff), 0.),

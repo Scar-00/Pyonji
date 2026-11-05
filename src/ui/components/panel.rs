@@ -82,6 +82,20 @@ impl EmptyState {
         self
     }
 
+    /// The usual mark for "nothing here": a large muted icon over a muted
+    /// heading. Every screen's empty list wears it, so none reads as broken.
+    pub fn nothing(mut self, icon: gpui_component::IconName, cx: &App) -> Self {
+        let theme = cx.theme();
+        self.tone = Some(theme.text_muted);
+        self.icon = Some(
+            gpui_component::Icon::new(icon)
+                .size_8()
+                .text_color(theme.text_disabled)
+                .into_any_element(),
+        );
+        self
+    }
+
     /// A mark above the heading: an icon, a spinner.
     pub fn icon(mut self, icon: impl IntoElement) -> Self {
         self.icon = Some(icon.into_any_element());
@@ -104,6 +118,8 @@ impl RenderOnce for EmptyState {
             .min_h_0()
             .items_center()
             .justify_center()
+            // Centred lines, so a detail that wraps stays under its heading.
+            .text_center()
             .gap_3()
             .px_6()
             .children(self.icon)
@@ -116,7 +132,7 @@ impl RenderOnce for EmptyState {
             .when_some(self.detail, |this, detail| {
                 this.child(
                     div()
-                        .max_w(px(440.))
+                        .max_w(px(480.))
                         .text_size(px(12.))
                         .text_color(theme.text_muted)
                         .child(detail),

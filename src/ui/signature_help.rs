@@ -165,7 +165,7 @@ impl RenderOnce for SignaturePopover {
             parameter.and_then(|parameter| parameter_range(signature, &parameter.label));
         // LuaLS labels a method `(method) (name: string)`; show it as the call
         // being written, `py:rename(name: string)`, and keep the kind for the header.
-        let (kind, label, highlight) =
+        let (_kind, label, highlight) =
             display_label(&signature.label, self.callee.as_deref(), highlight);
         let documentation = parameter
             .and_then(|parameter| parameter.documentation.as_ref())
@@ -196,23 +196,30 @@ impl RenderOnce for SignaturePopover {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .child(kind.unwrap_or("Function arguments")),
+                            .child(if parameter.is_some() {
+                                format!("Argument {} of {}", parameter_index + 1, parameters.len())
+                            } else {
+                                "Arguments".into()
+                            }),
                     )
-                    .when(parameter.is_some(), |header| {
-                        header.child(format!("arg {}/{}", parameter_index + 1, parameters.len()))
-                    })
                     // Kept at every width (shortened when narrow), so other
                     // overloads stay discoverable.
+                    // Spelt like every other key hint: the key bright, what
+                    // it does muted.
                     .when(self.help.signatures.len() > 1, |header| {
-                        header.child(format!(
-                            "↑↓ {}{}/{}",
-                            if self.width >= px(360.0) {
-                                "overload "
-                            } else {
-                                ""
-                            },
-                            index + 1,
-                            self.help.signatures.len()
+                        header.child(crate::ui::components::hint(
+                            "↑↓",
+                            format!(
+                                "{}{} of {}",
+                                if self.width >= px(360.0) {
+                                    "overload "
+                                } else {
+                                    ""
+                                },
+                                index + 1,
+                                self.help.signatures.len()
+                            ),
+                            cx,
                         ))
                     }),
             )

@@ -9,7 +9,7 @@
 //! - [`panel_header`], [`panel_footer`], [`footer_status`], [`EmptyState`]:
 //!   the frame of an overlay screen.
 //! - [`SearchField`], [`editable_combo_box`], [`text_input`]: fields.
-//! - [`hint`], [`rule`], [`enter_mark`]: small marks.
+//! - [`hint`], [`counter`], [`rule`], [`enter_mark`]: small marks.
 //! - [`toast`], [`status_icon`]: notifications.
 
 mod combo_box;
@@ -21,7 +21,7 @@ mod style;
 mod toast;
 
 pub use combo_box::editable_combo_box;
-pub use marks::{enter_mark, hint, rule};
+pub use marks::{counter, enter_mark, hint, rule};
 pub use panel::{EmptyState, footer_status, panel_footer, panel_header};
 pub use scroll::scroll_viewport;
 pub use search_field::SearchField;

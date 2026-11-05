@@ -101,6 +101,20 @@ impl Theme {
         cx.set_global(Theme::new());
     }
 
+    /// `color` as it looks under [`Theme::overlay_backdrop`], for chrome
+    /// that sits outside the dialog layer but should darken with the grid.
+    pub fn under_backdrop(&self, color: Rgba) -> Rgba {
+        let keep = 1.0 - self.overlay_backdrop.alpha;
+        let backdrop = self.overlay_backdrop;
+        let mix = |c: f32, b: f32| c * keep + b * (1.0 - keep);
+        Rgba::new(
+            mix(color.red, backdrop.red),
+            mix(color.green, backdrop.green),
+            mix(color.blue, backdrop.blue),
+            color.alpha,
+        )
+    }
+
     /// The characters a query or a caret position picked out of a label.
     pub fn match_highlight(&self) -> HighlightStyle {
         HighlightStyle {

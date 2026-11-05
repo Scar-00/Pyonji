@@ -236,7 +236,10 @@ impl Renderer {
                         fg_color
                     };
                     let fg_color = if dim_inactive && !pane.is_active {
-                        fade(fg_color, Color::from(vt100::Color::Default), 0.3)
+                        // Toward the background, not the default foreground:
+                        // most text already is the default foreground, so
+                        // fading toward it would leave the pane unchanged.
+                        fade(fg_color, DEFAULT_BACKGROUND, 0.18)
                     } else {
                         fg_color
                     };
@@ -347,63 +350,68 @@ impl Renderer {
                     .iter()
                     .map(|divider| (divider, chrome.divider_active)),
             );
+        // A divider that ends at another one runs on to that one's centre
+        // line, so the two meet in a clean T or corner instead of stopping
+        // half a cell short. Ends on the window edge stay where they are.
+        let total_cols = panes
+            .iter()
+            .map(|p| p.geometry.x + p.geometry.cols)
+            .max()
+            .unwrap_or(0);
+        let total_rows = panes
+            .iter()
+            .map(|p| p.geometry.y + p.geometry.rows)
+            .max()
+            .unwrap_or(0);
+        let reach = |inner: bool| if inner { 0.5 } else { 0.0 };
         for (divider, divider_color) in edges {
             match divider.direction {
                 SplitDirection::Vertical => {
                     // Centred in the gutter column the layout leaves for it.
-                    let x = cell_width * (f32::from(divider.x) + 0.5);
-                    let y = self.line_height * f32::from(divider.y + divider.rows);
-                    let height = divider_height * f32::from(divider.rows.max(1)) * self.line_height;
+                    let top = reach(divider.y > 0);
+                    let inner_bottom = divider.y + divider.rows < total_rows;
+                    // Whole device pixels, so the line is one crisp pixel
+                    // rather than two half-strength ones.
+                    let x = (cell_width * (f32::from(divider.x) + 0.5)).round();
+                    let top_px = if divider.y > 0 {
+                        (self.line_height * (f32::from(divider.y) - top)).round()
+                    } else {
+                        0.0
+                    };
+                    // On the window's edge, run on to the surface's edge
+                    // rather than stopping at the last whole row.
+                    let bottom_px = if inner_bottom {
+                        (self.line_height * (f32::from(divider.y + divider.rows) + 0.5)).round()
+                    } else {
+                        size[1] as f32
+                    };
+                    let y = bottom_px;
+                    let height = ((bottom_px - top_px) / size[1].max(1) as f32) * 2.0;
                     let [x, y] = self.ndc([x, y], size);
                     self.divider_renderer
                         .add_rect(x, y, divider_width, height, divider_color);
                 }
                 SplitDirection::Horizontal => {
                     // Centred in the gutter row the layout leaves for it.
-                    let x = cell_width * f32::from(divider.x);
-                    let y = self.line_height * (f32::from(divider.y) + 0.5) + divider_px;
-                    let width = divider_width * f32::from(divider.cols.max(1)) * cell_width;
+                    let left_px = if divider.x > 0 {
+                        (cell_width * (f32::from(divider.x) - 0.5)).round()
+                    } else {
+                        0.0
+                    };
+                    let right_px = if divider.x + divider.cols < total_cols {
+                        (cell_width * (f32::from(divider.x + divider.cols) + 0.5)).round()
+                    } else {
+                        size[0] as f32
+                    };
+                    let x = left_px;
+                    let y = (self.line_height * (f32::from(divider.y) + 0.5)).round() + divider_px;
+                    let width = ((right_px - left_px) / size[0].max(1) as f32) * 2.0;
                     let [x, y] = self.ndc([x, y], size);
                     self.divider_renderer
                         .add_rect(x, y, width, divider_height, divider_color);
                 }
             }
         }
-        // A faint outline around the focused pane, so focus reads at a glance
-        // even where dividers are shared and the cursor is hidden or blinking.
-        if let Some(pane) = panes
-            .iter()
-            .find(|pane| pane.is_active)
-            .filter(|_| dim_inactive)
-        {
-            let [r, g, b, _] = chrome.divider_active;
-            let color = [r, g, b, 200];
-            let cell_w = cell_width;
-            let g = pane.geometry;
-            // Where a neighbour sits across a gutter, put the edge on the
-            // gutter's centre line, on top of the divider, so the two make one
-            // line; edges on the window border stay at the pane's own edge.
-            let total_cols = panes.iter().map(|p| p.geometry.x + p.geometry.cols).max();
-            let total_rows = panes.iter().map(|p| p.geometry.y + p.geometry.rows).max();
-            let half = |shared: bool| if shared { 0.5 } else { 0.0 };
-            let left = cell_w * (f32::from(g.x) - half(g.x > 0));
-            let right = cell_w * (f32::from(g.x + g.cols) + half(Some(g.x + g.cols) < total_cols));
-            let top = self.line_height * (f32::from(g.y) - half(g.y > 0));
-            let bottom = self.line_height
-                * (f32::from(g.y + g.rows) + half(Some(g.y + g.rows) < total_rows));
-            let span_w = ((right - left) / size[0].max(1) as f32) * 2.0;
-            let span_h = ((bottom - top) / size[1].max(1) as f32) * 2.0;
-            for ([x, y], w, h) in [
-                ([left, top + divider_px], span_w, divider_height),
-                ([left, bottom], span_w, divider_height),
-                ([left, bottom], divider_width, span_h),
-                ([right - divider_px, bottom], divider_width, span_h),
-            ] {
-                let [x, y] = self.ndc([x, y], size);
-                self.divider_renderer.add_rect(x, y, w, h, color);
-            }
-        }
-
         let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor {
@@ -417,7 +425,10 @@ impl Renderer {
                     view,
                     resolve_target: None,
                     ops: Operations {
-                        load: LoadOp::Clear(DEFAULT_BACKGROUND.to_wgpu()),
+                        // The space past the last column dims with the cells.
+                        load: LoadOp::Clear(
+                            fade(DEFAULT_BACKGROUND, Color::rgb(0, 0, 0), chrome.dim).to_wgpu(),
+                        ),
                         store: StoreOp::Store,
                     },
                     depth_slice: None,

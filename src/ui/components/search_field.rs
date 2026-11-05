@@ -12,8 +12,8 @@ use gpui_component::{
 
 use crate::ui::theme::PyTheme as _;
 
-/// A bare input with an icon in front of it. Underlined by default; see
-/// [`SearchField::boxed`].
+/// A bare input with an icon in front of it, underlined. The one search
+/// field every screen uses.
 ///
 /// The input reads as presentational because the screen's
 /// [`super::editable_combo_box`] carries the field's role and value.
@@ -21,7 +21,6 @@ use crate::ui::theme::PyTheme as _;
 pub struct SearchField {
     state: Entity<InputState>,
     icon: IconName,
-    boxed: bool,
     style: StyleRefinement,
 }
 
@@ -30,20 +29,12 @@ impl SearchField {
         Self {
             state: state.clone(),
             icon: IconName::Search,
-            boxed: false,
             style: StyleRefinement::default(),
         }
     }
 
     pub fn icon(mut self, icon: IconName) -> Self {
         self.icon = icon;
-        self
-    }
-
-    /// A ruled box instead of an underline, for a field that shares its row
-    /// with other controls.
-    pub fn boxed(mut self) -> Self {
-        self.boxed = true;
         self
     }
 }
@@ -64,13 +55,7 @@ impl RenderOnce for SearchField {
             .items_center()
             .gap_2()
             .text_color(theme.text)
-            .map(|field| {
-                if self.boxed {
-                    field.h(px(32.)).px_3().border_1()
-                } else {
-                    field.border_b_1()
-                }
-            })
+            .border_b_1()
             .border_color(if focused {
                 theme.focus_ring
             } else {

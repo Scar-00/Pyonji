@@ -9,8 +9,8 @@ use crate::{
     ui::{
         PyTheme as _,
         components::{
-            EmptyState, PyInteractive as _, PyStyled as _, SearchField, editable_combo_box,
-            enter_mark, footer_status, hint, panel_footer, panel_header,
+            EmptyState, PyInteractive as _, PyStyled as _, SearchField, counter,
+            editable_combo_box, enter_mark, footer_status, hint, panel_footer, panel_header,
         },
     },
     util,
@@ -48,6 +48,8 @@ struct Entry {
     id: SessionId,
     title: String,
     tab: Option<usize>,
+    /// The session taking input now, so switching to it would do nothing.
+    current: bool,
 }
 
 pub struct SessionsView {
@@ -125,10 +127,12 @@ impl SessionsView {
                     id: *id,
                     title: session.title().to_string(),
                     tab: None,
+                    current: false,
                 })
             })
             .collect::<Vec<_>>();
         if !self.detached_only {
+            let active = py.active_session();
             for (index, tab) in py.tabs.iter().enumerate() {
                 let Some(tab) = tab else { continue };
                 entries.extend(tab.sessions().into_iter().filter_map(|id| {
@@ -137,6 +141,7 @@ impl SessionsView {
                         id,
                         title: session.title().to_string(),
                         tab: Some(index),
+                        current: Some(id) == active,
                     })
                 }));
             }
@@ -249,8 +254,8 @@ impl SessionsView {
         let total = self.entries(cx).len();
         let rows = self.visible(cx).len();
         let list = if rows == 0 {
-            // The empty state's heading and detail.
-            100.0
+            // The empty state's icon, heading and detail.
+            150.0
         } else {
             rows as f32 * ROW_HEIGHT + 8.0
         };
@@ -279,20 +284,13 @@ impl SessionsView {
                                 "Sessions"
                             }),
                     )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_size(px(12.))
-                            .text_color(theme.text_muted)
-                            .child(if shown == total {
-                                format!("{total} session{}", if total == 1 { "" } else { "s" })
-                            } else {
-                                format!("{shown} / {total}")
-                            }),
-                    ),
+                    // With nothing to count, the empty state already says so.
+                    .when(total > 0, |this| {
+                        this.child(counter(shown, total, "session", cx))
+                    }),
             )
             .when(total > 0, |header| {
-                header.child(SearchField::new(&self.search_input))
+                header.child(SearchField::new(&self.search_input).mono(cx))
             })
     }
 
@@ -364,6 +362,7 @@ impl SessionsView {
                                             .clone(),
                                     )
                                     .child(format!("ID {id}"))
+                                    .child("·")
                                     .when(!self.detached_only || entry.tab.is_some(), |this| {
                                         this.child(
                                             div()
@@ -379,10 +378,15 @@ impl SessionsView {
                                                         .unwrap_or_else(|| "Detached".into()),
                                                 ),
                                         )
+                                    })
+                                    .when(entry.current, |this| {
+                                        this.child("·")
+                                            .child(div().text_color(theme.accent).child("current"))
                                     }),
                             ),
                     )
-                    .child(enter_mark(selected, cx)),
+                    // Enter on the session already in front does nothing.
+                    .child(enter_mark(selected && !entry.current, cx)),
             )
             .on_click(cx.listener(move |this, _, window, cx| this.activate(id, None, window, cx)))
     }
@@ -397,13 +401,23 @@ impl SessionsView {
                 "No running sessions"
             };
             let detail = if total > 0 {
-                "Try another name or press Esc to clear the search."
+                "Try another name or session ID."
             } else if self.detached_only {
-                "Detach a session to keep it running outside your tabs."
+                "Detach a session from the palette to keep it running outside your tabs."
             } else {
                 "Open a tab to start a new session."
             };
-            return EmptyState::new(heading).detail(detail).into_any_element();
+            return EmptyState::new(heading)
+                .nothing(
+                    if total > 0 {
+                        gpui_component::IconName::Search
+                    } else {
+                        gpui_component::IconName::Inbox
+                    },
+                    cx,
+                )
+                .detail(detail)
+                .into_any_element();
         }
         v_flex()
             .id("session-results-list")
@@ -435,8 +449,13 @@ impl SessionsView {
             .selected
             .and_then(|id| entries.iter().find(|entry| entry.id == id));
         let attach = entry.is_some_and(|entry| entry.tab.is_none());
+        let current = entry.is_some_and(|entry| entry.current);
         let py = util::read!(self.pyonji, cx);
-        let destination = entry.and_then(|entry| entry.tab.or(py.current_tab));
+        // Enter on the session already in front does nothing, so it promises
+        // nothing.
+        let destination = entry
+            .filter(|entry| !entry.current)
+            .and_then(|entry| entry.tab.or(py.current_tab));
         // What enter will do, in the slot the palette uses for a command's
         // usage, so both screens answer "what happens now" in the same place.
         let (status, color) = match (self.error, destination) {
@@ -449,11 +468,14 @@ impl SessionsView {
                 ),
                 theme.text_muted,
             ),
+            (None, None) if current => ("Already in front".into(), theme.text_muted),
             (None, None) => (String::new(), theme.text_muted),
         };
         panel_footer(cx)
             .child(footer_status(status, color))
-            .when(entry.is_some(), |this| this.child(hint("↑↓", "choose", cx)))
+            .when(entry.is_some() && entries.len() > 1, |this| {
+                this.child(hint("↑↓", "choose", cx))
+            })
             .when(destination.is_some(), |this| {
                 this.child(hint("⏎", if attach { "attach" } else { "switch" }, cx))
             })

@@ -161,13 +161,22 @@ impl CompletionMenu {
         item: Option<&CompletionItem>,
         width: Pixels,
         height: Pixels,
+        fill: bool,
         cx: &App,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme();
         v_flex()
             .id("lua-completion-details")
             .occlude()
-            .w(width)
+            // Under the list it spans the list; beside it, it is as wide as
+            // what it says, so a one-line signature isn't a wide empty card.
+            .map(|card| {
+                if fill {
+                    card.w(width)
+                } else {
+                    card.max_w(width).min_w(width.min(px(240.0)))
+                }
+            })
             .max_h(height)
             .popover(cx)
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
@@ -181,31 +190,51 @@ impl CompletionMenu {
                     .max_h(height)
                     .p_3()
                     .gap_2()
+                    // Prose in the UI face, like every other description;
+                    // only the signature line below is code.
+                    .font_family(gpui_component::ActiveTheme::theme(cx).font_family.clone())
                     .when_some(item, |details, item| {
+                        // A function reads as the call it would be,
+                        // `attach(session: integer) → boolean`, as the
+                        // signature popover writes it; anything else is its
+                        // name over its type.
+                        let call = item
+                            .detail
+                            .as_deref()
+                            .map(readable_signature)
+                            .filter(|signature| signature.starts_with('('));
                         details
                             .child(
                                 div()
+                                    .mono(cx)
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
-                                    .child(item.label.clone()),
+                                    .child(match &call {
+                                        Some(call) => format!("{}{call}", item.label),
+                                        None => item.label.clone(),
+                                    }),
                             )
                             .when_some(
-                                item.detail.as_ref().filter(|detail| {
-                                    let detail = detail.trim();
-                                    !detail.is_empty()
-                                        && !(detail == "function"
-                                            && matches!(
-                                                item.kind,
-                                                Some(
-                                                    Kind::FUNCTION
-                                                        | Kind::METHOD
-                                                        | Kind::CONSTRUCTOR
-                                                )
-                                            ))
-                                }),
+                                item.detail
+                                    .as_ref()
+                                    .filter(|_| call.is_none())
+                                    .filter(|detail| {
+                                        let detail = detail.trim();
+                                        !detail.is_empty()
+                                            && !(detail == "function"
+                                                && matches!(
+                                                    item.kind,
+                                                    Some(
+                                                        Kind::FUNCTION
+                                                            | Kind::METHOD
+                                                            | Kind::CONSTRUCTOR
+                                                    )
+                                                ))
+                                    }),
                                 |details, detail| {
                                     details.child(
                                         div()
+                                            .mono(cx)
                                             .text_size(px(12.0))
                                             .text_color(theme.text)
                                             .child(readable_signature(detail)),
@@ -330,6 +359,7 @@ impl RenderOnce for CompletionMenu {
                     .max(240.0)
                     .min(available))
             },
+            stacked,
             cx,
         );
         let has_items = !self.items.is_empty();
@@ -403,8 +433,19 @@ impl RenderOnce for CompletionMenu {
                                                 .justify_between()
                                                 .text_size(px(11.0))
                                                 .text_color(theme.text_muted)
-                                                .child("Lua suggestions")
-                                                .child(format!("{position} / {count}")),
+                                                // A title, in the UI face like
+                                                // other panel titles; the count
+                                                // is a position, so it says "of".
+                                                .child(
+                                                    div()
+                                                        .font_family(
+                                                            gpui_component::ActiveTheme::theme(cx)
+                                                                .font_family
+                                                                .clone(),
+                                                        )
+                                                        .child("Lua suggestions"),
+                                                )
+                                                .child(format!("{position} of {count}")),
                                         )
                                         .child(
                                             div()
@@ -503,7 +544,7 @@ fn match_prefix(label: &str, fragment: &str) -> Option<std::ops::Range<usize>> {
 
 fn kind_label(kind: Option<Kind>) -> (&'static str, &'static str) {
     match kind {
-        Some(Kind::METHOD) => ("ƒ", "Method"),
+        Some(Kind::METHOD) => ("m", "Method"),
         Some(Kind::FUNCTION) => ("ƒ", "Function"),
         Some(Kind::CONSTRUCTOR) => ("ƒ", "Constructor"),
         Some(Kind::FIELD) => ("·", "Field"),

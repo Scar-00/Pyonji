@@ -1,14 +1,14 @@
 //! The release screen: a rail of versions beside the selected release's builds.
 
-use std::{collections::HashMap, io::Write as _, path::Path};
+use std::{collections::HashMap, io::Write as _};
 
 use crate::{
     Next, Prev, PushError, Pyonji, Submit,
     ui::{
         PyTheme as _, Theme,
         components::{
-            EmptyState, PyInteractive as _, PyStyled as _, SearchField, editable_combo_box, hint,
-            panel_footer, rule,
+            EmptyState, PyInteractive as _, PyStyled as _, SearchField, counter,
+            editable_combo_box, hint, panel_footer, rule,
         },
     },
 };
@@ -17,7 +17,7 @@ use async_compat::CompatExt;
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_base::{Disableable, ScrollbarAxis, actions::Cancel, h_flex, v_flex};
 use gpui_component::{
-    Icon, IconName, Sizable, WindowExt,
+    IconName, Sizable, WindowExt,
     button::{Button, ButtonRounded, ButtonVariants},
     input::{InputEvent, InputState},
     progress::Progress,
@@ -30,7 +30,7 @@ use smol::stream::StreamExt as _;
 
 const RAIL: f32 = 232.0;
 
-const ROW: f32 = 48.0;
+const ROW: f32 = 40.0;
 
 actions!(releases, [NotesPageDown, NotesPageUp]);
 
@@ -52,13 +52,18 @@ pub fn init(cx: &mut App) {
 /// version, so that is the number to compare against.
 const RUNNING: &str = env!("CARGO_PKG_VERSION");
 
+/// Where the running binary lives, home written as `~`, so the footer can
+/// say exactly which file an install replaces.
 fn running_binary() -> String {
-    std::env::current_exe()
-        .ok()
-        .as_deref()
-        .and_then(Path::file_name)
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "pyonji".to_string())
+    let Some(exe) = std::env::current_exe().ok() else {
+        return "pyonji".to_string();
+    };
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rest) = exe.strip_prefix(&home)
+    {
+        return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display());
+    }
+    exe.display().to_string()
 }
 
 /// One downloadable binary in a release.
@@ -165,26 +170,29 @@ fn is_older(a: &str, b: &str) -> bool {
     parts(a) < parts(b)
 }
 
-fn bare_url(url: &str) -> &str {
-    url.split_once("://").map_or(url, |(_, rest)| rest)
-}
-
 /// The URL in a line that is only GitHub's own changelog link.
 ///
 /// With no written notes, GitHub fills a release body with
 /// `**Full Changelog**: <url>`, once per closed issue.
 fn changelog_url(line: &str) -> Option<&str> {
-    let url = match line.rsplit_once(": ") {
+    let url = match line.split_once(':') {
         Some((label, url))
             if label
                 .trim_matches(['*', ' ', '`'])
                 .eq_ignore_ascii_case("full changelog") =>
         {
-            url.trim()
+            url.trim_start_matches(['*', ' ', '`'])
         }
         _ => line.trim(),
     };
+    // GitHub also emits a Markdown link whose label is the raw URL.
     let url = url.trim_matches(|c| matches!(c, '*' | '`' | ' ' | '<' | '>'));
+    let url = if url.starts_with('[') {
+        let (_, destination) = url.rsplit_once("](")?;
+        destination.strip_suffix(')')?
+    } else {
+        url
+    };
     (url.starts_with("https://") && (url.contains("/compare/") || url.contains("/commits/")))
         .then_some(url)
 }
@@ -538,7 +546,7 @@ impl ReleasesView {
                 _ = cx.update(|window, cx| {
                     window.dispatch_action(
                         Box::new(PushError::new(format!(
-                            "Could not install v{}: {e}",
+                            "Could not install {}: {e}",
                             target.version
                         ))),
                         cx,
@@ -623,7 +631,7 @@ impl ReleasesView {
             return Some(("up to date".to_string(), theme.success));
         }
         Some(if releases.iter().any(|r| r.version() == RUNNING) {
-            (format!("v{} is available", newest.version()), theme.warning)
+            (format!("{} is available", newest.version()), theme.warning)
         } else {
             ("running an untagged build".to_string(), theme.text_muted)
         })
@@ -631,7 +639,7 @@ impl ReleasesView {
 
     // ---------------------------------------------------------------- render
 
-    fn render_header(&self, compact: bool, cx: &Context<Self>) -> impl IntoElement {
+    fn render_header(&self, shown: usize, compact: bool, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
         h_flex()
@@ -644,20 +652,34 @@ impl ReleasesView {
             .px_4()
             .border_b_1()
             .border_color(theme.border)
+            // Titled like the other screens; what is running is its subtitle.
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(16.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("Releases"),
+            )
             .child(
                 h_flex()
                     .min_w_0()
                     .items_center()
-                    .gap_3()
-                    .mono(cx)
-                    .text_size(px(14.0))
+                    .gap_2()
+                    .text_size(px(12.0))
                     .child(
                         div()
                             .flex_shrink_0()
                             .text_color(theme.text_muted)
-                            .child("Running"),
+                            .child("running"),
                     )
-                    .child(div().flex_shrink_0().text_color(theme.text).child(RUNNING))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .mono(cx)
+                            .text_color(theme.text)
+                            .child(RUNNING),
+                    )
                     .when_some(
                         (!compact).then(|| self.status(cx)).flatten(),
                         |this, (status, color)| {
@@ -669,18 +691,26 @@ impl ReleasesView {
             .child(div().flex_1())
             .child(
                 SearchField::new(&self.search_input)
-                    .boxed()
                     .mono(cx)
                     .flex_1()
                     .min_w(px(120.0))
                     .max_w(px(240.0)),
             )
+            // Counted the way every screen counts.
+            .when_some(
+                self.releases
+                    .as_ref()
+                    .filter(|releases| !releases.is_empty()),
+                |this, releases| this.child(counter(shown, releases.len(), "release", cx)),
+            )
             .child(
                 Button::new("reload")
                     .ghost()
                     .small()
-                    .rounded(ButtonRounded::None)
-                    .icon(IconName::Redo2)
+                    .rounded(ButtonRounded::Small)
+                    .icon(gpui_component::Icon::new(
+                        crate::assets::PyonjiAsset::Refresh,
+                    ))
                     .tooltip("Fetch releases again")
                     .on_click(cx.listener(|_, _, window, cx| {
                         Self::fetch(window, cx);
@@ -795,8 +825,6 @@ impl ReleasesView {
         compact: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let theme = cx.theme();
-
         if self.releases.is_none() {
             return match &self.fetch_error {
                 Some(reason) => EmptyState::new("Could not fetch releases from GitHub.")
@@ -805,7 +833,7 @@ impl ReleasesView {
                         Button::new("retry")
                             .secondary()
                             .small()
-                            .rounded(ButtonRounded::None)
+                            .rounded(ButtonRounded::Small)
                             .label("Try again")
                             .on_click(cx.listener(|_, _, window, cx| {
                                 Self::fetch(window, cx);
@@ -827,20 +855,18 @@ impl ReleasesView {
             } else {
                 "No releases yet.".to_string()
             })
-            .muted(cx)
-            .icon(
-                Icon::new(IconName::Inbox)
-                    .size_8()
-                    .text_color(theme.text_muted),
+            .nothing(
+                if filtered {
+                    IconName::Search
+                } else {
+                    IconName::Inbox
+                },
+                cx,
             )
+            // Said the way the other screens say it; esc clears, as the
+            // footer already offers.
             .when(filtered, |this| {
-                this.child(
-                    Button::new("clear-filter")
-                        .outline()
-                        .small()
-                        .label("Clear filter")
-                        .on_click(cx.listener(|this, _, window, cx| this.clear_filter(window, cx))),
-                )
+                this.detail("Try a version number, such as 0.3.")
             })
             .into_any_element();
         }
@@ -921,10 +947,12 @@ impl ReleasesView {
                                 h_flex()
                                     .items_center()
                                     .gap_3()
-                                    .mono(cx)
                                     .text_size(px(12.0))
+                                    // The date is data, in mono; the count is
+                                    // a sentence.
                                     .child(
                                         div()
+                                            .mono(cx)
                                             .text_color(theme.text_muted)
                                             .child(entry.date.clone()),
                                     )
@@ -1031,6 +1059,7 @@ impl ReleasesView {
 
         v_flex()
             .w_full()
+            .max_w(px(560.))
             .flex_shrink_0()
             .gap_2()
             .when_some(entry.notes.clone(), |this, notes| {
@@ -1072,17 +1101,6 @@ impl ReleasesView {
                                 .flex_shrink_0()
                                 .text_color(theme.accent)
                                 .child("Read the changelog on GitHub"),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_right()
-                                .mono(cx)
-                                .text_size(px(11.0))
-                                .text_color(theme.text_muted)
-                                .child(bare_url(&url).to_string()),
                         ),
                 )
             })
@@ -1119,7 +1137,6 @@ impl ReleasesView {
         let roomy = window.viewport_size().width >= px(900.);
 
         panel_footer(cx)
-            .min_h(px(56.0))
             .child(
                 // An install replaces the running binary; say so before the
                 // button is pressed.
@@ -1131,53 +1148,48 @@ impl ReleasesView {
                     .text_size(px(12.0))
                     .text_color(theme.text_muted)
                     .when(entry.is_some(), |this| {
-                        this.child(div().child("Replaces "))
+                        this.child(div().child("Replaces"))
                             .child(div().mono(cx).truncate().child(self.binary.clone()))
-                    })
-                    .when(roomy && entry.is_some(), |this| {
-                        this.child(rule(cx))
-                            .child(div().child(if installable {
-                                "for"
-                            } else {
-                                "unavailable for"
-                            }))
-                            .child(
-                                div()
-                                    .mono(cx)
-                                    .text_color(if installable {
-                                        theme.text_muted
-                                    } else {
-                                        theme.error
-                                    })
-                                    .truncate()
-                                    .child(self_update::get_target()),
-                            )
                     }),
             )
             .when(roomy, |this| this.child(self.render_hints(cx)))
-            .child(
-                Button::new("install")
-                    .primary()
-                    .small()
-                    .rounded(ButtonRounded::None)
-                    // Name what the press does to this binary: the same
-                    // version again, or a step back, is not an "install".
-                    .label(match entry {
-                        Some(e) if e.installable() && e.version == RUNNING => {
-                            format!("⏎ Reinstall v{}", e.version)
-                        }
-                        Some(e) if e.installable() && is_older(&e.version, RUNNING) => {
-                            format!("⏎ Downgrade to v{}", e.version)
-                        }
-                        Some(e) if e.installable() => format!("⏎ Install v{}", e.version),
-                        Some(e) => format!("No build for v{}", e.version),
-                        None => "Install".to_string(),
-                    })
-                    .disabled(!installable)
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.on_confirm(&Submit, window, cx)),
-                    ),
-            )
+            // With no release picked there is nothing to install, so no
+            // button: a disabled one only asks to be tried.
+            .when_some(entry, |this, entry| {
+                // The same version again is a repair, not the main event; it
+                // doesn't get the accent.
+                let repair = entry.installable() && entry.version == RUNNING;
+                this.child(
+                    Button::new("install")
+                        .map(|button| {
+                            if repair {
+                                button.outline()
+                            } else {
+                                button.primary()
+                            }
+                        })
+                        .small()
+                        // Footer type, not a headline.
+                        .text_size(px(12.))
+                        .rounded(ButtonRounded::Small)
+                        // Name what the press does to this binary: the same
+                        // version again, or a step back, is not an "install".
+                        .label(match entry {
+                            e if e.installable() && e.version == RUNNING => {
+                                format!("⏎ Reinstall {}", e.version)
+                            }
+                            e if e.installable() && is_older(&e.version, RUNNING) => {
+                                format!("⏎ Downgrade to {}", e.version)
+                            }
+                            e if e.installable() => format!("⏎ Install {}", e.version),
+                            e => format!("No build for {}", e.version),
+                        })
+                        .disabled(!installable)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.on_confirm(&Submit, window, cx)),
+                        ),
+                )
+            })
     }
 
     /// Scroll the release notes by most of a screen (`1` down, `-1` up).
@@ -1260,20 +1272,19 @@ impl ReleasesView {
         let theme = cx.theme();
 
         panel_footer(cx)
-            .min_h(px(56.0))
             .gap_2()
             .child(
                 div()
                     .flex_1()
                     .text_size(px(13.0))
                     .text_color(theme.text)
-                    .child(format!("Installed v{}. Restart to run it.", target.version)),
+                    .child(format!("Installed {}. Restart to run it.", target.version)),
             )
             .child(
                 Button::new("restart-later")
                     .ghost()
                     .small()
-                    .rounded(ButtonRounded::None)
+                    .rounded(ButtonRounded::Small)
                     .label("Not now")
                     .on_click(cx.listener(|_, _, window, cx| {
                         window.close_dialog(cx);
@@ -1283,7 +1294,7 @@ impl ReleasesView {
                 Button::new("restart")
                     .primary()
                     .small()
-                    .rounded(ButtonRounded::None)
+                    .rounded(ButtonRounded::Small)
                     .label("Restart")
                     .on_click(cx.listener(|_, _, _, cx| cx.restart())),
             )
@@ -1328,7 +1339,7 @@ impl Render for ReleasesView {
                 .size_full()
                 .min_h_0()
                 .overflow_hidden()
-                .child(self.render_header(compact, cx))
+                .child(self.render_header(entries.len(), compact, cx))
                 .child(self.render_body(&entries, compact, cx))
                 .child(self.render_footer(selected, window, cx)),
             )
@@ -1346,7 +1357,25 @@ struct AssetResult {
 
 #[cfg(test)]
 mod tests {
-    use super::is_older;
+    use super::{is_older, split_notes};
+
+    #[test]
+    fn changelog_links_leave_prose_intact_and_keep_the_destination() {
+        let url = "https://github.com/Scar-00/Pyonji/compare/v0.3.0...v0.4.0";
+        for link in [url.to_string(), format!("[{url}]({url})")] {
+            let body = format!("Useful release notes.\n\n**Full Changelog**: {link}");
+            let (notes, changelog) = split_notes(Some(&body));
+            assert_eq!(notes.as_deref(), Some("Useful release notes."));
+            assert_eq!(changelog.as_deref(), Some(url));
+            let body = format!("Useful release notes.\n\n**Full changelog:** {link}");
+            assert_eq!(
+                split_notes(Some(&body)),
+                (Some("Useful release notes.".into()), Some(url.into()))
+            );
+        }
+        let prose = "See https://example.com/compare/ for the documentation.";
+        assert_eq!(split_notes(Some(prose)), (Some(prose.into()), None));
+    }
 
     #[test]
     fn versions_compare_by_number_not_by_text() {

@@ -19,6 +19,28 @@ pub fn hint(keys: impl Into<SharedString>, action: impl Into<SharedString>, cx: 
         .child(div().text_color(theme.text_muted).child(action.into()))
 }
 
+/// How much of a list is showing, the way every screen's header counts it:
+/// "18 commands" until a query narrows it, then "4 / 18".
+pub fn counter(shown: usize, total: usize, noun: &str, cx: &App) -> Div {
+    let theme = cx.theme();
+    let counter = h_flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap_1()
+        .mono(cx)
+        .text_size(px(11.0))
+        .text_color(theme.text_muted);
+    if shown == total {
+        let plural = if total == 1 { "" } else { "s" };
+        counter.child(format!("{total} {noun}{plural}"))
+    } else {
+        counter
+            .child(format!("{shown}"))
+            .child(div().text_color(theme.text_disabled).child("/"))
+            .child(format!("{total}"))
+    }
+}
+
 /// A short upright hairline between items on one line.
 pub fn rule(cx: &App) -> impl IntoElement + use<> {
     div()

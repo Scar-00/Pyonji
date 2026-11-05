@@ -681,13 +681,21 @@ impl Pyonji {
 
 impl Render for Pyonji {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let dimmed = window.has_active_dialog(cx);
         let theme = cx.theme();
+        // The grid dims itself under a dialog; the frame around it follows,
+        // so no undimmed band outlines the window.
+        let background = if dimmed {
+            theme.under_backdrop(theme.background)
+        } else {
+            theme.background
+        };
 
         v_flex()
             .id("main-view")
             .track_focus(&self.focus_handle)
             .size_full()
-            .bg(theme.background)
+            .bg(background)
             .text_color(theme.text)
             .on_action(cx.listener(Self::on_error))
             .on_action(cx.listener(Self::on_warning))

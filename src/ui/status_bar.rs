@@ -329,10 +329,12 @@ impl Focusable for StatusBar {
 }
 
 impl Render for StatusBar {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let dimmed = gpui_component::WindowExt::has_active_dialog(window, cx);
         let theme = cx.theme();
         h_flex()
             .id("status-bar")
+            .relative()
             .key_context(Self::CONTEXT)
             .on_action(cx.listener(Self::on_dismiss))
             .w_full()
@@ -414,6 +416,11 @@ impl Render for StatusBar {
                     this.child(view)
                 }
             })
+            // Darken with the grid while a dialog is up, so the dialog is the
+            // one lit thing on screen.
+            .when(dimmed, |this| {
+                this.child(div().absolute().inset_0().bg(theme.overlay_backdrop))
+            })
             .into_any_element()
     }
 }
@@ -453,10 +460,15 @@ impl RenderOnce for SessionView {
             .overflow_x_scroll()
             .children(py.tabs.iter().enumerate().filter_map(move |(i, tab)| {
                 let id = tab.as_ref().and_then(|tab| tab.active_session())?;
+                let panes = tab.as_ref().map_or(1, |tab| tab.sessions().len());
                 let title = py.session_manager.session(id)?.title();
                 // Tab shortcuts are Lua callbacks the config binds, so there is
                 // no key to name here; say what a click does instead.
-                let tooltip = format!("Tab {}: {title} · click to switch", i + 1);
+                let tooltip = if panes > 1 {
+                    format!("Tab {}: {title} · {panes} panes · click to switch", i + 1)
+                } else {
+                    format!("Tab {}: {title} · click to switch", i + 1)
+                };
                 let title = title.to_string();
                 let selected = py.current_tab == Some(i);
                 let pyonji = pyonji.clone();
@@ -491,7 +503,10 @@ impl RenderOnce for SessionView {
                         .child(
                             div()
                                 .flex_shrink_0()
-                                .text_xs()
+                                .text_size(px(12.))
+                                // Down to the title's baseline: the smaller
+                                // face would otherwise float above it.
+                                .pt(px(2.))
                                 .text_color(if selected {
                                     theme.accent
                                 } else {
@@ -507,6 +522,25 @@ impl RenderOnce for SessionView {
                                 .whitespace_nowrap()
                                 .child(title),
                         )
+                        // A split tab says so, so it can't be mistaken for
+                        // a single session with the same title.
+                        .when(panes > 1, |this| {
+                            this.child(
+                                h_flex()
+                                    .flex_shrink_0()
+                                    .items_center()
+                                    .gap_1()
+                                    .text_size(px(12.))
+                                    .text_color(theme.text_muted)
+                                    .child(
+                                        gpui_component::Icon::new(
+                                            crate::assets::PyonjiAsset::Panes,
+                                        )
+                                        .size(px(14.)),
+                                    )
+                                    .child(format!("{panes}")),
+                            )
+                        })
                         .tooltip(move |window, cx| {
                             gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
                         })
@@ -602,7 +636,11 @@ fn prompt_hints(hints: &[(&'static str, &'static str)], cx: &App) -> impl IntoEl
         .children(
             hints
                 .iter()
-                .map(|(keys, what)| crate::ui::components::hint(*keys, *what, cx)),
+                // A size up from the dialogs' footers, to sit beside the
+                // bar's 16px labels without looking like a footnote.
+                .map(|(keys, what)| {
+                    crate::ui::components::hint(*keys, *what, cx).text_size(px(12.))
+                }),
         )
 }
 #[derive(IntoElement)]
@@ -819,6 +857,9 @@ impl RenderOnce for LuaView {
             .filter(|_| completion.matches_input(value.as_str(), cursor));
         let input_click = input_state.clone();
         let py_click = self.pyonji.clone();
+        // While the menu is up its footer owns esc ("dismiss"); the bar keeps
+        // only what the menu doesn't say, so no key means two things at once.
+        let menu_open = items.as_ref().is_some_and(|items| !items.is_empty());
 
         editable_combo_box(
             "lua-search-results",
@@ -879,7 +920,14 @@ impl RenderOnce for LuaView {
                         .min_w_0()
                         .child(text_input(&input_state, cx)),
                 )
-                .child(prompt_hints(&[("\u{23ce}", "run"), ("esc", "close")], cx)),
+                .child(prompt_hints(
+                    if menu_open {
+                        &[("\u{23ce}", "run")]
+                    } else {
+                        &[("\u{23ce}", "run"), ("esc", "close")]
+                    },
+                    cx,
+                )),
         )
     }
 }

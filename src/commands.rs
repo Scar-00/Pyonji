@@ -16,7 +16,10 @@ pub type Runner = Rc<dyn Fn(&[String], &mut Pyonji, &mut Window, &mut Context<Py
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Origin {
-    Workspace,
+    Tabs,
+    Panes,
+    Sessions,
+    App,
     Remote,
     Config,
 }
@@ -24,7 +27,10 @@ pub enum Origin {
 impl Origin {
     pub fn label(self) -> &'static str {
         match self {
-            Origin::Workspace => "workspace",
+            Origin::Tabs => "tabs",
+            Origin::Panes => "panes",
+            Origin::Sessions => "sessions",
+            Origin::App => "pyonji",
             Origin::Remote => "remote",
             Origin::Config => "from your config",
         }
@@ -92,15 +98,6 @@ impl Command {
         (self.run)(args, py, window, cx);
     }
 
-    /// The usage line, e.g. `switch <tab>`.
-    pub fn usage(&self) -> String {
-        let mut usage = self.name.clone();
-        for arg in &self.args {
-            usage.push_str(&format!(" <{}>", arg.name));
-        }
-        usage
-    }
-
     /// The words a query may match against: the name, then the summary, then
     /// the placeholders. In that order, because the name is what the user is
     /// usually typing.
@@ -125,6 +122,9 @@ pub struct Match {
     pub command: Command,
     /// Byte ranges into `command.name`, in order, non-overlapping.
     pub marks: Vec<Range<usize>>,
+    /// For a command the name didn't match, the byte ranges in
+    /// `command.summary` that did, so the row still shows why it is there.
+    pub summary_marks: Vec<Range<usize>>,
 }
 
 /// Every command available right now.
@@ -161,6 +161,7 @@ pub fn filter(commands: &[Command], query: &str) -> Vec<Match> {
             .map(|command| Match {
                 command,
                 marks: Vec::new(),
+                summary_marks: Vec::new(),
             })
             .collect();
     }
@@ -173,12 +174,18 @@ pub fn filter(commands: &[Command], query: &str) -> Vec<Match> {
     let mut hay_buf = Vec::new();
     let mut marks: Vec<u32> = Vec::new();
     let mut name_marks: Vec<u32> = Vec::new();
+    let mut summary_marks: Vec<u32> = Vec::new();
 
-    let mut scored: Vec<(u16, Match)> = commands
+    let mut scored: Vec<((bool, u16), Match)> = commands
         .iter()
         .filter_map(|command| {
             let needle = Utf32Str::new(name, &mut needle_buf);
             let mut best: Option<u16> = None;
+            // Per command: a name that doesn't match must not inherit the
+            // previous command's marks.
+            name_marks.clear();
+            summary_marks.clear();
+            let mut on_name = false;
             for (ix, haystack) in command.haystacks().iter().enumerate() {
                 if haystack.is_empty() {
                     continue;
@@ -186,26 +193,44 @@ pub fn filter(commands: &[Command], query: &str) -> Vec<Match> {
                 // `fuzzy_indices` appends; it never clears for us.
                 marks.clear();
                 let hay = Utf32Str::new(haystack, &mut hay_buf);
-                let Some(score) = matcher.fuzzy_indices(hay, needle, &mut marks) else {
+                // Names match fuzzily, which is how they are typed. The
+                // summary and placeholders only match a run of the query as
+                // written: letters scattered across a sentence explain
+                // nothing.
+                let score = if ix == 0 {
+                    matcher.fuzzy_indices(hay, needle, &mut marks)
+                } else {
+                    matcher.substring_indices(hay, needle, &mut marks)
+                };
+                let Some(score) = score else {
                     continue;
                 };
                 if ix == 0 {
-                    name_marks.clear();
+                    on_name = true;
                     name_marks.extend_from_slice(&marks);
+                } else if ix == 1 {
+                    summary_marks.extend_from_slice(&marks);
                 }
                 best = Some(best.map_or(score, |top| top.max(score)));
             }
             let score = best?;
             Some((
-                score,
+                (on_name, score),
                 Match {
                     marks: byte_ranges(&command.name, &name_marks),
+                    summary_marks: if on_name {
+                        Vec::new()
+                    } else {
+                        byte_ranges(&command.summary, &summary_marks)
+                    },
                     command: command.clone(),
                 },
             ))
         })
         .collect();
 
+    // Name matches first, whatever their score: a row with nothing
+    // underlined above one that has would read as a ranking mistake.
     // Stable, so equal scores stay in declaration order.
     scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
     scored.into_iter().map(|(_, entry)| entry).collect()
@@ -233,18 +258,6 @@ fn byte_ranges(name: &str, marks: &[u32]) -> Vec<Range<usize>> {
         }
     }
     ranges
-}
-
-pub fn naming(commands: &[Command], query: &str) -> bool {
-    let name = query_name(query);
-    if name.is_empty() {
-        return false;
-    }
-    commands.iter().any(|command| {
-        command.name.len() >= name.len()
-            && command.name.is_char_boundary(name.len())
-            && command.name[..name.len()].eq_ignore_ascii_case(name)
-    })
 }
 
 /// The command a name was probably meant to be.
@@ -342,7 +355,7 @@ fn builtins() -> Vec<Command> {
         Command::new(
             "switch",
             [Arg::new("tab")],
-            Origin::Workspace,
+            Origin::Tabs,
             "Go to a tab, opening a session if that slot is empty",
             |args, py: &mut Pyonji, _: &mut Window, cx: &mut Context<Pyonji>| {
                 if let Some(tab) = tab_index(args.first())
@@ -355,7 +368,7 @@ fn builtins() -> Vec<Command> {
         Command::new(
             "next-tab",
             [],
-            Origin::Workspace,
+            Origin::Tabs,
             "Go to the next tab",
             |_, py: &mut Pyonji, _: &mut Window, cx: &mut Context<Pyonji>| {
                 py.next_tab(cx);
@@ -364,31 +377,16 @@ fn builtins() -> Vec<Command> {
         Command::new(
             "prev-tab",
             [],
-            Origin::Workspace,
+            Origin::Tabs,
             "Go to the previous tab",
             |_, py: &mut Pyonji, _: &mut Window, cx: &mut Context<Pyonji>| {
                 py.prev_tab(cx);
             },
         ),
         Command::new(
-            "close",
-            [Arg::new("session")],
-            Origin::Workspace,
-            "Close a session (the focused one if none is named)",
-            |args, py: &mut Pyonji, _: &mut Window, cx: &mut Context<Pyonji>| {
-                let Some(id) = session_id(args.first()).or_else(|| py.active_session()) else {
-                    return;
-                };
-                if let Some(session) = py.session_manager.session_mut(id) {
-                    session.pty.kill();
-                }
-                py.close_session(id, cx);
-            },
-        ),
-        Command::new(
             "move-to",
             [Arg::new("tab")],
-            Origin::Workspace,
+            Origin::Tabs,
             "Move the focused session into another tab",
             |args, py, _, cx| {
                 let (Some(tab), Some(session)) = (tab_index(args.first()), py.active_session())
@@ -401,7 +399,7 @@ fn builtins() -> Vec<Command> {
         Command::new(
             "split-h",
             [],
-            Origin::Workspace,
+            Origin::Panes,
             "Split the tab into panes side by side",
             |_, py, _, cx| {
                 py.split_active(crate::terminal::SplitDirection::Vertical, cx)
@@ -411,7 +409,7 @@ fn builtins() -> Vec<Command> {
         Command::new(
             "split-v",
             [],
-            Origin::Workspace,
+            Origin::Panes,
             "Split the tab into panes stacked",
             |_, py, _, cx| {
                 py.split_active(crate::terminal::SplitDirection::Horizontal, cx)
@@ -421,7 +419,7 @@ fn builtins() -> Vec<Command> {
         Command::new(
             "focus-next-pane",
             [],
-            Origin::Workspace,
+            Origin::Panes,
             "Move the focus to the next pane",
             |_, py: &mut Pyonji, _: &mut Window, cx: &mut Context<Pyonji>| {
                 let Some(current) = py.current_tab else {
@@ -432,21 +430,36 @@ fn builtins() -> Vec<Command> {
             },
         ),
         Command::new(
-            "detach",
+            "open-in",
             [],
-            Origin::Workspace,
-            "Hide the focused session without closing it",
-            |_, py, _, cx| {
-                let Some(session) = py.active_session() else {
-                    return;
-                };
-                py.detach_session(session, cx);
+            Origin::Sessions,
+            "Open a file or a directory in a new session",
+            |_, py: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>| {
+                open(OverlayScreen::Opener, py, window, cx);
+            },
+        ),
+        Command::new(
+            "sessions",
+            [],
+            Origin::Sessions,
+            "Attach a detached session or switch to a running session",
+            |_, py: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>| {
+                open(OverlayScreen::Sessions, py, window, cx);
+            },
+        ),
+        Command::new(
+            "detached",
+            [],
+            Origin::Sessions,
+            "Attach a detached session to a tab",
+            |_, py: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>| {
+                open(OverlayScreen::Detached, py, window, cx);
             },
         ),
         Command::new(
             "rename",
             [Arg::new("name")],
-            Origin::Workspace,
+            Origin::Sessions,
             "Rename the focused session",
             |args, py: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>| {
                 // Without a name, edit the current one in the status bar.
@@ -465,9 +478,36 @@ fn builtins() -> Vec<Command> {
             },
         ),
         Command::new(
+            "detach",
+            [],
+            Origin::Sessions,
+            "Hide the focused session without closing it",
+            |_, py, _, cx| {
+                let Some(session) = py.active_session() else {
+                    return;
+                };
+                py.detach_session(session, cx);
+            },
+        ),
+        Command::new(
+            "close",
+            [Arg::new("session")],
+            Origin::Sessions,
+            "Close a session (the focused one if none is named)",
+            |args, py: &mut Pyonji, _: &mut Window, cx: &mut Context<Pyonji>| {
+                let Some(id) = session_id(args.first()).or_else(|| py.active_session()) else {
+                    return;
+                };
+                if let Some(session) = py.session_manager.session_mut(id) {
+                    session.pty.kill();
+                }
+                py.close_session(id, cx);
+            },
+        ),
+        Command::new(
             "ssh",
             [Arg::new("session")],
-            Origin::Workspace,
+            Origin::Sessions,
             "Open an SSH session by the name in the config",
             |args, py: &mut Pyonji, _: &mut Window, cx: &mut Context<Pyonji>| {
                 let Some(name) = args.first() else {
@@ -485,45 +525,9 @@ fn builtins() -> Vec<Command> {
             },
         ),
         Command::new(
-            "open-in",
-            [],
-            Origin::Workspace,
-            "Open a file or a directory in a new session",
-            |_, py: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>| {
-                open(OverlayScreen::Opener, py, window, cx);
-            },
-        ),
-        Command::new(
-            "sessions",
-            [],
-            Origin::Workspace,
-            "Attach a detached session or switch to a running session",
-            |_, py: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>| {
-                open(OverlayScreen::Sessions, py, window, cx);
-            },
-        ),
-        Command::new(
-            "detached",
-            [],
-            Origin::Workspace,
-            "Attach a detached session to a tab",
-            |_, py: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>| {
-                open(OverlayScreen::Detached, py, window, cx);
-            },
-        ),
-        Command::new(
-            "releases",
-            [],
-            Origin::Workspace,
-            "Check for a newer Pyonji build",
-            |_, py: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>| {
-                open(OverlayScreen::Releases, py, window, cx);
-            },
-        ),
-        Command::new(
             "commands",
             [],
-            Origin::Workspace,
+            Origin::App,
             "Open the command palette",
             |_, py: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>| {
                 open(OverlayScreen::Palette, py, window, cx);
@@ -532,7 +536,7 @@ fn builtins() -> Vec<Command> {
         Command::new(
             "lua",
             [],
-            Origin::Workspace,
+            Origin::App,
             "Run a line of Lua in the status bar",
             |_, py: &mut Pyonji, _: &mut Window, cx: &mut Context<Pyonji>| {
                 py.status_bar
@@ -542,10 +546,19 @@ fn builtins() -> Vec<Command> {
         Command::new(
             "reload-config",
             [],
-            Origin::Workspace,
+            Origin::App,
             "Read init.lua from disk again",
             |_, py: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>| {
                 config::load(py, window, cx).log();
+            },
+        ),
+        Command::new(
+            "releases",
+            [],
+            Origin::App,
+            "Check for a newer Pyonji build",
+            |_, py: &mut Pyonji, window: &mut Window, cx: &mut Context<Pyonji>| {
+                open(OverlayScreen::Releases, py, window, cx);
             },
         ),
     ]
@@ -625,21 +638,21 @@ mod tests {
             Command::new(
                 "switch",
                 [Arg::new("tab")],
-                Origin::Workspace,
+                Origin::Tabs,
                 "Go to a tab",
                 |_, _, _, _| {},
             ),
             Command::new(
                 "sessions",
                 [],
-                Origin::Workspace,
+                Origin::Sessions,
                 "Pick a running session",
                 |_, _, _, _| {},
             ),
             Command::new(
                 "ssh",
                 [Arg::new("session")],
-                Origin::Workspace,
+                Origin::Sessions,
                 "Open an SSH session",
                 |_, _, _, _| {},
             ),
@@ -738,25 +751,6 @@ mod tests {
     }
 
     #[test]
-    fn naming_is_stricter_than_the_filter() {
-        let commands = commands();
-        // Narrows the list by subsequence, but is not the start of a name.
-        assert_eq!(names(&commands, "swt"), ["switch"]);
-        assert!(!naming(&commands, "swt"));
-        // `swi` narrows the list too, but it *is* the start of `switch`.
-        assert_eq!(names(&commands, "swi"), ["switch"]);
-        assert!(naming(&commands, "swi"));
-        // Named, or on the way to it.
-        assert!(naming(&commands, "sw"));
-        assert!(naming(&commands, "switch"));
-        assert!(naming(&commands, "switch 2"));
-        assert!(naming(&commands, "SSH: server"));
-        // Nothing starts this way.
-        assert!(!naming(&commands, "zzz"));
-        assert!(!naming(&commands, ""));
-    }
-
-    #[test]
     fn nothing_matches_a_nonsense_query() {
         let commands = commands();
         assert!(filter(&commands, "qqqqqq").is_empty());
@@ -803,12 +797,6 @@ mod tests {
         );
         // Nothing left to add.
         assert_eq!(completion(&commands, "switch", 0), None);
-    }
-
-    #[test]
-    fn usage_reads_like_a_command_line() {
-        assert_eq!(commands()[0].usage(), "switch <tab>");
-        assert_eq!(commands()[1].usage(), "sessions");
     }
 
     #[test]

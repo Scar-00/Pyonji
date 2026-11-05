@@ -171,9 +171,16 @@ impl Overlay {
         };
         let size = window.viewport_size();
         let inset = px(64.);
+        let height = height.min((size.height - inset.min(size.height * 0.1)).max(px(0.)));
+        // The opener's list is cut to whole rows, so the last one never
+        // shows as a sliver above the footer.
+        let height = match screen {
+            OverlayScreen::Opener => opener::snap_height(height),
+            _ => height,
+        };
         (
             Some(width.min((size.width - inset.min(size.width * 0.1)).max(px(0.)))),
-            Some(height.min((size.height - inset.min(size.height * 0.1)).max(px(0.)))),
+            Some(height),
         )
     }
 

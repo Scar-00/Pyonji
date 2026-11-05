@@ -20,8 +20,8 @@ use crate::{
     ui::{
         PyTheme as _,
         components::{
-            EmptyState, PyInteractive as _, PyStyled as _, SearchField, editable_combo_box,
-            footer_status, hint, panel_footer, panel_header,
+            EmptyState, PyInteractive as _, PyStyled as _, SearchField, counter,
+            editable_combo_box, footer_status, hint, panel_footer, panel_header, rule,
         },
     },
 };
@@ -308,76 +308,6 @@ impl FileOpener {
 
     // ----------------------------------------------------------------- render
 
-    /// The directory as a row of places to jump back to. A drive or share
-    /// prefix and the root after it are one place, `C:\`, not two.
-    fn crumbs(&self) -> Vec<(String, PathBuf)> {
-        use std::path::Component;
-        let mut acc = PathBuf::new();
-        let mut parts: Vec<(String, PathBuf)> = Vec::new();
-        for component in self.cwd.components() {
-            acc.push(component);
-            match component {
-                Component::RootDir if parts.len() == 1 => {
-                    let (label, path) = &mut parts[0];
-                    label.push(std::path::MAIN_SEPARATOR);
-                    *path = acc.clone();
-                }
-                Component::RootDir => {
-                    parts.push((std::path::MAIN_SEPARATOR.to_string(), acc.clone()))
-                }
-                other => parts.push((other.as_os_str().to_string_lossy().to_string(), acc.clone())),
-            }
-        }
-        parts
-    }
-
-    fn render_breadcrumb(&self, cx: &Context<Self>) -> impl IntoElement {
-        let t = cx.theme();
-        let parts = self.crumbs();
-        let last = parts.len().saturating_sub(1);
-
-        h_flex()
-            .flex_1()
-            .min_w_0()
-            .items_center()
-            .flex_wrap()
-            .gap_0p5()
-            .mono(cx)
-            .text_size(px(12.))
-            .text_color(t.text_muted)
-            .children({
-                parts
-                    .into_iter()
-                    .enumerate()
-                    .flat_map(|(i, (label, path))| {
-                        // The root crumb ends in its own separator; every later crumb
-                        // after the second needs one drawn in front of it.
-                        let sep = (i > 1).then(|| {
-                            div()
-                                .text_color(t.text_disabled)
-                                .child(std::path::MAIN_SEPARATOR.to_string())
-                        });
-                        let crumb = div()
-                            .id(("crumb", i))
-                            .role(gpui::accesskit::Role::Button)
-                            .tab_index(0)
-                            .focus_visible(|style| style.text_color(t.accent))
-                            .aria_label(format!("Go to {}", path.display()))
-                            .px_1()
-                            .cursor_pointer()
-                            .when(i == last, |crumb| crumb.text_color(t.text))
-                            .hover(|s| s.bg(t.hovered).text_color(t.text))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.set_input_path(&path, window, cx);
-                            }))
-                            .child(label);
-                        sep.into_iter()
-                            .map(IntoElement::into_any_element)
-                            .chain(std::iter::once(crumb.into_any_element()))
-                    })
-            })
-    }
-
     fn render_hidden_toggle(&self, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.theme();
         h_flex()
@@ -409,18 +339,27 @@ impl FileOpener {
                     this.toggle_hidden(cx);
                 }
             }))
-            // A square that fills, the same mark the release rail uses for the
-            // running build: on or off, nothing in between.
+            // A box big enough to read as one, ticked when on.
             .child(
-                div()
-                    .size(px(7.))
+                h_flex()
+                    .size(px(13.))
+                    .flex_shrink_0()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(3.))
                     .border_1()
                     .border_color(if self.show_hidden {
                         t.accent
                     } else {
                         t.text_muted
                     })
-                    .when(self.show_hidden, |mark| mark.bg(t.accent)),
+                    .when(self.show_hidden, |mark| {
+                        mark.bg(t.accent).child(
+                            Icon::new(IconName::Check)
+                                .size(px(10.))
+                                .text_color(t.background),
+                        )
+                    }),
             )
             .child("Hidden files")
     }
@@ -526,7 +465,9 @@ impl FileOpener {
                 } else {
                     row.child(
                         div()
-                            .text_xs()
+                            .flex_shrink_0()
+                            .mono(cx)
+                            .text_size(px(11.))
                             .text_color(t.text_muted)
                             .child(human_size(e.size)),
                     )
@@ -557,9 +498,11 @@ impl FileOpener {
             let (_, fragment) = self.parse_input(cx);
             return if entries.is_empty() || fragment.is_empty() {
                 EmptyState::new("This directory is empty.")
+                    .nothing(gpui_component::IconName::FolderOpen, cx)
                     .detail("Press ⏎ to open a session here.")
             } else {
                 EmptyState::new(format!("Nothing here matches \u{201c}{fragment}\u{201d}."))
+                    .nothing(gpui_component::IconName::Search, cx)
                     .detail("Keep typing a path, or press ⏎ to open it if it exists.")
             }
             .into_any_element();
@@ -602,31 +545,72 @@ impl FileOpener {
     }
 
     fn render_footer(&self, cx: &Context<Self>) -> impl IntoElement {
-        let count = self.visible(cx).len();
-        // Enter browses into a selected directory; with nothing selected it
-        // opens the directory on the line. Say which, before it happens.
-        let enter = match self.selected_entry() {
-            Some(entry) if entry.is_dir => "browse",
-            Some(_) => "open file",
-            None => "open here",
+        // Enter browses into a selected directory, opens a selected file, and
+        // with nothing selected opens the directory on the line. The button
+        // is that same press, named for what it will do, as in Releases.
+        let selected = self.selected_entry();
+        let enter = match selected {
+            Some(entry) if entry.is_dir => "⏎ Browse",
+            Some(_) => "⏎ Open file",
+            None => "⏎ Open here",
+        };
+        // The path the press acts on, home written as `~`. With nothing
+        // selected the field above already shows it, so say what happens.
+        let target = match selected {
+            Some(entry) => {
+                let mut path = tilde(&entry.path);
+                if entry.is_dir {
+                    path.push(std::path::MAIN_SEPARATOR);
+                }
+                path
+            }
+            None => format!("Opens a session in {}", tilde(&self.cwd)),
         };
         panel_footer(cx)
             .child(footer_status(
-                format!("{count} item{}", if count == 1 { "" } else { "s" }),
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .when_some(selected, |this, entry| {
+                        this.child(if entry.is_dir { "Browse" } else { "Open" })
+                    })
+                    .child(
+                        div()
+                            .truncate()
+                            .when(selected.is_some(), |this| this.mono(cx))
+                            .child(target),
+                    ),
                 cx.theme().text_muted,
             ))
-            .child(hint("↑↓", "choose", cx))
-            .child(hint("⏎", enter, cx))
+            .when(self.visible(cx).len() > 1, |this| {
+                this.child(hint("↑↓", "choose", cx))
+            })
             .child(hint("alt ↑", "parent", cx))
             .child(hint("esc", "close", cx))
+            // With a row selected, enter no longer opens the directory
+            // itself; keep that one click away.
+            .when(selected.is_some(), |this| {
+                this.child(
+                    Button::new("open-directory")
+                        .outline()
+                        .small()
+                        .text_size(px(12.))
+                        .rounded(ButtonRounded::Small)
+                        .label(format!("Session in {}", tilde(&self.cwd)))
+                        .tooltip(format!("Start a session in {}", self.cwd.display()))
+                        .on_click(cx.listener(|this, _, _, cx| this.open_directory(cx))),
+                )
+            })
             .child(
-                Button::new("open-directory")
+                Button::new("open-enter")
                     .primary()
                     .small()
-                    .rounded(ButtonRounded::None)
-                    .label("Open here")
-                    .tooltip("Start a session in this directory")
-                    .on_click(cx.listener(|this, _, _, cx| this.open_directory(cx))),
+                    .text_size(px(12.))
+                    .rounded(ButtonRounded::Small)
+                    .label(enter)
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.on_submit(&Submit, window, cx)),
+                    ),
             )
     }
 }
@@ -640,6 +624,13 @@ impl Focusable for FileOpener {
 
 impl Render for FileOpener {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let shown = self.visible(cx).len();
+        let total = self.listing.entries.as_ref().map_or(0, |entries| {
+            entries
+                .iter()
+                .filter(|entry| self.show_hidden || !entry.name.starts_with('.'))
+                .count()
+        });
         div()
             .id("file-opener")
             .key_context(CONTEXT)
@@ -671,8 +662,19 @@ impl Render for FileOpener {
                             h_flex()
                                 .items_center()
                                 .gap_3()
-                                .child(self.render_breadcrumb(cx))
-                                .child(self.render_hidden_toggle(cx)),
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(16.))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(cx.theme().text)
+                                        .child("Open in a new session"),
+                                )
+                                .child(self.render_hidden_toggle(cx))
+                                .child(rule(cx))
+                                .child(counter(shown, total, "item", cx)),
                         )
                         .child(self.render_input(cx)),
                 )
@@ -683,6 +685,18 @@ impl Render for FileOpener {
 }
 
 // ------------------------------------------------------------------ helpers
+
+/// Everything in the dialog but its list: header, footer, the list's own
+/// padding, and the dialog's padding and border.
+const CHROME_HEIGHT: f32 = 143.0;
+
+/// The tallest dialog under `cap` whose list holds a whole number of rows.
+pub(super) fn snap_height(cap: gpui::Pixels) -> gpui::Pixels {
+    let rows = ((f32::from(cap) - CHROME_HEIGHT) / ROW_HEIGHT)
+        .floor()
+        .max(1.0);
+    px(CHROME_HEIGHT + rows * ROW_HEIGHT)
+}
 
 fn split_path_input(
     raw: &str,
@@ -744,8 +758,21 @@ fn read_dir_sorted(dir: &Path) -> io::Result<Vec<Entry>> {
     Ok(out)
 }
 
+/// `path` with the home directory written as `~`.
+fn tilde(path: &Path) -> String {
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rest) = path.strip_prefix(&home)
+    {
+        if rest.as_os_str().is_empty() {
+            return "~".to_string();
+        }
+        return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display());
+    }
+    path.display().to_string()
+}
+
 fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut v = bytes as f64;
     let mut i = 0;
     while v >= 1024.0 && i < UNITS.len() - 1 {
@@ -755,7 +782,7 @@ fn human_size(bytes: u64) -> String {
     if i == 0 {
         format!("{bytes} B")
     } else {
-        format!("{v:.1}{}", UNITS[i])
+        format!("{v:.1} {}", UNITS[i])
     }
 }
 
